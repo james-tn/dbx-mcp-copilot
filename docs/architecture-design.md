@@ -79,9 +79,9 @@ graph TB
     Unity --> DomainB
     DBSQL -->|Filtered results| Expert1
     DBSQL -->|Filtered results| Expert2
-    Expert1 -->|Summarized answer| Copilot
-    Expert2 -->|Summarized answer| Copilot
-    Copilot -->|NL answer| User
+    Expert1 -->|Raw query results| Copilot
+    Expert2 -->|Raw query results| Copilot
+    Copilot -->|Formats NL answer| User
 
     style User fill:#4A90D9,color:#fff
     style Copilot fill:#6C5CE7,color:#fff
@@ -120,8 +120,8 @@ sequenceDiagram
     Note over DBSQL: Unity Catalog enforces RLS and CLS per user
 
     DBSQL-->>MCP: Query results (security-filtered)
-    MCP-->>Copilot: Formatted response
-    Copilot-->>User: Natural language answer
+    MCP-->>Copilot: Raw query results
+    Copilot-->>User: Formats and presents NL answer
 ```
 
 ### 4.1 Authentication Details
@@ -197,9 +197,7 @@ flowchart TD
     SQL --> Validate["SQL Validation and Guardrails"]
     Validate -->|Safe SELECT only| Execute["Execute via databricks-sql-connector"]
     Validate -->|Unsafe DDL/DML| Reject["Reject Query"]
-    Execute --> Results["Raw Results"]
-    Results --> Summarize["LLM Summarization and Formatting"]
-    Summarize --> Output["NL Response + Data Table"]
+    Execute --> Output["Raw Results returned to Copilot"]
 
     style Input fill:#74B9FF,color:#000
     style Agent fill:#A29BFE,color:#fff
@@ -216,7 +214,7 @@ flowchart TD
 | **One tool per domain** | Copilot selects the correct expert tool based on tool name and description — no routing logic in MCP server; avoids a monolithic agent overloaded with all schemas |
 | **Context baked into agent system prompt** | Schema + metric definitions are static per deployment; loaded from config files at startup |
 | **SQL-only (SELECT) guardrails** | The agent must never generate DDL/DML; a regex + AST validation layer enforces this |
-| **LLM summarizes results** | Raw tabular data is sent back through the LLM to produce a human-readable answer |
+| **Copilot formats results** | Expert tools return raw query results to Copilot, which uses its own LLM to produce a human-readable answer for the user |
 | **Token pass-through, not impersonation** | The user's own Entra ID token hits Databricks, so all audit trails and security policies apply to the actual user |
 
 ---
@@ -321,7 +319,7 @@ graph TB
 | **Copilot** | Microsoft 365 Copilot (Declarative Agent) | User-facing natural language interface |
 | **Identity Provider** | Microsoft Entra ID | OAuth2/OIDC authentication, token issuance |
 | **MCP Server** | FastMCP (Python) | Hosts domain expert tools (Copilot selects which tool to call) |
-| **LLM Engine** | Azure OpenAI (GPT-4o / GPT-4.1) | SQL generation & response summarization |
+| **LLM Engine** | Azure OpenAI (GPT-4o / GPT-4.1) | SQL generation within domain expert tools |
 | **Data Connector** | `databricks-sql-connector` (Python) | Token pass-through SQL execution |
 | **Data Platform** | Databricks SQL Warehouse (Serverless) | Query execution engine |
 | **Data Governance** | Databricks Unity Catalog | RLS, CLS, audit, lineage |
@@ -345,9 +343,8 @@ graph TB
 | 8 | **Guardrail Layer** | Validates query is read-only SELECT |
 | 9 | **databricks-sql-connector** | Executes query on SQL Warehouse with user's token |
 | 10 | **Databricks / Unity Catalog** | Applies RLS/CLS, returns filtered results |
-| 11 | **Domain Expert Tool** | Sends results back to LLM for summarization |
-| 12 | **Domain Expert Tool** | Returns: *"business for product X in Q3 was $12.4M across 3 regions..."* |
-| 13 | **Copilot** | Presents answer to user with optional data table |
+| 11 | **Domain Expert Tool** | Returns raw query results to Copilot |
+| 12 | **Copilot** | Formats and presents NL answer to user with optional data table |
 
 ---
 
@@ -361,7 +358,7 @@ graph TB
 | **Network** | MCP server → Databricks via Azure Private Link; no public internet exposure |
 | **Secrets** | Warehouse hostnames and HTTP paths in Key Vault; tokens are transient and never persisted |
 | **Audit** | All queries logged in Databricks query history under the actual user identity; MCP request tracing via Application Insights |
-| **Data Exfiltration** | LLM summarization returns answers, not raw bulk data; result-set size limits enforced |
+| **Data Exfiltration** | Result-set size limits enforced in expert tools; Copilot formats the final answer for the user |
 
 ---
 
