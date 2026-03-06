@@ -2,8 +2,8 @@
 
 ## Architecture Design Document
 
-**Version:** 1.0  
-**Date:** February 9, 2026  
+**Version:** 1.1  
+**Date:** March 5, 2026  
 **Status:** Draft
 
 ---
@@ -20,7 +20,7 @@ This document describes the architecture for an **Intelligent MCP (Model Context
 |---|---|
 | **Separation of Concerns** | Copilot handles conversation UX and tool routing; MCP server owns data domain intelligence |
 | **Domain Isolation** | Each data domain has its own expert agent (tool) with scoped context |
-| **Identity Pass-Through** | User identity flows end-to-end via OAuth2; no service-account data access |
+| **Broker-Mediated Identity** | User identity is validated and exchanged via OAuth2 OBO in a shared Auth Broker |
 | **Security at Source** | Row-level and column-level security enforced by Databricks, not the MCP server |
 | **Minimal Copilot Context** | Copilot only knows tool names and descriptions, not schemas or business logic |
 
@@ -34,6 +34,10 @@ graph TB
         User([End User])
         Copilot["Microsoft Copilot - Declarative Agent"]
         EntraID["Microsoft Entra ID - OAuth2 / OIDC Provider"]
+    end
+
+    subgraph Identity_Layer["Shared Identity Layer"]
+        Broker["Auth Broker - OBO + Policy"]
     end
 
     subgraph MCP_Server["MCP Server - FastMCP Python"]
@@ -72,6 +76,11 @@ graph TB
     Expert2 -->|Load context| Schema2
     Expert1 -->|Generate SQL| LLM
     Expert2 -->|Generate SQL| LLM
+    Expert1 -->|Request token| Broker
+    Expert2 -->|Request token| Broker
+    Broker -->|OBO token exchange| EntraID
+    Broker -->|Databricks token| Expert1
+    Broker -->|Databricks token| Expert2
     Expert1 -->|Execute query| DBSQL
     Expert2 -->|Execute query| DBSQL
     DBSQL --> Unity
@@ -89,6 +98,7 @@ graph TB
     style Expert1 fill:#FDCB6E,color:#000
     style Expert2 fill:#FDCB6E,color:#000
     style ExpertN fill:#FDCB6E,color:#000
+    style Broker fill:#E17055,color:#fff
     style LLM fill:#A29BFE,color:#fff
     style DBSQL fill:#FF7675,color:#fff
     style Unity fill:#55A3E8,color:#fff
@@ -104,18 +114,23 @@ sequenceDiagram
     participant Copilot as Microsoft Copilot
     participant Entra as Microsoft Entra ID
     participant MCP as MCP Server - Domain Expert Tool
+    participant Broker as Auth Broker
     participant DBSQL as Databricks SQL Warehouse
 
     User->>Copilot: Ask business question
     Copilot->>Copilot: Select matching domain expert tool
-    Copilot->>Entra: Request OAuth2 token (scope: Databricks)
-    Entra-->>Copilot: Access Token (JWT) with user identity
+    Copilot->>Entra: Request OAuth2 token for MCP Broker API scope
+    Entra-->>Copilot: Access token JWT aud MCP Broker API
 
     Note over Copilot,MCP: Copilot routes to the correct tool based on tool description
 
     Copilot->>MCP: Call domain expert tool + Bearer token
-    MCP->>MCP: Validate token, extract user claims
-    MCP->>DBSQL: SQL query via databricks-sql-connector (token pass-through)
+    MCP->>Broker: Request Databricks token (user assertion + service identity)
+    Broker->>Broker: Validate token, extract user claims
+    Broker->>Entra: OBO exchange to Databricks audience
+    Entra-->>Broker: Databricks access token
+    Broker-->>MCP: Short-lived Databricks token
+    MCP->>DBSQL: SQL query via databricks-sql-connector
     
     Note over DBSQL: Unity Catalog enforces RLS and CLS per user
 
@@ -129,26 +144,28 @@ sequenceDiagram
 | Hop | Mechanism | Details |
 |---|---|---|
 | **User → Copilot** | Microsoft Entra ID SSO | Standard M365 authentication |
-| **Copilot → MCP Server** | OAuth2 Bearer Token | Copilot sends Entra ID access token in `Authorization` header. The MCP plugin manifest declares OAuth2 auth with Databricks resource scope (`2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default` for Azure Databricks) |
-| **MCP Server → Databricks** | OAuth2 Token Pass-Through | The `databricks-sql-connector` Python SDK accepts an Entra ID access token via `access_token` parameter — no service principal needed |
+| **Copilot → MCP Server** | OAuth2 Bearer Token | Copilot sends Entra ID access token in `Authorization` header with MCP/Broker API scope |
+| **MCP Server → Auth Broker** | User Assertion + Service Identity | MCP forwards user assertion and calls broker with authenticated service identity |
+| **Auth Broker → Entra ID** | OAuth2 OBO Exchange | Broker exchanges assertion for Databricks audience token (`2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default`) |
+| **MCP Server → Databricks** | Broker-Issued Token | MCP passes short-lived Databricks token to connector via `access_token` |
 | **Databricks → Data** | Unity Catalog RLS/CLS | Databricks maps the Entra ID identity to row-level and column-level security policies already configured in Unity Catalog |
 
 ### 4.2 Databricks SQL Connector
 
 The official **`databricks-sql-connector`** Python package is the recommended connector. It supports:
 
-- **OAuth2 token pass-through** — accepts an Entra ID (Azure AD) access token directly
+- **OAuth2 access token authentication** — accepts broker-issued Databricks audience token
 - **Unity Catalog integration** — respects all governance policies
 - **SQL Warehouse endpoints** — connects to serverless or classic SQL warehouses
 
 ```python
-# Example: token pass-through connection
+# Example: broker-issued token connection
 from databricks import sql
 
 connection = sql.connect(
     server_hostname="<workspace>.azuredatabricks.net",
     http_path="/sql/1.0/warehouses/<warehouse_id>",
-    access_token=user_entra_token,  # passed through from Copilot
+    access_token=broker_issued_databricks_token,
 )
 ```
 
@@ -215,7 +232,7 @@ flowchart TD
 | **Context baked into agent system prompt** | Schema + metric definitions are static per deployment; loaded from config files at startup |
 | **SQL-only (SELECT) guardrails** | The agent must never generate DDL/DML; a regex + AST validation layer enforces this |
 | **Copilot formats results** | Expert tools return raw query results to Copilot, which uses its own LLM to produce a human-readable answer for the user |
-| **Token pass-through, not impersonation** | The user's own Entra ID token hits Databricks, so all audit trails and security policies apply to the actual user |
+| **Shared Auth Broker OBO** | Broker centralizes token validation and OBO exchange; MCP services stay focused on domain logic |
 
 ---
 
@@ -226,7 +243,7 @@ flowchart TD
 Microsoft Copilot supports registering MCP servers as plugins. The registration includes:
 
 1. **Plugin Manifest** — Declares available tools, their descriptions, and authentication config
-2. **OAuth2 Configuration** — Specifies Entra ID as the identity provider with the Databricks resource scope
+2. **OAuth2 Configuration** — Specifies Entra ID as the identity provider with MCP/Broker API scope
 3. **Server Endpoint** — The HTTPS URL of the FastMCP server (deployed as an Azure Container App or Azure App Service)
 
 ```jsonc
@@ -239,7 +256,7 @@ Microsoft Copilot supports registering MCP servers as plugins. The registration 
     "type": "oauth2",
     "authorization_url": "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize",
     "token_url": "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
-    "scopes": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default",
+    "scopes": "api://<mcp-or-broker-app-id>/access_as_user",
     "client_id": "<app-registration-client-id>"
   },
   "mcp": {
@@ -252,10 +269,11 @@ Microsoft Copilot supports registering MCP servers as plugins. The registration 
 
 | Setting | Value |
 |---|---|
-| **Application type** | Web |
+| **Copilot client app** | Requests `api://<mcp-or-broker-app-id>/access_as_user` |
+| **MCP/Broker API app** | Exposes delegated scope `access_as_user` |
+| **Auth Broker app** | Confidential client with delegated permission `Azure Databricks` → `user_impersonation` |
 | **Redirect URI** | Copilot's OAuth callback URL |
-| **API permissions** | `Azure Databricks` → `user_impersonation` |
-| **Token configuration** | Access token audience = `2ff814a6-3304-4ab8-85cb-cd0e6f879c1d` (Azure Databricks resource ID) |
+| **OBO target scope** | `2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default` |
 
 ---
 
@@ -271,10 +289,11 @@ graph TB
         
         subgraph Compute
             ACA["Azure Container Apps - FastMCP Server"]
+            BrokerSvc["Azure Container Apps - Auth Broker"]
         end
         
         subgraph AI_Services["AI Services"]
-            AOAI["Azure OpenAI GPT-4o"]
+            AOAI["Azure OpenAI gpt-5.2"]
         end
         
         subgraph Configuration
@@ -293,9 +312,13 @@ graph TB
     end
 
     ACA --> AOAI
+    ACA --> BrokerSvc
     ACA --> KV
     ACA --> AppConfig
     ACA --> AppIns
+    BrokerSvc --> KV
+    BrokerSvc --> AppIns
+    BrokerSvc --> EntraOIDC["Entra ID Token Endpoint"]
     ACA -->|Private Link| PE
     PE -->|Private connectivity| DBSQL
     DBSQL --> UC
@@ -303,6 +326,7 @@ graph TB
     VNET --- ACA
 
     style ACA fill:#E17055,color:#fff
+    style BrokerSvc fill:#D35400,color:#fff
     style AOAI fill:#A29BFE,color:#fff
     style DBSQL fill:#FF7675,color:#fff
     style UC fill:#55A3E8,color:#fff
@@ -319,12 +343,13 @@ graph TB
 | **Copilot** | Microsoft 365 Copilot (Declarative Agent) | User-facing natural language interface |
 | **Identity Provider** | Microsoft Entra ID | OAuth2/OIDC authentication, token issuance |
 | **MCP Server** | FastMCP (Python) | Hosts domain expert tools (Copilot selects which tool to call) |
-| **LLM Engine** | Azure OpenAI (GPT-4o / GPT-4.1) | SQL generation within domain expert tools |
-| **Data Connector** | `databricks-sql-connector` (Python) | Token pass-through SQL execution |
+| **Auth Broker** | Azure Container Apps/App Service (Python/Node/.NET) | Token validation, OBO exchange, and token policy |
+| **LLM Engine** | Azure OpenAI (gpt-5.2 / GPT-4.1) | SQL generation within domain expert tools |
+| **Data Connector** | `databricks-sql-connector` (Python) | SQL execution with broker-issued Databricks tokens |
 | **Data Platform** | Databricks SQL Warehouse (Serverless) | Query execution engine |
 | **Data Governance** | Databricks Unity Catalog | RLS, CLS, audit, lineage |
 | **Hosting** | Azure Container Apps | Scalable, serverless MCP server hosting |
-| **Secrets** | Azure Key Vault | Store non-token config (warehouse paths, etc.) |
+| **Secrets** | Azure Key Vault | Store broker credentials and sensitive runtime configuration |
 | **Observability** | Application Insights | Request tracing, latency, error monitoring |
 
 ---
@@ -335,16 +360,17 @@ graph TB
 |---:|---|---|
 | 1 | **User** | Asks: *"What is the business for product X in Q3?"* |
 | 2 | **Copilot** | Selects the matching domain expert tool based on tool description |
-| 3 | **Copilot** | Acquires Entra ID token (Databricks audience) via OAuth2 |
+| 3 | **Copilot** | Acquires Entra ID token (MCP/Broker API audience) via OAuth2 |
 | 4 | **Copilot** | Calls MCP tool: `ask_domain_1(question=..., token=...)` |
-| 5 | **Domain Expert Tool** | Validates token, extracts user identity |
-| 6 | **Domain Expert Tool** | Loads domain schema context, sends to Azure OpenAI |
-| 7 | **Azure OpenAI** | Generates: `SELECT SUM(business) FROM domain1.sales WHERE product='X' AND quarter='Q3'` |
-| 8 | **Guardrail Layer** | Validates query is read-only SELECT |
-| 9 | **databricks-sql-connector** | Executes query on SQL Warehouse with user's token |
-| 10 | **Databricks / Unity Catalog** | Applies RLS/CLS, returns filtered results |
-| 11 | **Domain Expert Tool** | Returns raw query results to Copilot |
-| 12 | **Copilot** | Formats and presents NL answer to user with optional data table |
+| 5 | **Domain Expert Tool** | Loads domain schema context, sends to Azure OpenAI |
+| 6 | **Azure OpenAI** | Generates: `SELECT SUM(business) FROM domain1.sales WHERE product='X' AND quarter='Q3'` |
+| 7 | **Guardrail Layer** | Validates query is read-only SELECT |
+| 8 | **Domain Expert Tool** | Requests Databricks token from Auth Broker |
+| 9 | **Auth Broker** | Validates token and performs OBO exchange |
+| 10 | **databricks-sql-connector** | Executes query on SQL Warehouse with broker-issued token |
+| 11 | **Databricks / Unity Catalog** | Applies RLS/CLS, returns filtered results |
+| 12 | **Domain Expert Tool** | Returns raw query results to Copilot |
+| 13 | **Copilot** | Formats and presents NL answer to user with optional data table |
 
 ---
 
@@ -352,11 +378,12 @@ graph TB
 
 | Area | Control |
 |---|---|
-| **Authentication** | OAuth2 token pass-through; no stored credentials for data access |
+| **Authentication** | OAuth2 token to MCP/Broker API and broker-managed OBO exchange |
 | **Authorization** | Enforced at Databricks via Unity Catalog RLS/CLS — MCP server does not implement its own authz |
+| **Broker Policy** | Operation-profile allowlists, tenant allowlists, and service identity controls |
 | **Query Safety** | SQL guardrails block DDL, DML, and system catalog queries |
 | **Network** | MCP server → Databricks via Azure Private Link; no public internet exposure |
-| **Secrets** | Warehouse hostnames and HTTP paths in Key Vault; tokens are transient and never persisted |
+| **Secrets** | Broker credentials and connection config in Key Vault; tokens are transient and never persisted |
 | **Audit** | All queries logged in Databricks query history under the actual user identity; MCP request tracing via Application Insights |
 | **Data Exfiltration** | Result-set size limits enforced in expert tools; Copilot formats the final answer for the user |
 
@@ -368,7 +395,8 @@ Adding a new data domain requires:
 
 1. **Define schema context** — Create a config file with table schemas, column descriptions, and business metric mappings
 2. **Register a new tool** — Add a `@mcp.tool()` function in the FastMCP server with a descriptive name and docstring
-3. **Deploy** — The new tool is automatically available to Copilot after the MCP server restarts
+3. **Configure broker policy** — Add operation profile and service allowlist entry in Auth Broker
+4. **Deploy** — The new tool is automatically available to Copilot after the MCP server restarts
 
 No changes to Copilot configuration are needed — Copilot dynamically discovers tools from the MCP server.
 
@@ -379,7 +407,14 @@ No changes to Copilot configuration are needed — Copilot dynamically discovers
 | Choice | Why |
 |---|---|
 | **FastMCP** | Lightweight Python MCP framework; simple `@mcp.tool()` decorator pattern; supports SSE and Streamable HTTP transports |
-| **databricks-sql-connector** | Official Databricks Python SDK; supports OAuth2 token pass-through natively; Unity Catalog aware |
+| **Auth Broker + OBO** | Centralized identity mediation and policy enforcement across MCP services |
+| **databricks-sql-connector** | Official Databricks Python SDK; supports access-token auth and Unity Catalog governance |
 | **Azure Container Apps** | Serverless scaling; built-in ingress with TLS; VNET integration for Private Link to Databricks |
 | **Azure OpenAI** | Enterprise-grade LLM; data residency compliance; managed token limits and content filtering |
 | **Domain-per-tool pattern** | Avoids context window overload; each agent has focused, high-quality schema context |
+
+---
+
+## 13. POC Variant (MVP)
+
+For the MVP implementation that removes APIM and includes concrete mock revenue data, regional access groups, and semantic-table examples, see [docs/poc-mvp-architecture-design.md](docs/poc-mvp-architecture-design.md).
