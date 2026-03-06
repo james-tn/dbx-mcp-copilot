@@ -70,19 +70,19 @@ graph TB
     end
 
     subgraph Channel[Channel Layer]
-        MCP[MCP Server\nAgent Tools & Routing]
+        MCP[MCP Server<br/>Agent Tools & Routing]
         Direct[Direct REST Consumers]
     end
 
     subgraph Platform[Broker Platform]
-        API[Broker API Surface\nSQL Jobs Serving Apps]
-        Auth[Identity & Token Service\nOBO + M2M]
-        Policy[Policy Decision Layer\nCaller User Action]
+        API[Broker API Surface<br/>SQL Jobs Serving Apps]
+        Auth[Identity & Token Service<br/>OBO + M2M]
+        Policy[Policy Decision Layer<br/>Caller User Action]
         Obs[Audit Telemetry Correlation]
     end
 
     subgraph DataAI[Databricks Capability Plane]
-        SQL[SQL Warehouses\nStatement API]
+        SQL[SQL Warehouses<br/>Statement API]
         Jobs[Jobs API]
         Serving[Model Serving API]
         Apps[Databricks Apps / Related APIs]
