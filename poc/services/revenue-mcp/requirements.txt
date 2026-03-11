@@ -4,4 +4,5 @@ uvicorn[standard]==0.35.0
 httpx==0.28.1
 databricks-sql-connector==3.4.0
 openai==2.25.0
+PyJWT==2.10.1
 pydantic-settings==2.10.1

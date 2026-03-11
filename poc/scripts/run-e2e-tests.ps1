@@ -36,7 +36,19 @@ if ([string]::IsNullOrWhiteSpace($UserToken)) {
         throw "BROKER_EXPECTED_AUDIENCE is required in $ConfigFile to auto-fetch user token."
     }
 
-    $scope = "$aud/access_as_user"
+    $brokerClientId = $env['BROKER_CLIENT_ID']
+    if (-not [string]::IsNullOrWhiteSpace($brokerClientId)) {
+        $scope = "api://$brokerClientId/user_impersonation"
+    }
+    else {
+        $scopeAudience = ($aud -split ',' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
+        if ([string]::IsNullOrWhiteSpace($scopeAudience)) {
+            throw "BROKER_EXPECTED_AUDIENCE must contain at least one valid audience value."
+        }
+
+        $scope = "$scopeAudience/access_as_user"
+    }
+
     $tokenResult = az account get-access-token --scope $scope | ConvertFrom-Json
     $UserToken = $tokenResult.accessToken
 }

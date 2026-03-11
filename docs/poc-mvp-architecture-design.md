@@ -51,15 +51,16 @@ graph TB
 
     Copilot -->|OAuth2 token for MCP/Broker audience| MCP["Revenue Intelligence MCP\n(FastMCP Python)"]
 
-    MCP -->|User token + service identity| Broker["Auth Broker\n(OBO + token policy)"]
+    MCP -->|User token + service identity + guarded SQL| Broker["Auth Broker\n(OBO + token policy + SQL execution)"]
     Broker -->|OBO token exchange| Entra["Microsoft Entra ID"]
     Entra -->|Databricks audience token| Broker
 
-    MCP -->|Databricks token from Broker| DBSQL["Databricks SQL Warehouse"]
+    Broker -->|Execute SQL with cached/refreshed Databricks token| DBSQL["Databricks SQL Warehouse"]
     DBSQL --> UC["Unity Catalog\nRLS/CLS policies"]
     UC --> Tables["Revenue Semantic Tables\n(mock data)"]
 
-    DBSQL --> MCP
+    DBSQL --> Broker
+    Broker --> MCP
     MCP --> Copilot
     Copilot --> User
 
@@ -102,15 +103,14 @@ sequenceDiagram
     Entra-->>Copilot: Access token (aud = MCP/Broker API)
 
     Copilot->>MCP: MCP tool call + bearer token
-    MCP->>Broker: Token issue request (user assertion + service identity + operation profile)
+    MCP->>Broker: SQL query request (user assertion + service identity + operation profile + guarded SQL)
 
     Broker->>Broker: Validate JWT (iss/aud/tid/exp/scp/signature)
-    Broker->>Entra: OBO exchange to Databricks scope
+    Broker->>Entra: OBO exchange to Databricks scope (cache hit when available)
     Entra-->>Broker: Databricks token
-    Broker-->>MCP: Short-lived Databricks token
-
-    MCP->>DBSQL: Execute SELECT with Databricks token
-    DBSQL-->>MCP: Result set filtered by Unity Catalog
+    Broker->>DBSQL: Execute SELECT with broker-managed Databricks token
+    DBSQL-->>Broker: Result set filtered by Unity Catalog
+    Broker-->>MCP: Structured query result
     MCP-->>Copilot: Raw/structured results
     Copilot-->>User: Final natural language answer
 ```
@@ -295,10 +295,11 @@ WHERE is_account_group_member(a.principal);
 
 1. Receive user question and Copilot bearer token.
 2. Validate input shape and perform SQL safety checks.
-3. Request Databricks token from Broker (`operation_profile = sql.read.revenue`).
+3. Return an OAuth challenge if the Copilot bearer token is missing or near expiry.
 4. Generate SQL against semantic objects (`v_fact_revenue_secure`, dimensions, quota).
-5. Execute read-only SQL in Databricks SQL Warehouse.
-6. Return raw tabular result + metric metadata to Copilot.
+5. Send guarded read-only SQL to Broker (`operation_profile = sql.read.revenue`).
+6. Broker validates the token, reuses or refreshes the Databricks token, executes the query, and retries once on downstream `401`.
+7. Return raw tabular result + metric metadata to Copilot.
 
 ### 9.3 Guardrails
 
@@ -311,9 +312,9 @@ WHERE is_account_group_member(a.principal);
 
 ## 10. Broker API Contract (POC)
 
-### 10.1 Token Issue Endpoint
+### 10.1 SQL Query Endpoint
 
-`POST /broker/v1/databricks/token`
+`POST /api/sql/query`
 
 Request:
 
@@ -321,8 +322,8 @@ Request:
 {
   "user_assertion": "<incoming_user_access_token>",
   "operation_profile": "sql.read.revenue",
-  "workspace": "ri-dbx-workspace",
-  "warehouse_id": "<sql_warehouse_id>"
+  "query": "SELECT d.fiscal_quarter, r.region_code, SUM(f.net_amount) AS net_revenue FROM ri_poc.revenue.v_fact_revenue_secure f JOIN ri_poc.revenue.dim_region r ON f.region_id = r.region_id JOIN ri_poc.revenue.dim_date d ON f.date_key = d.date_key GROUP BY d.fiscal_quarter, r.region_code ORDER BY d.fiscal_quarter, r.region_code",
+  "max_rows": 5000
 }
 ```
 
@@ -330,9 +331,14 @@ Response:
 
 ```json
 {
-  "access_token": "<short_lived_databricks_token>",
-  "expires_in": 900,
-  "token_type": "Bearer"
+  "row_count": 8,
+  "rows": [
+    {
+      "fiscal_quarter": "Q1",
+      "region_code": "NA",
+      "net_revenue": 165000.0
+    }
+  ]
 }
 ```
 
@@ -344,6 +350,8 @@ Response:
 - Required scope present
 - MCP service identity allowlist
 - Operation profile allowlist
+- Guarded SQL targets approved schema only
+- Databricks token refresh/retry remains internal to Broker
 
 ---
 
@@ -370,7 +378,7 @@ No APIM in POC. Introduce APIM in phase 2 for centralized ingress, quotas, and A
 ### 12.2 Security Tests
 
 - Invalid audience token is rejected by Broker.
-- Expired token is rejected.
+- Expired or near-expiry token triggers an OAuth challenge so the client can silently reacquire before tool execution.
 - MCP cannot request unauthorized operation profiles.
 
 ### 12.3 Observability Tests

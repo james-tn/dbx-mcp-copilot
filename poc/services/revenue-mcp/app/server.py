@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+import time
 import re
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastmcp import FastMCP
+import jwt
 from openai import AzureOpenAI
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .broker_client import exchange_user_assertion_for_databricks_token
-from .databricks_client import run_query
+from .broker_client import BrokerUnauthorizedError, execute_sql_query_via_broker
 from .sql_guardrails import validate_sql
 
 
@@ -31,6 +32,7 @@ class Settings(BaseSettings):
     mcp_allowed_schema: str = 'ri_poc.revenue'
     mcp_max_rows: int = 5000
     mcp_query_timeout_seconds: int = 30
+    mcp_token_refresh_skew_seconds: int = 120
     azure_tenant_id: str | None = None
     broker_client_id: str | None = None
     mcp_resource_identifier: str | None = None
@@ -122,6 +124,19 @@ def _build_rfc9728_metadata(request: Request, resource_identifier: str | None = 
     return metadata
 
 
+def _is_token_expiring(token: str, skew_seconds: int) -> bool:
+    try:
+        decoded = jwt.decode(token, options={'verify_signature': False, 'verify_exp': False})
+    except Exception:
+        return False
+
+    exp = decoded.get('exp')
+    if exp is None:
+        return False
+
+    return int(exp) <= int(time.time()) + max(skew_seconds, 0)
+
+
 @app.middleware('http')
 async def enforce_mcp_bearer_auth(request: Request, call_next):
     if request.url.path == '/mcp':
@@ -143,6 +158,14 @@ async def enforce_mcp_bearer_auth(request: Request, call_next):
     user_token = authorization.split(' ', 1)[1].strip()
     if not user_token:
         detail = 'Missing bearer token.'
+        return JSONResponse(
+            status_code=401,
+            content={'detail': detail},
+            headers={'WWW-Authenticate': _build_www_authenticate_header(request, detail)},
+        )
+
+    if _is_token_expiring(user_token, settings.mcp_token_refresh_skew_seconds):
+        detail = 'Bearer token expired or near expiry. Acquire a fresh access token and retry.'
         return JSONResponse(
             status_code=401,
             content={'detail': detail},
@@ -249,18 +272,13 @@ def _execute_expert_query(
 
     validate_sql(sql_query, settings.mcp_allowed_schema)
 
-    databricks_token = exchange_user_assertion_for_databricks_token(
+    rows = execute_sql_query_via_broker(
         broker_base_url=settings.mcp_broker_base_url,
         broker_shared_key=settings.mcp_broker_shared_key,
         user_assertion=assertion_token,
-    )
-
-    rows = run_query(
-        server_hostname=settings.databricks_server_hostname,
-        http_path=settings.databricks_http_path,
-        access_token=databricks_token,
         query=sql_query,
         max_rows=settings.mcp_max_rows,
+        timeout_seconds=max(float(settings.mcp_query_timeout_seconds), 60.0),
     )
 
     return ExpertToolResponse(
@@ -349,6 +367,8 @@ def ask_revenue_intelligence(
             rows=response.rows,
         )
     except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except BrokerUnauthorizedError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except Exception as exc:
         message = str(exc)

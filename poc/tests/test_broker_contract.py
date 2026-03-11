@@ -28,3 +28,15 @@ def test_broker_request_shape_example() -> None:
         'warehouse_id': '<warehouse-id>'
     }
     assert json.loads(json.dumps(payload))['operation_profile'] == 'sql.read.revenue'
+
+
+def test_broker_sql_query_request_shape_example() -> None:
+    payload = {
+        'user_assertion': '<token>',
+        'operation_profile': 'sql.read.revenue',
+        'query': 'SELECT * FROM ri_poc.revenue.v_fact_revenue_secure',
+        'max_rows': 100,
+    }
+    hydrated = json.loads(json.dumps(payload))
+    assert hydrated['operation_profile'] == 'sql.read.revenue'
+    assert hydrated['max_rows'] == 100

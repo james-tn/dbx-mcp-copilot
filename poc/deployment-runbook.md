@@ -101,7 +101,7 @@ pwsh ./scripts/run-e2e-tests.ps1 -ConfigFile ./.env
 ## 8. Validate acceptance criteria
 
 - Regional row-level filtering works for NA and EMEA users.
-- Broker OBO issuance succeeds and token expiry is short-lived.
+- Broker OBO issuance succeeds, tokens are reused in cache, and downstream refresh/retry is transparent.
 - Revenue metrics match expected values in test assertions.
 
 ## 9. VS Code MCP interoperability notes
@@ -144,4 +144,5 @@ curl -X POST https://<revenue-mcp-app>/mcp -H "Content-Type: application/json" -
 Expected behavior:
 
 - Without a bearer token, MCP returns `401` with a `WWW-Authenticate` challenge.
+- With an expired or near-expiry bearer token, MCP returns `401` with a `WWW-Authenticate` challenge so the client can silently reacquire and retry.
 - With a valid token, MCP `tools/list` and `tools/call` return `200`.

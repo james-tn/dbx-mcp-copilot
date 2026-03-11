@@ -225,6 +225,22 @@ resource brokerApp 'Microsoft.App/containerApps@2024-03-01' = {
               secretRef: 'broker-shared-service-key'
             }
             {
+              name: 'DATABRICKS_SERVER_HOSTNAME'
+              value: effectiveDatabricksHost
+            }
+            {
+              name: 'DATABRICKS_HTTP_PATH'
+              value: databricksHttpPath
+            }
+            {
+              name: 'BROKER_ALLOWED_SCHEMA'
+              value: mcpAllowedSchema
+            }
+            {
+              name: 'BROKER_MAX_ROWS'
+              value: string(mcpMaxRows)
+            }
+            {
               name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
               value: appInsights.properties.ConnectionString
             }
@@ -295,6 +311,14 @@ resource mcpApp 'Microsoft.App/containerApps@2024-03-01' = {
               value: azureOpenAIEndpoint
             }
             {
+              name: 'AZURE_TENANT_ID'
+              value: tenantId
+            }
+            {
+              name: 'BROKER_CLIENT_ID'
+              value: brokerClientId
+            }
+            {
               name: 'AZURE_OPENAI_DEPLOYMENT'
               value: azureOpenAIDeployment
             }
@@ -317,6 +341,10 @@ resource mcpApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'MCP_QUERY_TIMEOUT_SECONDS'
               value: string(mcpQueryTimeoutSeconds)
+            }
+            {
+              name: 'MCP_TOKEN_REFRESH_SKEW_SECONDS'
+              value: '120'
             }
             {
               name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'

@@ -3,7 +3,7 @@
 This folder contains an end-to-end POC implementation for:
 
 - Copilot-facing Revenue Intelligence service (FastMCP + HTTP compatibility endpoint)
-- Auth Broker performing OAuth2 OBO for Azure Databricks
+- Auth Broker performing OAuth2 OBO for Azure Databricks and broker-side SQL execution
 - Azure IaC for Container Apps deployment
 - Entra app registration automation scripts
 - Databricks SQL seed scripts for semantic revenue data and regional security
@@ -17,6 +17,14 @@ This folder contains an end-to-end POC implementation for:
 	- `revenue_performance_expert`
 	- `quota_attainment_expert`
 	- `retention_margin_expert`
+
+## Runtime flow
+
+- Copilot presents a bearer token to the MCP endpoint.
+- MCP checks for a missing or near-expiry bearer token and returns an OAuth challenge before tool execution.
+- MCP generates guarded SQL and sends it to the broker.
+- Broker validates the user assertion, acquires or reuses an OBO token for Databricks, retries once on downstream authorization failures, and executes the SQL itself.
+- MCP receives rows only and returns tool output without handling Databricks tokens directly.
 - `scripts/`: Deployment, app registration, and data seeding scripts.
 - `tests/`: Unit and E2E test scripts.
 

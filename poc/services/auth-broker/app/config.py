@@ -8,12 +8,16 @@ class Settings(BaseSettings):
     broker_client_id: str
     broker_client_secret: str
     broker_scope: str = '2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default'
+    databricks_server_hostname: str
+    databricks_http_path: str
 
     broker_expected_audience: str
     broker_allowed_tenants: str = ''
     broker_allowed_service_names: str = 'revenue-mcp'
     broker_shared_service_key: str
     broker_allow_passthrough_for_dev: bool = False
+    broker_allowed_schema: str = 'ri_poc.revenue'
+    broker_max_rows: int = 5000
 
     @property
     def allowed_tenants(self) -> list[str]:
