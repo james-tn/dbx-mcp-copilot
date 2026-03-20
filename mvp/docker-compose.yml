@@ -1,0 +1,25 @@
+services:
+  planner-service:
+    build:
+      context: .
+      dockerfile: agents/Dockerfile
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+
+  m365-wrapper:
+    build:
+      context: .
+      dockerfile: m365_wrapper/Dockerfile
+    depends_on:
+      - planner-service
+    env_file:
+      - .env
+    environment:
+      PORT: "3978"
+      PLANNER_SERVICE_BASE_URL: "http://planner-service:8080"
+    ports:
+      - "3978:3978"

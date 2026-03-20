@@ -1,0 +1,64 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.25/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.25",
+  "version": "${APP_VERSION}",
+  "id": "${M365_APP_PACKAGE_ID}",
+  "developer": {
+    "name": "${M365_DEVELOPER_NAME}",
+    "websiteUrl": "${M365_DEVELOPER_WEBSITE_URL}",
+    "privacyUrl": "${M365_PRIVACY_URL}",
+    "termsOfUseUrl": "${M365_TERMS_URL}"
+  },
+  "name": {
+    "short": "${M365_APP_SHORT_NAME}",
+    "full": "${M365_APP_FULL_NAME}"
+  },
+  "description": {
+    "short": "${M365_APP_SHORT_DESCRIPTION}",
+    "full": "${M365_APP_FULL_DESCRIPTION}"
+  },
+  "accentColor": "${M365_APP_ACCENT_COLOR}",
+  "icons": {
+    "outline": "outline.png",
+    "color": "color.png"
+  },
+  "bots": [
+    {
+      "botId": "${BOT_APP_ID}",
+      "scopes": [
+        "personal"
+      ],
+      "supportsFiles": false,
+      "isNotificationOnly": false
+    }
+  ],
+  "permissions": [
+    "identity"
+  ],
+  "validDomains": [
+    "${WRAPPER_VALID_DOMAIN}",
+    "token.botframework.com"
+  ],
+  "webApplicationInfo": {
+    "id": "${BOT_SSO_APP_ID}",
+    "resource": "${BOT_SSO_RESOURCE}"
+  },
+  "defaultInstallScope": "personal",
+  "defaultGroupCapability": {
+    "team": "bot",
+    "groupchat": "bot",
+    "meetings": "bot"
+  },
+  "copilotAgents": {
+    "customEngineAgents": [
+      {
+        "type": "bot",
+        "id": "${BOT_APP_ID}",
+        "functionsAs": "agentOnly",
+        "disclaimer": {
+          "text": "${M365_AGENT_DISCLAIMER}"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
+APP_NAME_PREFIX="${APP_NAME_PREFIX:-daily-account-planner}"
+DATABRICKS_RESOURCE_APP_ID="${DATABRICKS_RESOURCE_APP_ID:-2ff814a6-3304-4ab8-85cb-cd0e6f879c1d}"
+BOT_SSO_RESOURCE_PREFIX="${BOT_SSO_RESOURCE_PREFIX:-api://botid-}"
+TEAMS_DESKTOP_MOBILE_CLIENT_ID="${TEAMS_DESKTOP_MOBILE_CLIENT_ID:-1fec8e78-bce4-4aaf-ab1b-5451cc387264}"
+TEAMS_WEB_CLIENT_ID="${TEAMS_WEB_CLIENT_ID:-5e3ce6c0-2b1f-4285-8d4b-75ee78787346}"
+
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source <(sed 's/\r$//' "$ENV_FILE")
+  set +a
+fi
+
+if [[ -z "${AZURE_TENANT_ID:-}" ]]; then
+  echo "AZURE_TENANT_ID must be set in $ENV_FILE or the environment." >&2
+  exit 1
+fi
+
+az account show >/dev/null
+
+ensure_app() {
+  local display_name="$1"
+  local expose_as_api="$2"
+  local existing
+  existing="$(az ad app list --display-name "$display_name" --query "[0]" -o json)"
+  if [[ "$existing" != "null" && -n "$existing" ]]; then
+    echo "$existing"
+    return
+  fi
+
+  local created
+  created="$(az ad app create --display-name "$display_name" --sign-in-audience AzureADMyOrg -o json)"
+  if [[ "$expose_as_api" == "true" ]]; then
+    local app_id object_id
+    app_id="$(python - <<'PY' "$created"
+import json, sys
+print(json.loads(sys.argv[1])["appId"])
+PY
+)"
+    object_id="$(python - <<'PY' "$created"
+import json, sys
+print(json.loads(sys.argv[1])["id"])
+PY
+)"
+    az ad app update --id "$object_id" --identifier-uris "api://$app_id" >/dev/null
+    created="$(az ad app show --id "$object_id" -o json)"
+  fi
+  echo "$created"
+}
+
+ensure_service_principal() {
+  local app_id="$1"
+  local existing
+  existing="$(az ad sp list --filter "appId eq '$app_id'" --query "[0].id" -o tsv)"
+  if [[ -z "$existing" ]]; then
+    az ad sp create --id "$app_id" >/dev/null
+  fi
+}
+
+patch_application() {
+  local application_object_id="$1"
+  local body_file="$2"
+  az rest \
+    --method PATCH \
+    --uri "https://graph.microsoft.com/v1.0/applications/$application_object_id" \
+    --headers "Content-Type=application/json" \
+    --body "@$body_file" \
+    >/dev/null
+}
+
+planner_json="$(ensure_app "$APP_NAME_PREFIX-planner-api" true)"
+bot_json="$(ensure_app "$APP_NAME_PREFIX-bot" false)"
+
+planner_object_id="$(python - <<'PY' "$planner_json"
+import json, sys
+print(json.loads(sys.argv[1])["id"])
+PY
+)"
+planner_app_id="$(python - <<'PY' "$planner_json"
+import json, sys
+print(json.loads(sys.argv[1])["appId"])
+PY
+)"
+bot_object_id="$(python - <<'PY' "$bot_json"
+import json, sys
+print(json.loads(sys.argv[1])["id"])
+PY
+)"
+bot_app_id="$(python - <<'PY' "$bot_json"
+import json, sys
+print(json.loads(sys.argv[1])["appId"])
+PY
+)"
+
+ensure_service_principal "$planner_app_id"
+ensure_service_principal "$bot_app_id"
+
+scope_id="$(az ad app show --id "$planner_object_id" --query "api.oauth2PermissionScopes[?value=='access_as_user'].id | [0]" -o tsv)"
+if [[ -z "$scope_id" ]]; then
+  scope_id="$(python - <<'PY'
+import uuid
+print(uuid.uuid4())
+PY
+)"
+  patch_file="$(mktemp)"
+  cat >"$patch_file" <<JSON
+{
+  "api": {
+    "requestedAccessTokenVersion": 2,
+    "oauth2PermissionScopes": [
+      {
+        "adminConsentDescription": "Access the Daily Account Planner API as the signed-in user.",
+        "adminConsentDisplayName": "Access Daily Account Planner API",
+        "id": "$scope_id",
+        "isEnabled": true,
+        "type": "User",
+        "userConsentDescription": "Allow this app to access the Daily Account Planner API on your behalf.",
+        "userConsentDisplayName": "Access Daily Account Planner API",
+        "value": "access_as_user"
+      }
+    ]
+  }
+}
+JSON
+  patch_application "$planner_object_id" "$patch_file"
+  rm -f "$patch_file"
+fi
+
+bot_scope_id="$(az ad app show --id "$bot_object_id" --query "api.oauth2PermissionScopes[?value=='access_as_user'].id | [0]" -o tsv)"
+if [[ -z "$bot_scope_id" ]]; then
+  bot_scope_id="$(python - <<'PY'
+import uuid
+print(uuid.uuid4())
+PY
+)"
+fi
+
+bot_sso_resource="${BOT_SSO_RESOURCE_PREFIX}${bot_app_id}"
+bot_patch_file="$(mktemp)"
+cat >"$bot_patch_file" <<JSON
+{
+  "identifierUris": [
+    "$bot_sso_resource"
+  ],
+  "api": {
+    "requestedAccessTokenVersion": 2,
+    "oauth2PermissionScopes": [
+      {
+        "adminConsentDescription": "Access the Daily Account Planner wrapper as the signed-in user.",
+        "adminConsentDisplayName": "Access Daily Account Planner wrapper",
+        "id": "$bot_scope_id",
+        "isEnabled": true,
+        "type": "User",
+        "userConsentDescription": "Allow Teams and Copilot to sign you in to Daily Account Planner.",
+        "userConsentDisplayName": "Sign in to Daily Account Planner",
+        "value": "access_as_user"
+      }
+    ]
+  },
+  "web": {
+    "redirectUris": [
+      "https://token.botframework.com/.auth/web/redirect"
+    ]
+  }
+}
+JSON
+patch_application "$bot_object_id" "$bot_patch_file"
+rm -f "$bot_patch_file"
+
+bot_preauth_file="$(mktemp)"
+cat >"$bot_preauth_file" <<JSON
+{
+  "api": {
+    "preAuthorizedApplications": [
+      {
+        "appId": "$TEAMS_DESKTOP_MOBILE_CLIENT_ID",
+        "delegatedPermissionIds": [
+          "$bot_scope_id"
+        ]
+      },
+      {
+        "appId": "$TEAMS_WEB_CLIENT_ID",
+        "delegatedPermissionIds": [
+          "$bot_scope_id"
+        ]
+      }
+    ]
+  }
+}
+JSON
+patch_application "$bot_object_id" "$bot_preauth_file"
+rm -f "$bot_preauth_file"
+
+databricks_sp="$(az ad sp list --filter "appId eq '$DATABRICKS_RESOURCE_APP_ID'" --query "[0]" -o json)"
+databricks_scope_id="$(python - <<'PY' "$databricks_sp"
+import json, sys
+sp = json.loads(sys.argv[1])
+for item in sp.get("oauth2PermissionScopes", []):
+    if item.get("value") == "user_impersonation":
+        print(item["id"])
+        break
+PY
+)"
+
+planner_access_file="$(mktemp)"
+cat >"$planner_access_file" <<JSON
+{
+  "requiredResourceAccess": [
+    {
+      "resourceAppId": "$DATABRICKS_RESOURCE_APP_ID",
+      "resourceAccess": [
+        {
+          "id": "$databricks_scope_id",
+          "type": "Scope"
+        }
+      ]
+    }
+  ]
+}
+JSON
+patch_application "$planner_object_id" "$planner_access_file"
+rm -f "$planner_access_file"
+
+wrapper_access_file="$(mktemp)"
+cat >"$wrapper_access_file" <<JSON
+{
+  "requiredResourceAccess": [
+    {
+      "resourceAppId": "$planner_app_id",
+      "resourceAccess": [
+        {
+          "id": "$scope_id",
+          "type": "Scope"
+        }
+      ]
+    }
+  ]
+}
+JSON
+patch_application "$bot_object_id" "$wrapper_access_file"
+rm -f "$wrapper_access_file"
+
+planner_secret_json="$(az ad app credential reset --id "$planner_object_id" --append --display-name "planner-api-secret" --years 1 -o json)"
+bot_secret_json="$(az ad app credential reset --id "$bot_object_id" --append --display-name "bot-secret" --years 1 -o json)"
+planner_secret="$(python - <<'PY' "$planner_secret_json"
+import json, sys
+print(json.loads(sys.argv[1])["password"])
+PY
+)"
+bot_secret="$(python - <<'PY' "$bot_secret_json"
+import json, sys
+print(json.loads(sys.argv[1])["password"])
+PY
+)"
+
+cat <<EOF
+Planner API app created or reused.
+M365 wrapper / bot app created or reused.
+
+Add these values to $ENV_FILE:
+PLANNER_API_CLIENT_ID=$planner_app_id
+PLANNER_API_CLIENT_SECRET=$planner_secret
+PLANNER_API_EXPECTED_AUDIENCE=api://$planner_app_id
+PLANNER_API_SCOPE=api://$planner_app_id/access_as_user
+BOT_APP_ID=$bot_app_id
+BOT_APP_PASSWORD=$bot_secret
+BOT_SSO_APP_ID=$bot_app_id
+BOT_SSO_RESOURCE=$bot_sso_resource
+AZUREBOTOAUTHCONNECTIONNAME=SERVICE_CONNECTION
+OBOCONNECTIONNAME=PLANNER_API_CONNECTION
+M365_AUTH_HANDLER_ID=planner_api
+
+Admin consent is still required for:
+- Planner API -> Azure Databricks user_impersonation
+- Wrapper/channel app -> Planner API access_as_user
+EOF

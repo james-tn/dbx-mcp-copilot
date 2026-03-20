@@ -1,0 +1,6 @@
+.env
+appPackage/build/
+.claude/
+**/.claude/
+**/__pycache__/
+*.pyc
