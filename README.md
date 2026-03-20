@@ -8,17 +8,17 @@ Framework orchestration for `DailyAccountPlanner`, `AccountPulse`, and
 
 ## Start Here
 
-- Architecture: [mvp/daily-account-planner-architecture.md](/mnt/c/testing/veeam/revenue_intelligence/mvp/daily-account-planner-architecture.md)
-- MVP setup and deployment runbook: [mvp/mvp-setup-and-deployment-runbook.md](/mnt/c/testing/veeam/revenue_intelligence/mvp/mvp-setup-and-deployment-runbook.md)
-- Environment contract: [mvp/.env.example](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.example)
-- General M365 integration guidance: [docs/m365-agentic-service-developer-guide.md](/mnt/c/testing/veeam/revenue_intelligence/docs/m365-agentic-service-developer-guide.md)
+- Architecture: [mvp/daily-account-planner-architecture.md](mvp/daily-account-planner-architecture.md)
+- MVP setup and deployment runbook: [mvp/mvp-setup-and-deployment-runbook.md](mvp/mvp-setup-and-deployment-runbook.md)
+- Environment contract: [mvp/.env.example](mvp/.env.example)
+- General M365 integration guidance: [docs/m365-agentic-service-developer-guide.md](docs/m365-agentic-service-developer-guide.md)
 
 ## MVP Layout
 
-- [mvp/agents](/mnt/c/testing/veeam/revenue_intelligence/mvp/agents): planner API, orchestration, Databricks query layer, tests, and Account Pulse benchmarking support
-- [mvp/m365_wrapper](/mnt/c/testing/veeam/revenue_intelligence/mvp/m365_wrapper): thin M365 Custom Engine wrapper that forwards authenticated turns to the planner
-- [mvp/scripts](/mnt/c/testing/veeam/revenue_intelligence/mvp/scripts): app registration, deploy, validate, seed, packaging, and publish scripts
-- [mvp/appPackage](/mnt/c/testing/veeam/revenue_intelligence/mvp/appPackage): Microsoft 365 app manifest template and build output
+- [mvp/agents](mvp/agents): planner API, orchestration, Databricks query layer, tests, and Account Pulse benchmarking support
+- [mvp/m365_wrapper](mvp/m365_wrapper): thin M365 Custom Engine wrapper that forwards authenticated turns to the planner
+- [mvp/scripts](mvp/scripts): app registration, deploy, validate, seed, packaging, and publish scripts
+- [mvp/appPackage](mvp/appPackage): Microsoft 365 app manifest template and build output
 
 ## Common Flows
 
