@@ -13,12 +13,13 @@ your framework choices, your session management, and the way you call downstream
 services on behalf of the signed-in user.
 
 **This guide is for the other path.** The one where you keep your existing agentic
-service exactly as it is and place an M365 Gateway in front of it — a stateless
-service that handles the Bot Framework protocol, validates JWTs, performs the first
-On-Behalf-Of token exchange, and translates Copilot conversations into your
-service's native API. Your service never changes. It doesn't need to know about Bot
-Framework, OIDC, or Teams. It just keeps doing what it already does, now with
-end-to-end delegated user identity flowing through from Microsoft 365.
+service largely intact and place an M365 Gateway in front of it — a stateless
+service that handles the Bot Framework protocol, validates channel-facing tokens,
+performs the first On-Behalf-Of token exchange, and translates Copilot
+conversations into your service's native API. Your service can stay Bot- and
+Teams-agnostic, but if it owns downstream delegated access it should still validate
+the inbound service token at its own boundary and use that validated assertion for
+its own OBO chain.
 
 **When to use this pattern:**
 - You have (or want to build) your own agentic implementation in your preferred
@@ -70,14 +71,15 @@ graph LR
 | Layer | Responsibility | State |
 |-------|---------------|-------|
 | **M365 Copilot** | User identity, SSO, conversation UX | None (platform) |
-| **Gateway** | Bot protocol adapter, JWT validation, OBO #1 token exchange | Stateless |
-| **Agentic Service** | Business logic, orchestration, session memory | Stateful |
+| **Gateway** | Bot protocol adapter, channel auth, OBO #1 token exchange | Stateless |
+| **Agentic Service** | Business logic, service-token validation, downstream OBO, session memory | Stateful |
 | **Downstream** | Data, APIs, MCP servers — called as the delegated user | External |
 
 ### Why two services?
 
-- **Separation of trust boundaries** — The gateway handles Bot Framework protocol.
-  The service owns data access and never sees Bot credentials.
+- **Separation of trust boundaries** — The gateway handles Bot Framework protocol
+  and channel auth. The service owns business/data access, validates the service
+  bearer it receives, and never needs Bot credentials.
 - **Independent scaling** — The gateway can scale to many replicas. The service
   (with in-memory sessions) runs as a single replica for MVP.
 - **Framework freedom** — The service can use any agentic framework, LLM provider,
@@ -108,15 +110,13 @@ sequenceDiagram
 
     W->>W: get_token(context)<br/>OBO #1: user SSO token<br/>→ service API scope
 
-    Note over W: Validates JWT:<br/>audience, issuer, signature
+    Note over W: May inspect service token<br/>for routing or logging
 
-    W->>W: Extracts claims<br/>(oid, tid, upn, scp)
+    W->>S: Forward request<br/>Bearer {service_token}<br/>+ optional X-User-* metadata
 
-    W->>S: Forward request<br/>Bearer {service_token}<br/>+ X-User-Id, X-User-UPN headers
+    Note over S: Validates service token<br/>audience, issuer, signature
 
-    Note over S: Trusts gateway<br/>(internal network only)
-
-    S->>S: Binds user_assertion<br/>+ claims to ContextVar
+    S->>S: Binds validated user_assertion<br/>+ claims to ContextVar
 
     S->>S: Runs agentic logic<br/>(any framework)
 
@@ -133,16 +133,17 @@ sequenceDiagram
 
 1. **The user token never leaves the OBO chain.** Each service receives a scoped
    assertion and exchanges it for the next hop. No service sees the original password.
-2. **JWT validation is non-negotiable — and it lives in the Gateway.** The gateway
-   **must** verify signature, audience, issuer, and expiry before forwarding the token
-   to the service. This centralizes auth logic and minimizes changes needed to the
-   agentic service.
-3. **The service runs on an internal network only.** Because the gateway handles JWT
-   validation, the service must **not** be publicly accessible. In ACA, use internal
-   ingress so only the gateway can reach it.
-4. **ContextVar carries the assertion.** The service binds the forwarded JWT assertion
-   to an async-safe `ContextVar` in middleware, so any downstream OBO call within the
-   same request automatically picks it up.
+2. **JWT validation is non-negotiable — and split by boundary.** The gateway must
+   validate the Bot/channel-facing token it receives from Microsoft 365. The
+   service must validate the inbound service-scoped bearer before using it for
+   OBO, session ownership, or user scoping.
+3. **Internal-only service ingress is recommended hardening, not the only safe
+   option.** In ACA, private ingress is a strong default. If the service remains
+   externally reachable, it must still enforce its own bearer validation and
+   authorization checks exactly the same way.
+4. **ContextVar carries the validated assertion.** The service binds the validated
+   JWT assertion to an async-safe `ContextVar` in middleware, so any downstream
+   OBO call within the same request automatically picks it up.
 
 ---
 
@@ -238,14 +239,15 @@ az bot authsetting create \
 ### Component 1: The M365 Gateway (Stateless, Protocol Adapter)
 
 The gateway's job is to **bridge** the Bot Framework protocol into whatever HTTP
-contract your agentic service exposes. It receives Bot activities, exchanges the
-user's SSO token for a service-scoped token (OBO #1), **validates the JWT**, extracts
-claims, and translates the call into the service's native API shape.
+contract your agentic service exposes. It receives Bot activities, validates the
+channel-facing token path, exchanges the user's SSO token for a service-scoped
+token (OBO #1), and translates the call into the service's native API shape.
 
 > **Key insight:** If you already have a stateful agentic service — even one that
 > wasn't designed for M365 — the gateway can adapt to it. You do **not** need to
 > modify your existing service to conform to a specific API contract. The gateway
-> absorbs both the M365 protocol translation **and** the JWT validation.
+> absorbs the M365 protocol translation. The service should still validate the
+> service-scoped bearer that reaches its own API boundary.
 
 ```mermaid
 flowchart TD
@@ -254,11 +256,9 @@ flowchart TD
     B -->|invoke| D["Return (SSO handshake)"]
     B -->|other| E["Welcome message"]
     C --> F{Token acquired?}
-    F -->|yes| V["Validate JWT<br/>(audience, issuer, signature)"]
+    F -->|yes| V["Optional token inspection<br/>(claims/logging/routing)"]
     F -->|no| H["Prompt sign-in"]
-    V --> V2{Valid?}
-    V2 -->|no| V3["401 Unauthorized"]
-    V2 -->|yes| G["Extract claims<br/>Forward token + headers<br/>to service's native API"]
+    V --> G["Forward service bearer<br/>+ optional metadata<br/>to service's native API"]
     G --> I{Service response?}
     I -->|200 OK| J["Extract reply, send to Copilot"]
     I -->|401/403| K["Auth error message"]
@@ -266,35 +266,31 @@ flowchart TD
     I -->|5xx| M["Unavailable message"]
 ```
 
-#### JWT validation (in the Gateway)
+#### Token validation responsibilities in the Gateway
 
-> **This is a hard requirement, not optional.** The gateway is the trust boundary
-> between the public internet and your agentic service. If JWT validation is skipped
-> or incomplete, any caller with network access could trigger OBO #2 and access
-> downstream resources as arbitrary users.
+> **This is a hard requirement, not optional.** The gateway is the public-facing
+> trust boundary for the Bot/channel request. If channel-token validation is skipped
+> or incomplete, unauthenticated callers may be able to reach your forwarding path.
 
-After OBO #1 produces a service-scoped token, the gateway **must** validate it before
-forwarding to the service:
+The gateway must validate the Bot/channel-facing token according to the SDK/Bot
+Framework requirements for the channel it serves. After OBO #1 produces a
+service-scoped bearer, the gateway may inspect that token for diagnostics,
+routing, or optional metadata forwarding, but the service must remain the
+authoritative validator for that service token.
 
-1. **Download OIDC metadata** from
-   `https://login.microsoftonline.com/{tenant}/v2.0/.well-known/openid-configuration`
-2. **Get the signing key** from the JWKS endpoint using the token's `kid` header
-3. **Verify signature** (RS256), **expiry**, and **required claims** (`exp`, `iat`,
-   `iss`, `aud`) — all four checks are mandatory
-4. **Validate audience** — `aud` must match your service app ID (`api://<id>` or the
-   raw GUID — accept both forms). Reject tokens issued for other services.
-5. **Validate issuer** — must be `https://login.microsoftonline.com/{tenant}/v2.0`
-   or `https://sts.windows.net/{tenant}/`. Reject multi-tenant issuers unless your
-   service is designed for multi-tenant access.
-6. **Extract claims** and forward them to the service:
-   - `oid` (user object ID) — as `X-User-Id` header
-   - `tid` (tenant ID) — as `X-User-Tenant` header
-   - `upn` (user principal name) — as `X-User-UPN` header
-   - The raw JWT itself — as `Authorization: Bearer` for OBO #2
+Good gateway behavior:
 
-> **Implementers may choose their JWT validation library** (PyJWT, `jose`,
-> `microsoft-identity-web`, custom code) — but all six steps above must be covered.
-> Skipping audience or issuer validation is the most common mistake.
+1. **Validate inbound channel traffic** using the Bot/Agents SDK middleware or
+   equivalent issuer/signature/audience checks for the incoming channel token
+2. **Acquire the service-scoped token** for your service API with OBO #1
+3. **Forward the service bearer as-is** in `Authorization: Bearer ...`
+4. **Optionally extract claims** for logging or convenience headers:
+   - `oid` (user object ID)
+   - `tid` (tenant ID)
+   - `upn` or `preferred_username`
+5. **Treat forwarded headers as non-authoritative metadata**. They can help with
+   telemetry, correlation, or debugging, but the service should derive identity
+   from the validated bearer it receives.
 
 #### Adapting to your service's API contract
 
@@ -307,7 +303,7 @@ This is where you map:
 | `conversation.id` | Session/thread/chat ID | Map on create or first message |
 | User message text | Request body field (could be `text`, `message`, `prompt`, `input`, etc.) | Reshape the request payload |
 | Reply text | Response field (could be `reply`, `response`, `output`, `content`, etc.) | Extract from response payload |
-| Authentication | Bearer token, API key, or custom header | Attach OBO token in the right header/field |
+| Authentication | Bearer token, API key, or custom header | Attach the service-scoped delegated token in the right header/field |
 
 **Example: adapting to different service shapes**
 
@@ -356,7 +352,8 @@ gateway can adapt to it:
 
 The service does **not** need to use a specific URL pattern, request/response schema,
 or framework. The gateway's service client class is the single place where you encode
-these mappings.
+these mappings. The service should still validate the bearer it receives before it
+trusts any user identity implied by the call.
 
 #### Key implementation details
 
@@ -409,30 +406,33 @@ You can substitute any Bot SDK or language as long as you handle the same protoc
 
 ### Component 2: The Agentic Service (Stateful, Framework-Agnostic)
 
-The service is a regular HTTP API. It knows nothing about Bot Framework **or JWT
-validation**. It receives a pre-validated bearer token and user claims forwarded by
-the gateway, runs your agentic logic, and returns a reply.
+The service is a regular HTTP API. It can know nothing about Bot Framework, Teams,
+or Copilot-specific activity shapes, but if it owns downstream delegated access it
+should validate the inbound service bearer at its own boundary. It receives the
+service-scoped token, validates it, binds user claims from that validated token,
+runs your agentic logic, and returns a reply.
 
-> **Gateway trust model:** Because the gateway validates the JWT and the service runs
-> on an internal-only network (not publicly accessible), the service trusts the
-> gateway's forwarded token and claim headers. This minimizes the changes needed to
-> bring an existing service into the M365 ecosystem.
+> **Service trust model:** The service is the business/data trust boundary. It should
+> trust the validated bearer token it receives, not convenience headers alone.
+> Forwarded `X-User-*` headers are optional metadata and should never be the sole
+> basis for user scoping or downstream OBO.
 
 ```mermaid
 flowchart TD
-    A["Inbound request from Gateway<br/>Bearer token + X-User-* headers"] --> B["Extract user identity<br/>from forwarded headers"]
-    B --> C["Bind user_assertion<br/>+ claims to ContextVar"]
-    C --> D["Route to session<br/>(owner_id from X-User-Id)"]
-    D --> E["Run agentic logic<br/>(any framework)"]
-    E --> F{Needs downstream data?}
-    F -->|yes| G["OBO #2: user_assertion<br/>→ downstream token"]
-    G --> H["Call downstream API<br/>as delegated user"]
-    H --> E
-    F -->|no| I["Format reply"]
-    I --> J["200 OK<br/>{reply, session_id, turns}"]
+    A["Inbound request from Gateway<br/>Bearer token + optional X-User-* headers"] --> B["Validate service bearer<br/>audience, issuer, signature"]
+    B --> C["Extract user identity<br/>from validated token"]
+    C --> D["Bind user_assertion<br/>+ claims to ContextVar"]
+    D --> E["Route to session<br/>(owner_id from token oid)"]
+    E --> F["Run agentic logic<br/>(any framework)"]
+    F --> G{Needs downstream data?}
+    G -->|yes| H["OBO #2: user_assertion<br/>→ downstream token"]
+    H --> I["Call downstream API<br/>as delegated user"]
+    I --> F
+    G -->|no| J["Format reply"]
+    J --> K["200 OK<br/>{reply, session_id, turns}"]
 
-    style C fill:#f9f,stroke:#333
-    style G fill:#f9f,stroke:#333
+    style D fill:#f9f,stroke:#333
+    style H fill:#f9f,stroke:#333
 ```
 
 #### Minimum service requirements
@@ -441,16 +441,16 @@ The service needs only these capabilities — everything else is optional:
 
 | Requirement | What it means | Why |
 |-------------|--------------|-----|
-| **Accept forwarded token** | Read the `Authorization: Bearer` header | Needed as the `user_assertion` for OBO #2 |
-| **Accept forwarded claims** | Read `X-User-Id`, `X-User-UPN` headers (or decode claims from the token) | Needed for session owner isolation and audit trail |
+| **Validate inbound bearer** | Read and validate the `Authorization: Bearer` header | Needed before using the token for OBO, ownership, or authorization |
+| **Extract claims from the validated token** | Decode `oid`, `tid`, `upn` / `preferred_username`, scopes, etc. | Needed for session owner isolation and audit trail |
 | **Session/thread identity** | Maintain conversation state across turns | Copilot expects multi-turn conversations |
 | **Message exchange** | Accept user text, return a reply | Core function |
 | **OBO #2** (if user-delegated access needed) | MSAL `acquire_token_on_behalf_of()` with the forwarded assertion | Only if calling downstream APIs as the user |
-| **Internal-only ingress** | Not publicly accessible; only the gateway can reach it | Security: gateway is the trust boundary |
+| **Ingress hardening** | Prefer internal-only ingress or equivalent network controls when practical | Reduces attack surface, but does not replace service-side token validation |
 
 #### ContextVar pattern for the OBO assertion
 
-The forwarded JWT assertion (the raw token string from the gateway) must be available
+The validated JWT assertion (the raw token string from the gateway) must be available
 deep in the call stack when a downstream OBO call happens — potentially several
 layers below the HTTP handler. Use `contextvars.ContextVar` rather than passing it
 through every function signature:
@@ -468,8 +468,8 @@ def reset_identity(a_tok: CtxToken, c_tok: CtxToken):
     _USER_ASSERTION.reset(a_tok)
     _USER_CLAIMS.reset(c_tok)
 
-# In middleware:
-a_tok, c_tok = bind_identity(raw_jwt, forwarded_claims)
+# In middleware, after validating the bearer:
+a_tok, c_tok = bind_identity(raw_jwt, validated_claims)
 try:
     response = await call_next(request)
 finally:
@@ -519,8 +519,8 @@ Minimum viable session store for MVP (in-memory, single-replica):
 - **Create** — `POST /api/chat/sessions` → returns `session_id`
 - **Send message** — `POST /api/chat/sessions/{id}/messages` → returns `reply`
 - **Get session** — `GET /api/chat/sessions/{id}` → returns turns history
-- **Owner isolation** — Every session has an `owner_id` (from forwarded `X-User-Id`
-  header or JWT `oid`). Reject cross-user access with 403.
+- **Owner isolation** — Every session has an `owner_id` from the validated JWT
+  `oid` claim. Reject cross-user access with 403.
 - **Turn windowing** — Cap stored turns at `max_turns * 2` entries to prevent
   unbounded memory growth.
 - **Concurrency lock** — `asyncio.Lock()` per session prevents interleaved turns.
@@ -675,7 +675,7 @@ flowchart TD
 | `AZURE_TENANT_ID` | `b5d67878-...` | Entra tenant |
 | `BOT_APP_ID` | `<bot-app-id>` | Bot registration |
 | `BOT_APP_PASSWORD` | `<secret>` | Bot client secret |
-| `SERVICE_BASE_URL` | `https://my-service.internal.azurecontainerapps.io` | Service endpoint (internal) |
+| `SERVICE_BASE_URL` | `https://my-service.azurecontainerapps.io` | Service endpoint |
 | `SERVICE_API_SCOPE` | `api://<service-app-id>/access_as_user` | OBO #1 target scope |
 | `SERVICE_EXPECTED_AUDIENCE` | `api://<service-app-id>` | JWT audience validation |
 
@@ -686,8 +686,8 @@ flowchart TD
 ```mermaid
 flowchart LR
     subgraph "Defense in Depth"
-        V1["JWT validation in Gateway<br/>(audience + issuer + signature)"]
-        V2["Service internal-only<br/>(not publicly accessible)"]
+        V1["Gateway channel validation<br/>(Bot/channel token path)"]
+        V2["Service bearer validation<br/>(audience + issuer + signature)"]
         V3["ContextVar isolation<br/>(per-request, async-safe)"]
         V4["Session owner check<br/>(oid-based)"]
         V5["Data access control<br/>(scope-limited queries)"]
@@ -695,12 +695,13 @@ flowchart LR
     V1 --> V2 --> V3 --> V4 --> V5
 ```
 
-- [ ] **JWT audience validated** — Gateway rejects tokens with wrong `aud`
-- [ ] **JWT issuer validated** — Gateway accepts only your tenant's STS URIs
-- [ ] **JWT signature verified** — RS256 via JWKS endpoint, not hardcoded keys
-- [ ] **Service internal-only** — Agentic service not publicly accessible; only gateway can reach it
+- [ ] **Gateway channel auth enforced** — Bot/channel-facing traffic is validated before forwarding
+- [ ] **Service JWT audience validated** — Service rejects tokens with wrong `aud`
+- [ ] **Service JWT issuer validated** — Service accepts only the intended tenant STS URIs
+- [ ] **Service JWT signature verified** — RS256 via JWKS endpoint, not hardcoded keys
+- [ ] **Service ingress hardened** — Prefer internal-only or restricted ingress where practical
 - [ ] **ContextVar reset in finally block** — Prevents assertion leaking across requests
-- [ ] **Session owner isolation** — `owner_id` from forwarded `oid` claim, 403 on mismatch
+- [ ] **Session owner isolation** — `owner_id` from validated `oid` claim, 403 on mismatch
 - [ ] **Downstream data access scoped** — Use parameterized queries, canned operations,
   or row-level security; avoid exposing raw query interfaces to the agent
 - [ ] **Secrets stored securely** — Client secrets as ACA secrets (`secretref:`), not
@@ -718,8 +719,9 @@ flowchart LR
 | `AADSTS65001: not consented` | Missing admin consent for delegated permissions | Grant admin consent for both OBO chains |
 | `The provided token is not exchangeable` | Bot OAuth connection misconfigured or stale SSO cache | Recreate OAuth connection; open a new Copilot conversation |
 | OBO #2 returns `invalid_grant` | User assertion expired or audience mismatch in service app | Ensure `requestedAccessTokenVersion: 2` and correct audience |
-| Gateway returns 401 to Copilot | Gateway JWT validation rejects the OBO #1 token | Verify `SERVICE_EXPECTED_AUDIENCE` matches service app ID; check issuer matches tenant |
-| Session 403 on second turn | Session `owner_id` doesn't match (different user or claim forwarding bug) | Verify `X-User-Id` header is consistent between turns |
+| Gateway returns 401 to Copilot | Gateway channel auth or wrapper token acquisition fails | Verify Bot/channel auth config and gateway auth handler wiring |
+| Service returns 401/403 to gateway | Service bearer validation rejects the forwarded token | Verify `SERVICE_EXPECTED_AUDIENCE`, issuer, tenant, and signing key refresh logic |
+| Session 403 on second turn | Session `owner_id` doesn't match the validated token `oid` on the follow-up turn | Verify the same signed-in user is present and the service derives ownership from the validated bearer, not mutable forwarded headers |
 | `/healthz` returns 401 | Health endpoint not excluded from auth middleware | Add path exclusion for `/healthz` |
 | Invoke activities show error to user | Missing invoke handler in gateway | Add a no-op route for `activity.type == "invoke"` with `is_invoke=True` |
 
@@ -753,19 +755,23 @@ Common scenarios:
 
 If you already have a working agentic service that was not designed for M365:
 
-1. **Do not modify the service.** Its API contract, session model, and auth mechanism
-   stay as-is. The service does not need JWT validation — the gateway handles it.
+1. **Keep the service contract stable where possible.** Its API contract, session
+   model, and agentic runtime can usually stay as-is. If it does not already
+   validate the service bearer, add that at the service boundary before relying
+   on delegated downstream access.
 2. **Create the gateway** with a service client class that maps Copilot conversations
    to your service's session model, reshapes message payloads, and attaches the OBO
-   token in whatever form the service expects. The gateway also validates the JWT and
-   forwards user claims as headers.
-3. **Deploy the service on internal-only ingress** so it is not publicly accessible.
-   The gateway is the only path to the service.
+   token in whatever form the service expects. The gateway also handles channel
+   auth and may forward user claims as optional metadata headers.
+3. **Prefer restricted ingress for the service** so it is not broadly exposed.
+   This is recommended hardening, but not a substitute for service-side bearer
+   validation.
 4. **Register the Entra apps** as described above. The service app's `access_as_user`
    scope is what the gateway's OBO #1 targets. If the service already has an Entra
    app registration, add the `access_as_user` scope and preauthorize the bot app.
 5. **If the service calls downstream APIs** and needs user-delegated access, have it
-   read the forwarded Bearer token and use it as the `user_assertion` for OBO #2.
+   validate the forwarded Bearer token and use that validated assertion as the
+   `user_assertion` for OBO #2.
    If the service uses API keys or managed identity for downstream calls (not
    user-delegated), OBO #2 is not needed.
 
