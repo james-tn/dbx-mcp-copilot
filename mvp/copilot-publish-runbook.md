@@ -92,21 +92,89 @@ Admin consent still needs to be completed for:
 
 ## 2. Databricks prep
 
-1. Create or reuse a Databricks SQL warehouse.
-2. Set `DATABRICKS_WAREHOUSE_ID` if you want to pin one explicitly.
-3. Seed the enriched MVP dataset:
+This section is the minimum one-time Databricks setup for the MVP. The planner
+uses Databricks SQL Statements API against the `veeam_demo.ri_secure.*` views,
+and the seed script creates the demo database objects and synthetic data needed
+for local and deployed testing.
+
+### 2.1 Local operator prerequisites
+
+Before seeding, make sure the operator running the scripts has:
+
+1. access to the target Databricks workspace at `DATABRICKS_HOST`
+2. permission to use the SQL Statements API
+3. permission to list SQL warehouses
+4. permission to create schemas / tables / views in the demo area used by the
+   seed script
+
+Set these values in `.env` first:
+
+- `DATABRICKS_HOST`
+- optionally `DATABRICKS_WAREHOUSE_ID`
+- optionally `DATABRICKS_PAT`
+
+The scripts support two local auth modes:
+
+1. **Preferred local setup path: Azure CLI token**
+   - run `az login`
+   - if needed, run `az account set --subscription <subscription-id>`
+   - the seed script will request a Databricks bearer with:
+     - resource `2ff814a6-3304-4ab8-85cb-cd0e6f879c1d`
+2. **Fallback local setup path: Databricks PAT**
+   - set `DATABRICKS_PAT` in `.env`
+   - this is useful if local Entra-based Databricks auth is not yet ready
+
+### 2.2 SQL warehouse setup
+
+Create or reuse a Databricks SQL warehouse for the MVP.
+
+Recommended checks:
+
+1. confirm at least one warehouse exists
+2. confirm at least one warehouse is in `RUNNING`, `STARTING`, or `STARTED`
+   state
+3. set `DATABRICKS_WAREHOUSE_ID` explicitly if you want deterministic behavior
+
+If `DATABRICKS_WAREHOUSE_ID` is not set, the seed and validation scripts will:
+
+1. list SQL warehouses from `GET /api/2.0/sql/warehouses`
+2. pick the first running or starting warehouse
+3. otherwise fall back to the first warehouse returned
+
+### 2.3 Seed the MVP dataset
+
+Seed the enriched MVP dataset:
 
 ```bash
 bash mvp/scripts/seed-databricks-ri.sh
 ```
 
-4. Confirm secure views exist:
+What the script does:
+
+1. loads `.env`
+2. obtains a Databricks bearer from `DATABRICKS_PAT` or Azure CLI
+3. resolves a warehouse if `DATABRICKS_WAREHOUSE_ID` is unset
+4. executes the seed SQL file statement-by-statement through the SQL Statements
+   API
+5. waits for each statement to finish before continuing
+
+Optional overrides:
+
+- `ENV_FILE=/path/to/.env`
+- `SQL_FILE=/path/to/seed-databricks-ri.sql`
+
+Seed success criteria:
+
+1. the script exits successfully
+2. it prints `Seed completed successfully using warehouse ...`
+3. the secure views exist:
    - `veeam_demo.ri_secure.accounts`
    - `veeam_demo.ri_secure.reps`
    - `veeam_demo.ri_secure.opportunities`
    - `veeam_demo.ri_secure.contacts`
+4. those views return non-zero row counts for the seeded demo territories
 
-## 3. Validate direct Databricks query access
+### 2.4 Validate direct Databricks connectivity after seed
 
 Validate the planner’s direct-query path before deploying the full planner:
 
@@ -123,8 +191,30 @@ Expected outcomes:
 1. `SELECT current_user()` succeeds
 2. secure-view row counts are returned
 3. auth mode is reported as OBO, PAT, or local identity fallback
+4. `accounts`, `reps`, `opportunities`, and `contacts` all appear in the output
 
-## 4. Deploy planner service
+### 2.5 Databricks readiness for the deployed planner
+
+Before moving on to ACA deployment, confirm the following are true:
+
+1. the planner app registration has delegated Databricks access configured
+2. tenant admin consent has been granted for that Databricks delegated
+   permission
+3. the signed-in seller used for testing can reach Databricks through OBO
+4. the seeded `veeam_demo.ri_secure.*` views are queryable by the delegated
+   identity path the planner will use
+
+For a stronger delegated-path validation, set a real seller planner token and
+rerun:
+
+```bash
+PLANNER_API_BEARER_TOKEN=<planner-api-user-token> \
+bash mvp/scripts/validate-databricks-direct-query.sh
+```
+
+This verifies the same OBO pattern the planner service will use in production.
+
+## 3. Deploy planner service
 
 Build and publish the planner image, then set `PLANNER_API_IMAGE`.
 
@@ -140,7 +230,7 @@ After deployment:
 2. also set `PLANNER_SERVICE_BASE_URL` to the same value for the wrapper
 3. keep the planner replica count pinned to one
 
-## 5. Validate planner service
+## 4. Validate planner service
 
 If you have a planner API bearer token for the signed-in seller, set:
 
@@ -159,7 +249,7 @@ Minimum checks:
 3. the first planner turn succeeds
 4. a follow-up turn reuses the same session
 
-## 6. Deploy M365 wrapper
+## 5. Deploy M365 wrapper
 
 Build and publish the wrapper image, then set `WRAPPER_IMAGE`.
 
@@ -180,7 +270,7 @@ After deployment:
 bash mvp/scripts/setup-bot-oauth-connection.sh
 ```
 
-## 7. Wrapper preflight
+## 6. Wrapper preflight
 
 Run the wrapper health and Playground preflight:
 
@@ -209,7 +299,7 @@ Important live-auth note:
 - Bot Framework sign-in invokes are expected during auth and should not produce
   a seller-visible error response
 
-## 8. Build the Microsoft 365 app package
+## 7. Build the Microsoft 365 app package
 
 Build the Custom Engine app package ZIP:
 
@@ -241,7 +331,7 @@ Current package note:
 - moving to an agentic-user template later would require additional schema
   fields such as `agenticUserTemplateId`
 
-## 9. Wire to Azure Bot and Copilot
+## 8. Wire to Azure Bot and Copilot
 
 1. Create or reuse an Azure Bot registration.
 2. Point the messaging endpoint to:
