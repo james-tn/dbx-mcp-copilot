@@ -104,6 +104,11 @@ common_env_vars=(
   "SESSION_MAX_TURNS=${SESSION_MAX_TURNS:-20}"
   "RI_SCOPE_MODE=${RI_SCOPE_MODE:-user}"
   "RI_DEMO_TERRITORY=${RI_DEMO_TERRITORY:-GreatLakes-ENT-Named-1}"
+  "ACCOUNT_PULSE_EXECUTION_MODE=${ACCOUNT_PULSE_EXECUTION_MODE:-legacy_sequential}"
+  "ACCOUNT_PULSE_MAX_CONCURRENCY=${ACCOUNT_PULSE_MAX_CONCURRENCY:-8}"
+  "ACCOUNT_PULSE_SOURCE_MODE=${ACCOUNT_PULSE_SOURCE_MODE:-live}"
+  "ACCOUNT_PULSE_REPLAY_FIXTURE_SET=${ACCOUNT_PULSE_REPLAY_FIXTURE_SET:-small_parent_set}"
+  "ACCOUNT_PULSE_ENABLE_INTERNAL_AGGREGATOR=${ACCOUNT_PULSE_ENABLE_INTERNAL_AGGREGATOR:-true}"
 )
 
 secret_env_vars=(
@@ -120,14 +125,17 @@ if az containerapp show --name "$PLANNER_ACA_APP_NAME" --resource-group "$AZURE_
       --password "${registry_settings[2]}" \
       >/dev/null
   fi
+  az containerapp secret set \
+    --name "$PLANNER_ACA_APP_NAME" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --secrets "planner-api-client-secret=$PLANNER_API_CLIENT_SECRET" \
+    >/dev/null
   az containerapp update \
     --name "$PLANNER_ACA_APP_NAME" \
     --resource-group "$AZURE_RESOURCE_GROUP" \
     --image "$PLANNER_API_IMAGE" \
     --min-replicas "${ACA_MIN_REPLICAS:-1}" \
     --max-replicas "${ACA_MAX_REPLICAS:-1}" \
-    --secrets \
-      "planner-api-client-secret=$PLANNER_API_CLIENT_SECRET" \
     --set-env-vars "${common_env_vars[@]}" "${secret_env_vars[@]}" \
     >/dev/null
 else
