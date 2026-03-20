@@ -18,6 +18,31 @@ The planner owns conversation state, orchestration, business data access, and
 seller-facing behavior. The wrapper is intentionally thin and only forwards
 authenticated Copilot/Bot turns into the planner API.
 
+## 1.1 High-Level Topology
+
+```mermaid
+flowchart LR
+    Seller[Seller in M365 Copilot]
+    Wrapper[M365 Wrapper<br/>Custom Engine ingress<br/>Azure Container Apps]
+    Planner[Planner Service<br/>Azure Container Apps]
+    Router[DailyAccountPlanner<br/>MAF handoff router]
+    Pulse[AccountPulse]
+    NextMove[NextMove]
+    DB[(Databricks<br/>ri_secure views)]
+    Web[External Web Search]
+    Edgar[EDGAR]
+
+    Seller --> Wrapper
+    Wrapper --> Planner
+    Planner --> Router
+    Router --> Pulse
+    Router --> NextMove
+    Pulse --> DB
+    NextMove --> DB
+    Pulse --> Web
+    Pulse --> Edgar
+```
+
 ## 2. Architecture Decisions
 
 ### 2.1 Runtime split
@@ -72,8 +97,33 @@ code rather than by generic query generation.
 7. The planner runs fixed SQL against `veeam_demo.ri_secure.*`.
 8. The planner uses Microsoft Agent Framework handoff to route the request to
    `AccountPulse` or `NextMove`.
-9. The specialist agent uses semantic business tools, not SQL.
+9. `AccountPulse` or `NextMove` executes planner-owned semantic business logic,
+   not SQL generation.
 10. The planner returns the seller-facing reply through the wrapper to Copilot.
+
+```mermaid
+sequenceDiagram
+    participant Seller as Seller
+    participant Copilot as M365 Copilot
+    participant Wrapper as Thin M365 Wrapper
+    participant Planner as Planner Service
+    participant Entra as Entra ID
+    participant DB as Databricks
+
+    Seller->>Copilot: Ask planner question
+    Copilot->>Wrapper: POST /api/messages
+    Wrapper->>Entra: Resolve planner API user token
+    Entra-->>Wrapper: Planner API bearer
+    Wrapper->>Planner: Forward turn + conversation.id + bearer
+    Planner->>Planner: Validate planner API token
+    Planner->>Entra: OBO for Databricks scope
+    Entra-->>Planner: Databricks delegated token
+    Planner->>DB: Fixed secure-view SQL queries
+    DB-->>Planner: Scoped rows
+    Planner-->>Wrapper: Seller-facing reply
+    Wrapper-->>Copilot: Bot response
+    Copilot-->>Seller: Final planner answer
+```
 
 ## 4. Planner Runtime
 
@@ -110,15 +160,93 @@ to hand off to:
 The top-level planner should only ask a brief clarification when the user’s
 intent is genuinely ambiguous.
 
+```mermaid
+flowchart TD
+    Start[Seller message] --> Router{Intent clear?}
+    Router -->|Briefing / news / what's happening| Pulse[Hand off to AccountPulse]
+    Router -->|Focus / outreach / top accounts| Next[Hand off to NextMove]
+    Router -->|Ambiguous| Clarify[Ask one short clarification]
+```
+
 ### 5.2 Account Pulse
 
 Account Pulse:
 
-- calls `get_scoped_accounts()`
-- groups accounts by `global_ultimate`
-- uses web search and `edgar_lookup`
-- uses Databricks relationship context when available
-- uses Velocity prefiltering through `get_top_opportunities(filter_mode="velocity_candidates")`
+- remains a specialist agent in the handoff graph
+- uses one planner-owned internal entry tool: `generate_account_pulse_briefing(request)`
+- keeps the seller-facing contract as one briefing agent even though the work
+  inside it is multi-stage
+
+`generate_account_pulse_briefing(...)` owns the full deterministic briefing
+pipeline:
+
+1. loads the scoped account list through `get_scoped_accounts()`
+2. narrows to a named account when the seller follow-up clearly asks for one
+3. applies Velocity prefiltering through
+   `get_top_opportunities(filter_mode="velocity_candidates")` when needed
+4. groups the selected rows by `global_ultimate`
+5. builds typed parent scan targets with relationship context
+6. calls the internal parallel scan tool once
+7. renders the final seller-facing markdown briefing
+
+This keeps the top-level Account Pulse prompt simple and prevents the model from
+returning raw intermediate JSON or drifting off the required briefing format.
+
+#### Internal parallel scan pipeline
+
+Account Pulse uses an internal bounded-concurrency scan engine:
+
+- `scan_parents_parallel(scan_targets)` is the internal boundary for parent
+  scanning
+- work is partitioned by unique `global_ultimate` parent
+- one internal worker agent flow scans one parent at a time
+- the planner runs up to 8 concurrent worker flows in process
+- workers use replay-aware or live source tools for:
+  - general news search
+  - cybersecurity search
+  - EDGAR lookup
+- a normalization pass deduplicates and validates worker results
+- one internal aggregation agent converts worker outputs into the canonical
+  `scan_bundle`
+- the final markdown renderer formats the seller-facing response from that
+  canonical bundle
+
+The dynamic parallel path is feature-flagged and benchmarked against the legacy
+sequential pattern before default cutover.
+
+```mermaid
+flowchart TD
+    Request[Generate Account Pulse briefing] --> Scoped[Load scoped accounts]
+    Scoped --> Narrow{Named account follow-up?}
+    Narrow -->|Yes| Filter[Filter scoped rows to requested account]
+    Narrow -->|No| Keep[Keep full scoped rows]
+    Filter --> Segment{Segment = Velocity?}
+    Keep --> Segment
+    Segment -->|Yes| Velocity[Load Velocity candidates]
+    Segment -->|No| Group[Group rows by global_ultimate]
+    Velocity --> Group
+    Group --> Targets[Build typed parent scan targets]
+    Targets --> Parallel[Run parallel parent scan]
+    Parallel --> Render[Render final markdown briefing]
+    Render --> Reply[Seller-facing Account Pulse response]
+```
+
+```mermaid
+flowchart LR
+    Targets[Parent scan targets] --> Pool[Bounded async pool<br/>max 8 workers]
+    Pool --> W1[Worker agent<br/>Parent A]
+    Pool --> W2[Worker agent<br/>Parent B]
+    Pool --> W3[Worker agent<br/>Parent N]
+    W1 --> Sources1[Web + cyber + EDGAR]
+    W2 --> Sources2[Web + cyber + EDGAR]
+    W3 --> Sources3[Web + cyber + EDGAR]
+    Sources1 --> Normalize[Normalize + validate + dedupe]
+    Sources2 --> Normalize
+    Sources3 --> Normalize
+    Normalize --> Aggregate[Internal aggregation agent]
+    Aggregate --> Bundle[Canonical scan_bundle]
+    Bundle --> Formatter[Markdown formatter]
+```
 
 ### 5.3 Next Move
 
@@ -139,8 +267,15 @@ The planner keeps the seller-friendly tool contract:
 - `get_account_contacts(account_id)`
 - `lookup_rep(rep_name)` for local-only development
 
-These are planner-owned business tools backed by direct Databricks SQL. Prompts
-must remain SQL-free.
+These are planner-owned business tools backed by direct Databricks SQL.
+
+Additionally, Account Pulse owns two internal tools that are not part of the
+seller-facing shared planner contract:
+
+- `generate_account_pulse_briefing(request)`
+- `scan_parents_parallel(scan_targets)`
+
+Prompts must remain SQL-free.
 
 ## 7. Databricks Access Model
 
@@ -156,6 +291,16 @@ The planner is the Databricks trust boundary.
   - `DATABRICKS_OBO_SCOPE=2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default`
 
 The wrapper does **not** mint or forward Databricks tokens directly.
+
+```mermaid
+flowchart LR
+    UserToken[User token for planner API] --> Planner[Planner Service]
+    Planner --> Validate[Validate audience]
+    Validate --> OBO[OBO to Databricks scope]
+    OBO --> DBToken[Delegated Databricks token]
+    DBToken --> SQL[Fixed SQL statements]
+    SQL --> SecureViews[veeam_demo.ri_secure.*]
+```
 
 ### 7.2 Query execution
 
@@ -248,6 +393,11 @@ Optional development-only variables:
 - `RI_DEMO_TERRITORY`
 - `DATABRICKS_PAT`
 - `PLANNER_API_BEARER_TOKEN`
+- `ACCOUNT_PULSE_EXECUTION_MODE`
+- `ACCOUNT_PULSE_MAX_CONCURRENCY`
+- `ACCOUNT_PULSE_SOURCE_MODE`
+- `ACCOUNT_PULSE_REPLAY_FIXTURE_SET`
+- `ACCOUNT_PULSE_ENABLE_INTERNAL_AGGREGATOR`
 
 ### 9.2 Wrapper
 
@@ -315,6 +465,8 @@ Optional CLI publish variables:
 - semantic tool payload stability
 - session creation and isolation
 - planner routing and handoff behavior
+- Account Pulse account narrowing and formatter behavior
+- parallel scan worker validation, dedupe, and concurrency cap behavior
 
 ### 11.2 Integration tests
 
@@ -322,6 +474,10 @@ Optional CLI publish variables:
 - wrapper forwarding to planner
 - real Databricks seeded data visibility
 - user-scoped delegated data access through planner
+- multi-turn Account Pulse behavior, including follow-up briefing on one named
+  account from a prior briefing
+- replay-backed Account Pulse benchmark comparisons between sequential and
+  dynamic parallel execution
 
 ### 11.3 Acceptance milestones
 
@@ -336,6 +492,7 @@ Focused execution milestones for this MVP are:
    - planner direct API is validated with a real delegated user token
    - wrapper forwarding behavior is validated locally at service level
    - channel ingress is validated separately through Agents Playground / Azure Bot
+   - Account Pulse multi-turn briefing flow is validated locally
 
 3. **Azure Container Apps**
    - planner and wrapper both deploy cleanly
@@ -353,6 +510,13 @@ Focused execution milestones for this MVP are:
   a small fixed set of business operations, not dynamic SQL generation.
 - The semantic tool contract stays stable even if the transport or SQL
   implementation evolves later.
+- Account Pulse now uses a deterministic planner-owned briefing pipeline rather
+  than relying on the specialist model to manually chain all intermediate tools.
+- Account Pulse follow-up prompts that name one account should narrow to that
+  account while preserving parent-company signal context.
+- The Account Pulse parallel scan engine is intentionally internal to the
+  planner runtime so the handoff graph stays simple: `DailyAccountPlanner` ->
+  `AccountPulse` or `NextMove`.
 - `PLANNER_API_CLIENT_ID` and `PLANNER_API_CLIENT_SECRET` remain required
   because Databricks OBO is performed by the planner service.
 - The current Teams/M365 package uses `functionsAs=agentOnly`; moving to an

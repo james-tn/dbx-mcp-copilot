@@ -1,0 +1,457 @@
+{
+  "fixture_sets": {
+    "small_parent_set": {
+      "request": "Give me my morning briefing",
+      "scan_targets": [
+        {
+          "parent_name": "Ford Motor Company",
+          "child_accounts": ["Latitude AI LLC", "Ford Pro"],
+          "segment": "ENT",
+          "relationship_context": {
+            "customer_or_prospect": ["Customer"],
+            "current_veeam_products": ["VBR"],
+            "renewal_dates": ["2026-06-30"],
+            "opportunity_stages": ["Upsell"],
+            "last_seller_touch_dates": ["2026-03-01"]
+          },
+          "scan_mode": "full"
+        },
+        {
+          "parent_name": "adidas AG",
+          "child_accounts": ["adidas North America"],
+          "segment": "ENT",
+          "relationship_context": {
+            "customer_or_prospect": ["Prospect"],
+            "current_veeam_products": [],
+            "renewal_dates": [],
+            "opportunity_stages": ["New Logo"],
+            "last_seller_touch_dates": ["2025-11-11"]
+          },
+          "scan_mode": "full"
+        }
+      ],
+      "scope_payload": {
+        "scope_mode": "demo",
+        "territory": "GreatLakes-ENT-Named-1",
+        "territories": ["GreatLakes-ENT-Named-1"],
+        "segment": "ENT",
+        "total_accounts": 3,
+        "unique_global_ultimates": 2,
+        "accounts": [
+          {
+            "account_id": "001",
+            "name": "Latitude AI LLC",
+            "global_ultimate": "Ford Motor Company",
+            "sales_team": "GreatLakes-ENT-Named-1",
+            "customer_or_prospect": "Customer",
+            "current_veeam_products": ["VBR"],
+            "renewal_date": "2026-06-30",
+            "opportunity_stage": "Upsell",
+            "last_seller_touch_date": "2026-03-01"
+          },
+          {
+            "account_id": "002",
+            "name": "Ford Pro",
+            "global_ultimate": "Ford Motor Company",
+            "sales_team": "GreatLakes-ENT-Named-1",
+            "customer_or_prospect": "Customer",
+            "current_veeam_products": ["VBR"],
+            "renewal_date": "2026-06-30",
+            "opportunity_stage": "Upsell",
+            "last_seller_touch_date": "2026-03-01"
+          },
+          {
+            "account_id": "003",
+            "name": "adidas North America",
+            "global_ultimate": "adidas AG",
+            "sales_team": "GreatLakes-ENT-Named-1",
+            "customer_or_prospect": "Prospect",
+            "current_veeam_products": [],
+            "renewal_date": null,
+            "opportunity_stage": "New Logo",
+            "last_seller_touch_date": "2025-11-11"
+          }
+        ]
+      },
+      "sources": {
+        "Ford Motor Company": {
+          "general_news": [
+            {
+              "title": "Ford expands enterprise AI manufacturing pilot",
+              "url": "https://news.example.com/ford-ai-pilot",
+              "date": "2026-03-19",
+              "publication": "Reuters",
+              "snippet": "Ford said it is expanding an AI-backed manufacturing pilot across two North American plants."
+            }
+          ],
+          "cyber_news": [
+            {
+              "title": "Supplier breach prompts Ford review",
+              "url": "https://cyber.example.com/ford-supplier-breach",
+              "date": "2026-03-18",
+              "publication": "CyberDaily",
+              "snippet": "A supplier breach triggered a review of connected data sharing controls impacting Ford programs."
+            }
+          ],
+          "edgar": {
+            "public": true,
+            "cik": "0000037996",
+            "edgar_name": "FORD MOTOR CO",
+            "filings": [
+              {
+                "form": "8-K",
+                "filed": "2026-03-18",
+                "url": "https://www.sec.gov/Archives/ford-8k-20260318.htm"
+              }
+            ]
+          }
+        },
+        "adidas AG": {
+          "general_news": [
+            {
+              "title": "adidas opens new regional distribution center",
+              "url": "https://news.example.com/adidas-distribution-center",
+              "date": "2026-03-19",
+              "publication": "Financial Times",
+              "snippet": "adidas opened a new regional distribution center to support faster ecommerce fulfillment."
+            }
+          ],
+          "cyber_news": [],
+          "edgar": {
+            "public": false,
+            "filings": []
+          }
+        }
+      },
+      "expected": {
+        "min_signals": 3
+      }
+    },
+    "medium_mixed_hierarchy": {
+      "request": "What's happening in my accounts?",
+      "scan_targets": [
+        {
+          "parent_name": "General Motors Company",
+          "child_accounts": ["Cruise LLC", "BrightDrop"],
+          "segment": "ENT",
+          "relationship_context": {
+            "customer_or_prospect": ["Customer"],
+            "current_veeam_products": ["VDC"],
+            "renewal_dates": ["2026-05-15"],
+            "opportunity_stages": ["Renewal"]
+          },
+          "scan_mode": "full"
+        },
+        {
+          "parent_name": "Compass Group PLC",
+          "child_accounts": ["Levy Restaurants"],
+          "segment": "COM",
+          "relationship_context": {
+            "customer_or_prospect": ["Prospect"],
+            "current_veeam_products": [],
+            "renewal_dates": [],
+            "opportunity_stages": ["Discovery"]
+          },
+          "scan_mode": "full"
+        },
+        {
+          "parent_name": "Sainsbury PLC",
+          "child_accounts": ["Argos"],
+          "segment": "COM",
+          "relationship_context": {
+            "customer_or_prospect": ["Customer"],
+            "current_veeam_products": ["VBR"],
+            "renewal_dates": ["2026-09-01"],
+            "opportunity_stages": ["Cross-sell"]
+          },
+          "scan_mode": "full"
+        }
+      ],
+      "scope_payload": {
+        "scope_mode": "demo",
+        "territory": "UK-COM-Named-3",
+        "territories": ["UK-COM-Named-3"],
+        "segment": "COM",
+        "total_accounts": 4,
+        "unique_global_ultimates": 3,
+        "accounts": [
+          {
+            "account_id": "101",
+            "name": "Cruise LLC",
+            "global_ultimate": "General Motors Company",
+            "sales_team": "UK-COM-Named-3"
+          },
+          {
+            "account_id": "102",
+            "name": "BrightDrop",
+            "global_ultimate": "General Motors Company",
+            "sales_team": "UK-COM-Named-3"
+          },
+          {
+            "account_id": "103",
+            "name": "Levy Restaurants",
+            "global_ultimate": "Compass Group PLC",
+            "sales_team": "UK-COM-Named-3"
+          },
+          {
+            "account_id": "104",
+            "name": "Argos",
+            "global_ultimate": "Sainsbury PLC",
+            "sales_team": "UK-COM-Named-3"
+          }
+        ]
+      },
+      "sources": {
+        "General Motors Company": {
+          "general_news": [
+            {
+              "title": "GM expands EV fleet operations software",
+              "url": "https://news.example.com/gm-ev-fleet",
+              "date": "2026-03-19",
+              "publication": "Bloomberg",
+              "snippet": "GM said it will expand EV fleet operations software across commercial programs."
+            }
+          ],
+          "cyber_news": [],
+          "edgar": {
+            "public": true,
+            "cik": "0001467858",
+            "edgar_name": "GENERAL MOTORS CO",
+            "filings": [
+              {
+                "form": "10-K",
+                "filed": "2026-03-17",
+                "url": "https://www.sec.gov/Archives/gm-10k-20260317.htm"
+              }
+            ]
+          }
+        },
+        "Compass Group PLC": {
+          "general_news": [],
+          "cyber_news": [
+            {
+              "title": "Hospitality vendor hit by phishing incident",
+              "url": "https://cyber.example.com/compass-phishing",
+              "date": "2026-03-18",
+              "publication": "The Register",
+              "snippet": "A phishing incident at a hospitality vendor led Compass to review credential and endpoint controls."
+            }
+          ],
+          "edgar": {
+            "public": false,
+            "filings": []
+          }
+        },
+        "Sainsbury PLC": {
+          "general_news": [
+            {
+              "title": "Sainsbury invests in retail modernization",
+              "url": "https://news.example.com/sainsbury-modernization",
+              "date": "2026-03-19",
+              "publication": "Retail Week",
+              "snippet": "Sainsbury said new spending will accelerate modernization across digital operations."
+            }
+          ],
+          "cyber_news": [],
+          "edgar": {
+            "public": true,
+            "cik": "0000086312",
+            "edgar_name": "J SAINSBURY PLC",
+            "filings": [
+              {
+                "form": "8-K",
+                "filed": "2026-03-18",
+                "url": "https://www.sec.gov/Archives/sainsbury-8k-20260318.htm"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "min_signals": 4
+      }
+    },
+    "large_gt_8_parents": {
+      "request": "Give me my briefing",
+      "scan_targets": [
+        { "parent_name": "Parent 01 Corp", "child_accounts": ["Account 01"], "segment": "ENT", "relationship_context": {}, "scan_mode": "full" },
+        { "parent_name": "Parent 02 Corp", "child_accounts": ["Account 02"], "segment": "ENT", "relationship_context": {}, "scan_mode": "full" },
+        { "parent_name": "Parent 03 Corp", "child_accounts": ["Account 03"], "segment": "ENT", "relationship_context": {}, "scan_mode": "full" },
+        { "parent_name": "Parent 04 Corp", "child_accounts": ["Account 04"], "segment": "ENT", "relationship_context": {}, "scan_mode": "full" },
+        { "parent_name": "Parent 05 Corp", "child_accounts": ["Account 05"], "segment": "ENT", "relationship_context": {}, "scan_mode": "full" },
+        { "parent_name": "Parent 06 Corp", "child_accounts": ["Account 06"], "segment": "ENT", "relationship_context": {}, "scan_mode": "full" },
+        { "parent_name": "Parent 07 Corp", "child_accounts": ["Account 07"], "segment": "ENT", "relationship_context": {}, "scan_mode": "full" },
+        { "parent_name": "Parent 08 Corp", "child_accounts": ["Account 08"], "segment": "ENT", "relationship_context": {}, "scan_mode": "full" },
+        { "parent_name": "Parent 09 Corp", "child_accounts": ["Account 09"], "segment": "ENT", "relationship_context": {}, "scan_mode": "full" },
+        { "parent_name": "Parent 10 Corp", "child_accounts": ["Account 10"], "segment": "ENT", "relationship_context": {}, "scan_mode": "full" }
+      ],
+      "scope_payload": {
+        "scope_mode": "demo",
+        "territory": "GreatLakes-ENT-Named-1",
+        "territories": ["GreatLakes-ENT-Named-1"],
+        "segment": "ENT",
+        "total_accounts": 10,
+        "unique_global_ultimates": 10,
+        "accounts": [
+          { "account_id": "201", "name": "Account 01", "global_ultimate": "Parent 01 Corp", "sales_team": "GreatLakes-ENT-Named-1" },
+          { "account_id": "202", "name": "Account 02", "global_ultimate": "Parent 02 Corp", "sales_team": "GreatLakes-ENT-Named-1" },
+          { "account_id": "203", "name": "Account 03", "global_ultimate": "Parent 03 Corp", "sales_team": "GreatLakes-ENT-Named-1" },
+          { "account_id": "204", "name": "Account 04", "global_ultimate": "Parent 04 Corp", "sales_team": "GreatLakes-ENT-Named-1" },
+          { "account_id": "205", "name": "Account 05", "global_ultimate": "Parent 05 Corp", "sales_team": "GreatLakes-ENT-Named-1" },
+          { "account_id": "206", "name": "Account 06", "global_ultimate": "Parent 06 Corp", "sales_team": "GreatLakes-ENT-Named-1" },
+          { "account_id": "207", "name": "Account 07", "global_ultimate": "Parent 07 Corp", "sales_team": "GreatLakes-ENT-Named-1" },
+          { "account_id": "208", "name": "Account 08", "global_ultimate": "Parent 08 Corp", "sales_team": "GreatLakes-ENT-Named-1" },
+          { "account_id": "209", "name": "Account 09", "global_ultimate": "Parent 09 Corp", "sales_team": "GreatLakes-ENT-Named-1" },
+          { "account_id": "210", "name": "Account 10", "global_ultimate": "Parent 10 Corp", "sales_team": "GreatLakes-ENT-Named-1" }
+        ]
+      },
+      "sources": {
+        "Parent 01 Corp": { "general_news": [{ "title": "Parent 01 expands operations", "url": "https://news.example.com/p01", "date": "2026-03-19", "publication": "Reuters", "snippet": "Parent 01 expanded operations in a regional market." }], "cyber_news": [], "edgar": { "public": false, "filings": [] } },
+        "Parent 02 Corp": { "general_news": [], "cyber_news": [{ "title": "Parent 02 reviews breach controls", "url": "https://cyber.example.com/p02", "date": "2026-03-19", "publication": "CyberDaily", "snippet": "Parent 02 reviewed breach controls after a partner incident." }], "edgar": { "public": false, "filings": [] } },
+        "Parent 03 Corp": { "general_news": [{ "title": "Parent 03 launches new platform", "url": "https://news.example.com/p03", "date": "2026-03-19", "publication": "TechCrunch", "snippet": "Parent 03 launched a new platform for enterprise customers." }], "cyber_news": [], "edgar": { "public": false, "filings": [] } },
+        "Parent 04 Corp": { "general_news": [], "cyber_news": [], "edgar": { "public": false, "filings": [] } },
+        "Parent 05 Corp": { "general_news": [{ "title": "Parent 05 reports quarterly earnings", "url": "https://news.example.com/p05", "date": "2026-03-18", "publication": "MarketWatch", "snippet": "Parent 05 reported quarterly earnings and cloud expansion plans." }], "cyber_news": [], "edgar": { "public": true, "cik": "0000000005", "edgar_name": "PARENT 05 CORP", "filings": [{ "form": "10-Q", "filed": "2026-03-18", "url": "https://www.sec.gov/Archives/p05-10q.htm" }] } },
+        "Parent 06 Corp": { "general_news": [], "cyber_news": [{ "title": "Parent 06 outage prompts resilience review", "url": "https://cyber.example.com/p06", "date": "2026-03-17", "publication": "The Register", "snippet": "An outage at Parent 06 prompted a resilience review." }], "edgar": { "public": false, "filings": [] } },
+        "Parent 07 Corp": { "general_news": [{ "title": "Parent 07 appoints new CIO", "url": "https://news.example.com/p07", "date": "2026-03-19", "publication": "Bloomberg", "snippet": "Parent 07 appointed a new CIO to lead infrastructure modernization." }], "cyber_news": [], "edgar": { "public": false, "filings": [] } },
+        "Parent 08 Corp": { "general_news": [{ "title": "Parent 08 opens new distribution hub", "url": "https://news.example.com/p08", "date": "2026-03-18", "publication": "WSJ", "snippet": "Parent 08 opened a new distribution hub for ecommerce growth." }], "cyber_news": [], "edgar": { "public": false, "filings": [] } },
+        "Parent 09 Corp": { "general_news": [], "cyber_news": [{ "title": "Parent 09 ransomware drill disclosed", "url": "https://cyber.example.com/p09", "date": "2026-03-18", "publication": "InfoSecurity", "snippet": "Parent 09 disclosed a ransomware readiness drill after sector threats increased." }], "edgar": { "public": false, "filings": [] } },
+        "Parent 10 Corp": { "general_news": [{ "title": "Parent 10 expands AI data center footprint", "url": "https://news.example.com/p10", "date": "2026-03-19", "publication": "CNBC", "snippet": "Parent 10 expanded its AI data center footprint and backup capacity." }], "cyber_news": [], "edgar": { "public": false, "filings": [] } }
+      },
+      "expected": {
+        "min_signals": 8
+      }
+    },
+    "velocity_prefilter": {
+      "request": "Any news today?",
+      "scan_targets": [
+        {
+          "parent_name": "Velocity Parent A",
+          "child_accounts": ["Velocity Account A"],
+          "segment": "VEL",
+          "relationship_context": { "customer_or_prospect": ["Prospect"] },
+          "scan_mode": "velocity_candidate"
+        },
+        {
+          "parent_name": "Velocity Parent B",
+          "child_accounts": ["Velocity Account B"],
+          "segment": "VEL",
+          "relationship_context": { "customer_or_prospect": ["Customer"] },
+          "scan_mode": "velocity_candidate"
+        }
+      ],
+      "scope_payload": {
+        "scope_mode": "demo",
+        "territory": "SoCal-VEL-Named-2",
+        "territories": ["SoCal-VEL-Named-2"],
+        "segment": "VEL",
+        "total_accounts": 4,
+        "unique_global_ultimates": 4,
+        "accounts": [
+          { "account_id": "301", "name": "Velocity Account A", "global_ultimate": "Velocity Parent A", "sales_team": "SoCal-VEL-Named-2" },
+          { "account_id": "302", "name": "Velocity Account B", "global_ultimate": "Velocity Parent B", "sales_team": "SoCal-VEL-Named-2" },
+          { "account_id": "303", "name": "Velocity Account C", "global_ultimate": "Velocity Parent C", "sales_team": "SoCal-VEL-Named-2" },
+          { "account_id": "304", "name": "Velocity Account D", "global_ultimate": "Velocity Parent D", "sales_team": "SoCal-VEL-Named-2" }
+        ]
+      },
+      "top_opportunities_payload": {
+        "scope_mode": "demo",
+        "territory": "SoCal-VEL-Named-2",
+        "territories": ["SoCal-VEL-Named-2"],
+        "segment": "VEL",
+        "filter_mode": "velocity_candidates",
+        "limit": 5,
+        "offset": 0,
+        "accounts": [
+          { "account_id": "301", "account_name": "Velocity Account A", "company_name": "Velocity Parent A", "sales_team": "SoCal-VEL-Named-2", "xf_score_previous_day": 88 },
+          { "account_id": "302", "account_name": "Velocity Account B", "company_name": "Velocity Parent B", "sales_team": "SoCal-VEL-Named-2", "xf_score_previous_day": 82 }
+        ]
+      },
+      "sources": {
+        "Velocity Parent A": {
+          "general_news": [
+            {
+              "title": "Velocity Parent A expands managed cloud program",
+              "url": "https://news.example.com/vel-a",
+              "date": "2026-03-19",
+              "publication": "CRN",
+              "snippet": "Velocity Parent A expanded a managed cloud program for midmarket customers."
+            }
+          ],
+          "cyber_news": [],
+          "edgar": { "public": false, "filings": [] }
+        },
+        "Velocity Parent B": {
+          "general_news": [],
+          "cyber_news": [
+            {
+              "title": "Velocity Parent B discloses security review",
+              "url": "https://cyber.example.com/vel-b",
+              "date": "2026-03-18",
+              "publication": "CyberScoop",
+              "snippet": "Velocity Parent B disclosed a security review following unusual access alerts."
+            }
+          ],
+          "edgar": { "public": false, "filings": [] }
+        }
+      },
+      "expected": {
+        "min_signals": 2
+      }
+    },
+    "partial_failure": {
+      "request": "Give me my morning briefing",
+      "scan_targets": [
+        {
+          "parent_name": "Stable Parent Inc",
+          "child_accounts": ["Stable Account"],
+          "segment": "ENT",
+          "relationship_context": {},
+          "scan_mode": "full"
+        },
+        {
+          "parent_name": "Broken Parent LLC",
+          "child_accounts": ["Broken Account"],
+          "segment": "ENT",
+          "relationship_context": {},
+          "scan_mode": "full"
+        }
+      ],
+      "scope_payload": {
+        "scope_mode": "demo",
+        "territory": "GreatLakes-ENT-Named-1",
+        "territories": ["GreatLakes-ENT-Named-1"],
+        "segment": "ENT",
+        "total_accounts": 2,
+        "unique_global_ultimates": 2,
+        "accounts": [
+          { "account_id": "401", "name": "Stable Account", "global_ultimate": "Stable Parent Inc", "sales_team": "GreatLakes-ENT-Named-1" },
+          { "account_id": "402", "name": "Broken Account", "global_ultimate": "Broken Parent LLC", "sales_team": "GreatLakes-ENT-Named-1" }
+        ]
+      },
+      "sources": {
+        "Stable Parent Inc": {
+          "general_news": [
+            {
+              "title": "Stable Parent opens backup operations center",
+              "url": "https://news.example.com/stable-parent",
+              "date": "2026-03-19",
+              "publication": "WSJ",
+              "snippet": "Stable Parent opened a new backup operations center after recent infrastructure investments."
+            }
+          ],
+          "cyber_news": [],
+          "edgar": { "public": false, "filings": [] }
+        },
+        "Broken Parent LLC": {
+          "general_news": [],
+          "cyber_news": [],
+          "cyber_error": "Replay timeout for cybersecurity search",
+          "edgar_error": "Replay EDGAR service unavailable"
+        }
+      },
+      "expected": {
+        "min_signals": 1
+      }
+    }
+  }
+}

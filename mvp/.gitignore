@@ -4,3 +4,4 @@ appPackage/build/
 **/.claude/
 **/__pycache__/
 *.pyc
+benchmark-output/

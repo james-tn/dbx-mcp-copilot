@@ -26,15 +26,58 @@ function Read-EnvFile {
     return $values
 }
 
+function Invoke-GraphApplicationPatch {
+  param(
+    [string]$ApplicationObjectId,
+    [hashtable]$Body
+  )
+
+  $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ("graph-app-patch-" + [guid]::NewGuid().ToString() + ".json")
+  try {
+    $Body | ConvertTo-Json -Depth 10 | Set-Content -Path $tempFile -Encoding UTF8
+    az rest --method PATCH --uri "https://graph.microsoft.com/v1.0/applications/$ApplicationObjectId" --headers "Content-Type=application/json" --body "@$tempFile" 1>$null
+  }
+  finally {
+    if (Test-Path $tempFile) {
+      Remove-Item $tempFile -Force
+    }
+  }
+}
+
+function Set-RequiredResourceAccess {
+  param(
+    [string]$ApplicationObjectId,
+    [object[]]$RequiredResourceAccess
+  )
+
+  Invoke-GraphApplicationPatch -ApplicationObjectId $ApplicationObjectId -Body @{
+    requiredResourceAccess = $RequiredResourceAccess
+  }
+}
+
+function Ensure-ServicePrincipal {
+  param([string]$AppId)
+
+  $existing = az ad sp list --filter "appId eq '$AppId'" --query "[0].id" -o tsv
+  if ([string]::IsNullOrWhiteSpace($existing)) {
+    az ad sp create --id $AppId 1>$null
+  }
+}
+
 function New-AppIfMissing {
     param(
         [string]$DisplayName,
-        [string]$IdentifierUri
+    [bool]$ExposeAsApi = $false
     )
 
     $existing = az ad app list --display-name $DisplayName --query "[0]" | ConvertFrom-Json
     if ($null -ne $existing) {
         Write-Host "Found existing app: $DisplayName"
+    if ($ExposeAsApi -and ($null -eq $existing.identifierUris -or $existing.identifierUris.Count -eq 0)) {
+      $safeIdentifierUri = "api://$($existing.appId)"
+      az ad app update --id $existing.id --identifier-uris $safeIdentifierUri 1>$null
+      $existing = az ad app show --id $existing.id | ConvertFrom-Json
+    }
         return $existing
     }
 
@@ -44,11 +87,14 @@ function New-AppIfMissing {
         '--sign-in-audience', 'AzureADMyOrg'
     )
 
-    if (-not [string]::IsNullOrWhiteSpace($IdentifierUri)) {
-        $createArgs += @('--identifier-uris', $IdentifierUri)
-    }
-
     $created = az @createArgs | ConvertFrom-Json
+
+  if ($ExposeAsApi) {
+    $safeIdentifierUri = "api://$($created.appId)"
+    az ad app update --id $created.id --identifier-uris $safeIdentifierUri 1>$null
+    $created = az ad app show --id $created.id | ConvertFrom-Json
+  }
+
     Write-Host "Created app: $DisplayName"
     return $created
 }
@@ -66,38 +112,38 @@ $mcpApiName = "$NamePrefix-mcp-api"
 $brokerName = "$NamePrefix-auth-broker"
 $copilotClientName = "$NamePrefix-copilot-client"
 
-$mcpIdentifierUri = "api://$mcpApiName"
-
-$mcpApp = New-AppIfMissing -DisplayName $mcpApiName -IdentifierUri $mcpIdentifierUri
-$brokerApp = New-AppIfMissing -DisplayName $brokerName -IdentifierUri ""
-$copilotClientApp = New-AppIfMissing -DisplayName $copilotClientName -IdentifierUri ""
+$mcpApp = New-AppIfMissing -DisplayName $mcpApiName -ExposeAsApi $true
+$brokerApp = New-AppIfMissing -DisplayName $brokerName
+$copilotClientApp = New-AppIfMissing -DisplayName $copilotClientName
+$mcpIdentifierUri = $mcpApp.identifierUris[0]
 
 # Ensure service principals exist
-az ad sp create --id $mcpApp.appId 1>$null
-az ad sp create --id $brokerApp.appId 1>$null
-az ad sp create --id $copilotClientApp.appId 1>$null
+Ensure-ServicePrincipal -AppId $mcpApp.appId
+Ensure-ServicePrincipal -AppId $brokerApp.appId
+Ensure-ServicePrincipal -AppId $copilotClientApp.appId
 
 # Create delegated scope for MCP API
 $scopeId = [guid]::NewGuid().ToString()
-$apiPatch = @{
-  api = @{
-    requestedAccessTokenVersion = 2
-    oauth2PermissionScopes = @(
-      @{
-        adminConsentDescription = 'Access Revenue Intelligence MCP API as signed-in user.'
-        adminConsentDisplayName = 'Access Revenue MCP API'
-        id = $scopeId
-        isEnabled = $true
-        type = 'User'
-        userConsentDescription = 'Allow app to access Revenue MCP API on your behalf.'
-        userConsentDisplayName = 'Access Revenue MCP API'
-        value = 'access_as_user'
-      }
-    )
-  }
-} | ConvertTo-Json -Depth 6
-
-az ad app update --id $mcpApp.id --set "api=$($apiPatch | ConvertFrom-Json | Select-Object -ExpandProperty api | ConvertTo-Json -Compress)" 1>$null
+$existingMcpScope = az ad app show --id $mcpApp.id --query "api.oauth2PermissionScopes[?value=='access_as_user'] | [0]" | ConvertFrom-Json
+if ($null -eq $existingMcpScope) {
+    Invoke-GraphApplicationPatch -ApplicationObjectId $mcpApp.id -Body @{
+        api = @{
+            requestedAccessTokenVersion = 2
+            oauth2PermissionScopes = @(
+                @{
+                    adminConsentDescription = 'Access Revenue Intelligence MCP API as signed-in user.'
+                    adminConsentDisplayName = 'Access Revenue MCP API'
+                    id = $scopeId
+                    isEnabled = $true
+                    type = 'User'
+                    userConsentDescription = 'Allow app to access Revenue MCP API on your behalf.'
+                    userConsentDisplayName = 'Access Revenue MCP API'
+                    value = 'access_as_user'
+                }
+            )
+        }
+    }
+}
 
 # Configure copilot client required resource access for MCP scope
 $mcpScope = az ad app show --id $mcpApp.appId --query "api.oauth2PermissionScopes[?value=='access_as_user'].id | [0]" -o tsv
@@ -112,9 +158,9 @@ $requiredResourceAccess = @(
       }
     )
   }
-) | ConvertTo-Json -Depth 5 -Compress
+)
 
-az ad app update --id $copilotClientApp.id --required-resource-accesses $requiredResourceAccess 1>$null
+Set-RequiredResourceAccess -ApplicationObjectId $copilotClientApp.id -RequiredResourceAccess $requiredResourceAccess
 
 # Configure broker delegated access to Azure Databricks
 $databricksSp = az ad sp list --filter "appId eq '$DatabricksResourceAppId'" --query "[0]" | ConvertFrom-Json
@@ -134,9 +180,9 @@ $brokerRequiredResourceAccess = @(
       }
     )
   }
-) | ConvertTo-Json -Depth 5 -Compress
+)
 
-az ad app update --id $brokerApp.id --required-resource-accesses $brokerRequiredResourceAccess 1>$null
+Set-RequiredResourceAccess -ApplicationObjectId $brokerApp.id -RequiredResourceAccess $brokerRequiredResourceAccess
 
 # Create broker secret
 $brokerSecret = az ad app credential reset --id $brokerApp.id --append --display-name "poc-broker-secret" --years 1 | ConvertFrom-Json

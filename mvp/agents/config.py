@@ -109,3 +109,33 @@ def get_session_max_turns() -> int:
         return max(1, int(os.environ.get("SESSION_MAX_TURNS", "20")))
     except ValueError:
         return 20
+
+
+def get_account_pulse_execution_mode() -> str:
+    value = os.environ.get("ACCOUNT_PULSE_EXECUTION_MODE", "legacy_sequential").strip().lower()
+    if value in {"legacy_sequential", "dynamic_parallel"}:
+        return value
+    return "legacy_sequential"
+
+
+def get_account_pulse_max_concurrency() -> int:
+    try:
+        return max(1, int(os.environ.get("ACCOUNT_PULSE_MAX_CONCURRENCY", "8")))
+    except ValueError:
+        return 8
+
+
+def get_account_pulse_source_mode() -> str:
+    value = os.environ.get("ACCOUNT_PULSE_SOURCE_MODE", "live").strip().lower()
+    if value in {"live", "replay"}:
+        return value
+    return "live"
+
+
+def get_account_pulse_replay_fixture_set() -> str:
+    return os.environ.get("ACCOUNT_PULSE_REPLAY_FIXTURE_SET", "small_parent_set").strip() or "small_parent_set"
+
+
+def get_account_pulse_internal_aggregator_enabled() -> bool:
+    value = os.environ.get("ACCOUNT_PULSE_ENABLE_INTERNAL_AGGREGATOR", "true").strip().lower()
+    return value not in {"0", "false", "no", "off"}
