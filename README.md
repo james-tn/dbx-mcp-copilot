@@ -1,6 +1,6 @@
-# Revenue Intelligence MVP
+# Daily Account Planner MVP
 
-This repo is currently centered on the Daily Account Planner MVP: a stateful
+This repo is currently centered on the Daily Account Planner MVP architecture: a stateful
 planner service in Azure Container Apps, a thin Microsoft 365 wrapper for
 Custom Engine exposure, delegated Databricks access, and Microsoft Agent
 Framework orchestration for `DailyAccountPlanner`, `AccountPulse`, and
