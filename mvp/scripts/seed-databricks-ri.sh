@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
-SQL_FILE="${SQL_FILE:-$ROOT_DIR/../poc/scripts/seed-databricks-ri.sql}"
+SQL_FILE="${SQL_FILE:-$ROOT_DIR/scripts/seed-databricks-ri.sql}"
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a

@@ -1,9 +1,15 @@
-# Daily Account Planner Deployment Runbook
+# Daily Account Planner MVP Setup And Deployment Runbook
 
 ## Purpose
 
-This runbook documents the MVP deployment path for the Daily Account Planner as
-two Azure Container Apps:
+This runbook documents the full MVP operator path for the Daily Account Planner:
+
+- local setup and service bring-up
+- Databricks seed and validation
+- Azure Container Apps deployment
+- Microsoft 365 packaging and publish
+
+The MVP runtime is two services:
 
 - **planner service**: stateful planner runtime with MAF handoff, planner API
   auth validation, Databricks OBO, and direct business-query execution
@@ -11,6 +17,16 @@ two Azure Container Apps:
 
 The wrapper is the Copilot-facing endpoint. The planner is the Databricks trust
 boundary.
+
+## Recommended execution order
+
+1. fill in [`mvp/.env.example`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.example) as `mvp/.env`
+2. create app registrations and bot OAuth wiring
+3. seed Databricks and validate direct query access
+4. bring up the planner locally and validate direct chat
+5. bring up the wrapper locally and validate the forwarder path
+6. deploy planner and wrapper to ACA
+7. build and publish the Microsoft 365 package
 
 ## Environment contract
 
@@ -214,7 +230,82 @@ bash mvp/scripts/validate-databricks-direct-query.sh
 
 This verifies the same OBO pattern the planner service will use in production.
 
-## 3. Deploy planner service
+## 3. Local MVP bring-up
+
+Use the local path before ACA deployment when you want to validate config,
+planner behavior, and wrapper forwarding without waiting on Azure changes.
+
+### 3.1 Local prerequisites
+
+Before using the local path, make sure you have:
+
+1. Python 3.11 available
+2. Docker with Compose support
+3. Azure CLI sign-in if you will use local Databricks auth via Azure CLI
+4. `mvp/.env` populated with the same core values you plan to use in Azure
+
+### 3.2 Start both services with Docker Compose
+
+From the repo root:
+
+```bash
+cd mvp
+docker compose up --build
+```
+
+Local defaults:
+
+- planner service: `http://localhost:8080`
+- wrapper: `http://localhost:3978`
+
+Set these in `mvp/.env` for local validation if they are not already set:
+
+- `PLANNER_API_BASE_URL=http://localhost:8080`
+- `WRAPPER_BASE_URL=http://localhost:3978`
+- `PLANNER_SERVICE_BASE_URL=http://planner-service:8080` for Compose runtime
+
+### 3.3 Validate the planner locally
+
+Run:
+
+```bash
+bash mvp/scripts/validate-planner-service-e2e.sh
+```
+
+If `PLANNER_API_BEARER_TOKEN` is not set, the script only validates `/healthz`.
+If it is set, the script also:
+
+1. creates a session
+2. sends a first prompt
+3. sends a follow-up prompt
+4. confirms session continuity
+
+### 3.4 Validate the wrapper locally
+
+Run:
+
+```bash
+bash mvp/scripts/validate-wrapper-playground.sh
+```
+
+This validates wrapper reachability and prints the supported Agents Playground
+channel test steps. For local wrapper testing:
+
+1. use the wrapper URL for the custom engine endpoint
+2. sign in with a user who has planner API consent and Databricks access
+3. verify follow-up turns stay in one conversation session
+
+### 3.5 Benchmark Account Pulse before cutover
+
+To compare legacy sequential and dynamic parallel Account Pulse behavior:
+
+```bash
+bash mvp/scripts/benchmark-account-pulse.sh
+```
+
+Use this before changing the default `ACCOUNT_PULSE_EXECUTION_MODE`.
+
+## 4. Deploy planner service
 
 Build and publish the planner image, then set `PLANNER_API_IMAGE`.
 
@@ -230,7 +321,7 @@ After deployment:
 2. also set `PLANNER_SERVICE_BASE_URL` to the same value for the wrapper
 3. keep the planner replica count pinned to one
 
-## 4. Validate planner service
+## 5. Validate planner service
 
 If you have a planner API bearer token for the signed-in seller, set:
 
@@ -249,7 +340,7 @@ Minimum checks:
 3. the first planner turn succeeds
 4. a follow-up turn reuses the same session
 
-## 5. Deploy M365 wrapper
+## 6. Deploy M365 wrapper
 
 Build and publish the wrapper image, then set `WRAPPER_IMAGE`.
 
@@ -270,7 +361,7 @@ After deployment:
 bash mvp/scripts/setup-bot-oauth-connection.sh
 ```
 
-## 6. Wrapper preflight
+## 7. Wrapper preflight
 
 Run the wrapper health and Playground preflight:
 
@@ -299,7 +390,7 @@ Important live-auth note:
 - Bot Framework sign-in invokes are expected during auth and should not produce
   a seller-visible error response
 
-## 7. Build the Microsoft 365 app package
+## 8. Build the Microsoft 365 app package
 
 Build the Custom Engine app package ZIP:
 
@@ -331,7 +422,7 @@ Current package note:
 - moving to an agentic-user template later would require additional schema
   fields such as `agenticUserTemplateId`
 
-## 8. Wire to Azure Bot and Copilot
+## 9. Wire to Azure Bot and Copilot
 
 1. Create or reuse an Azure Bot registration.
 2. Point the messaging endpoint to:

@@ -9,7 +9,7 @@ Framework orchestration for `DailyAccountPlanner`, `AccountPulse`, and
 ## Start Here
 
 - Architecture: [mvp/daily-account-planner-architecture.md](/mnt/c/testing/veeam/revenue_intelligence/mvp/daily-account-planner-architecture.md)
-- Deployment and publish runbook: [mvp/copilot-publish-runbook.md](/mnt/c/testing/veeam/revenue_intelligence/mvp/copilot-publish-runbook.md)
+- MVP setup and deployment runbook: [mvp/mvp-setup-and-deployment-runbook.md](/mnt/c/testing/veeam/revenue_intelligence/mvp/mvp-setup-and-deployment-runbook.md)
 - Environment contract: [mvp/.env.example](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.example)
 - General M365 integration guidance: [docs/m365-agentic-service-developer-guide.md](/mnt/c/testing/veeam/revenue_intelligence/docs/m365-agentic-service-developer-guide.md)
 
