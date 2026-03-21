@@ -6,3 +6,6 @@
 __pycache__/
 **/__pycache__/
 *.pyc
+
+# Local-only source material and scratch docs
+mvp/customer_input/
