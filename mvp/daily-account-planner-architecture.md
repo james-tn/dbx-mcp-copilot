@@ -344,6 +344,32 @@ Responsibilities:
 - remain stateless and orchestration-free
 - allow Bot Framework sign-in invoke callbacks to complete without sending a
   seller-facing message
+- own the wrapper-side long-running turn behavior:
+  - no visible acknowledgement for fast turns
+  - delayed generic acknowledgement after the configured threshold
+  - busy rejection for overlapping turns in the same conversation
+  - proactive continuation back into the same conversation for the final reply
+
+Reusable wrapper pattern:
+
+- most of this wrapper shape is reusable for other M365 agentic deployments
+- the reusable pieces are:
+  - Bot and Agents SDK bootstrap
+  - auth handler wiring
+  - conversation-to-session mapping
+  - long-running turn handling
+  - busy gating
+  - seller-safe fallback messaging
+- the main service-specific pieces are:
+  - the downstream HTTP client
+  - payload translation between Bot activities and the target service API
+  - target scopes, app IDs, and telemetry labels
+
+Current implementation note:
+
+- the wrapper carries a local compatibility bridge for the Python Microsoft
+  Agents SDK long-running proactive path so the original user message contract
+  is preserved when the wrapper resumes the turn through proactive continuation
 
 Local note:
 

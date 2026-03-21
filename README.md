@@ -20,6 +20,35 @@ Framework orchestration for `DailyAccountPlanner`, `AccountPulse`, and
 - [mvp/scripts](mvp/scripts): app registration, deploy, validate, seed, packaging, and publish scripts
 - [mvp/appPackage](mvp/appPackage): Microsoft 365 app manifest template and build output
 
+## Reusable M365 Wrapper Pattern
+
+Most of the wrapper is reusable for other agentic services that need to surface
+in Microsoft 365 Copilot.
+
+Usually reusable as-is:
+
+- Bot and Agents SDK bootstrap
+- auth handler wiring for agentic and connector traffic
+- conversation-to-session mapping
+- delayed long-running acknowledgement behavior
+- busy-turn rejection per conversation
+- seller-safe auth and temporary-unavailable messaging
+- Custom Engine `/api/messages` hosting shape
+
+Usually swapped per service:
+
+- downstream service client in `mvp/m365_wrapper/planner_client.py`
+- wrapper config names and scopes
+- response extraction and any protocol translation between Bot activities and the
+  target service API
+- service-specific fallback messages or telemetry labels
+
+Important current note:
+
+- the wrapper carries a local long-running compatibility bridge for the current
+  Python Microsoft Agents SDK because the SDK's built-in proactive path does not
+  match the adapter contract we observed in live testing
+
 ## Common Flows
 
 Create app registrations and bot auth wiring:

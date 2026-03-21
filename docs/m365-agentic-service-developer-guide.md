@@ -88,6 +88,35 @@ graph LR
   bring it to M365 Copilot by writing only the gateway + service client adapter.
   The existing service stays untouched.
 
+### How reusable is the gateway?
+
+In practice, most of the gateway can be reused across multiple agentic services
+that need to surface in M365 Copilot.
+
+Reusable across services:
+
+- the `POST /api/messages` host and Bot adapter bootstrap
+- Bot/channel auth wiring
+- OBO #1 token acquisition for the downstream service scope
+- conversation ID to service session ID mapping
+- long-running turn handling and delayed acknowledgement behavior
+- busy-turn rejection for overlapping requests in the same conversation
+- generic seller-safe auth and transient failure handling
+- ACA, Azure Bot, and app-package deployment shape
+
+Usually service-specific:
+
+- the downstream service client
+- activity-to-service payload translation
+- the target service scope and app-registration values
+- service-specific telemetry labels and fallback copy
+- any session bootstrap contract such as `create_session()` versus direct
+  first-turn POSTs
+
+The Daily Account Planner MVP follows exactly this split: the wrapper is mostly
+generic, while the planner client and a small amount of message shaping remain
+service-specific.
+
 ---
 
 ## Token Flow Deep Dive
@@ -392,6 +421,13 @@ to the same agentic session.
 
 **Healthz bypass** — The ACA health probe hits `/healthz`. Bypass JWT middleware for
 this path or the probe fails.
+
+**Long-running compatibility bridge** — If the SDK's built-in long-running
+proactive path does not preserve the message contract your wrapper needs, keep
+long-running mode enabled but own a very small gateway-local compatibility
+bridge. That bridge should preserve the original user message activity while
+still using the proactive continuation context for the outbound reply. Keep this
+as an infrastructure concern in the gateway; do not move business logic there.
 
 #### Technology choices
 

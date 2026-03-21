@@ -355,7 +355,11 @@ After deployment:
 1. copy the printed FQDN into `WRAPPER_BASE_URL`
 2. confirm `GET /healthz`
 3. verify `PLANNER_SERVICE_BASE_URL` still points at the planner service
-4. if the bot app secret changed, rerun:
+4. verify long-running wrapper settings remain aligned with the MVP contract:
+   - `WRAPPER_FORWARD_TIMEOUT_SECONDS=300`
+   - `WRAPPER_LONG_RUNNING_ACK_THRESHOLD_SECONDS=10`
+   - `WRAPPER_ENABLE_LONG_RUNNING_MESSAGES=true`
+5. if the bot app secret changed, rerun:
 
 ```bash
 bash mvp/scripts/setup-bot-oauth-connection.sh
@@ -389,6 +393,15 @@ Important live-auth note:
   `clientId` must match
 - Bot Framework sign-in invokes are expected during auth and should not produce
   a seller-visible error response
+
+Important wrapper implementation note:
+
+- the wrapper code is designed to be reused for other M365 agentic services
+- in most cases you only replace the downstream service client and the
+  activity-to-service payload translation
+- the current wrapper also carries a gateway-local compatibility bridge for the
+  Python Microsoft Agents SDK long-running proactive path so the original user
+  message text is preserved across delayed replies
 
 ## 8. Build the Microsoft 365 app package
 
