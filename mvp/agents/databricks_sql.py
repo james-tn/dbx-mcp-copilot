@@ -8,6 +8,7 @@ Databricks SQL Statements API. Agents never receive a dynamic SQL capability.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -15,12 +16,15 @@ from typing import Any
 import httpx
 from azure.identity import AzureCliCredential, DefaultAzureCredential
 
+from databricks_network import enable_private_databricks_resolution
+
 _DATABRICKS_AUDIENCE = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default"
 _DEFAULT_HOST = "https://adb-7405610222366876.16.azuredatabricks.net"
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 _DEFAULT_RETRY_COUNT = 1
 _DEFAULT_POLL_ATTEMPTS = 6
 _DEFAULT_POLL_INTERVAL_SECONDS = 1.0
+_DEFAULT_AZURE_MANAGEMENT_SCOPE = "https://management.core.windows.net//.default"
 
 
 class DatabricksSqlError(RuntimeError):
@@ -35,6 +39,8 @@ class DatabricksSqlAuthError(DatabricksSqlError):
 class DatabricksSqlSettings:
     host: str
     token_scope: str
+    azure_management_scope: str
+    azure_workspace_resource_id: str | None
     warehouse_id: str | None
     timeout_seconds: float
     retry_count: int
@@ -58,6 +64,16 @@ def load_settings() -> DatabricksSqlSettings:
                 os.environ.get("DATABRICKS_TOKEN_SCOPE", _DATABRICKS_AUDIENCE),
             ).strip()
             or _DATABRICKS_AUDIENCE
+        ),
+        azure_management_scope=(
+            os.environ.get(
+                "DATABRICKS_AZURE_MANAGEMENT_SCOPE",
+                _DEFAULT_AZURE_MANAGEMENT_SCOPE,
+            ).strip()
+            or _DEFAULT_AZURE_MANAGEMENT_SCOPE
+        ),
+        azure_workspace_resource_id=(
+            os.environ.get("DATABRICKS_AZURE_RESOURCE_ID", "").strip() or None
         ),
         warehouse_id=os.environ.get("DATABRICKS_WAREHOUSE_ID", "").strip() or None,
         timeout_seconds=float(
@@ -199,6 +215,7 @@ class DatabricksSqlClient:
         http_client: httpx.AsyncClient | Any | None = None,
     ) -> None:
         self.settings = settings or load_settings()
+        enable_private_databricks_resolution(self.settings.host)
         self.access_token = access_token.strip() if access_token else None
         self.credential = credential or _build_credential()
         self.http_client = http_client or httpx.AsyncClient(timeout=self.settings.timeout_seconds)
@@ -214,8 +231,21 @@ class DatabricksSqlClient:
             return {"Authorization": f"Bearer {self.access_token}"}
         if self.settings.pat:
             return {"Authorization": f"Bearer {self.settings.pat}"}
-        token = await asyncio.to_thread(self.credential.get_token, self.settings.token_scope)
-        return {"Authorization": f"Bearer {token.token}"}
+        databricks_token = await asyncio.to_thread(
+            self.credential.get_token,
+            self.settings.token_scope,
+        )
+        headers = {"Authorization": f"Bearer {databricks_token.token}"}
+        if self.settings.azure_workspace_resource_id:
+            management_token = await asyncio.to_thread(
+                self.credential.get_token,
+                self.settings.azure_management_scope,
+            )
+            headers["X-Databricks-Azure-SP-Management-Token"] = management_token.token
+            headers["X-Databricks-Azure-Workspace-Resource-Id"] = (
+                self.settings.azure_workspace_resource_id
+            )
+        return headers
 
     async def _request(
         self,
@@ -239,8 +269,9 @@ class DatabricksSqlClient:
                     json=json_payload,
                 )
                 if response.status_code in {401, 403}:
-                    raise DatabricksSqlAuthError("Databricks SQL authentication failed.")
-                response.raise_for_status()
+                    raise DatabricksSqlAuthError(_format_databricks_http_error(response))
+                if response.status_code >= 400:
+                    raise DatabricksSqlError(_format_databricks_http_error(response))
                 body = response.json()
                 if not isinstance(body, dict):
                     raise DatabricksSqlError("Databricks SQL returned an unexpected response shape.")
@@ -258,7 +289,7 @@ class DatabricksSqlClient:
 
         raise DatabricksSqlError("Databricks SQL request failed.") from last_error
 
-    async def _resolve_warehouse_id(self) -> str:
+    async def resolve_warehouse_id(self) -> str:
         if self._resolved_warehouse_id:
             return self._resolved_warehouse_id
 
@@ -283,17 +314,13 @@ class DatabricksSqlClient:
         self._resolved_warehouse_id = warehouse_id
         return warehouse_id
 
-    async def query_sql(self, statement: str) -> list[dict[str, Any]]:
-        warehouse_id = await self._resolve_warehouse_id()
-        payload = await self._request(
-            "POST",
-            "/api/2.0/sql/statements",
-            json_payload={
-                "statement": statement,
-                "warehouse_id": warehouse_id,
-                "wait_timeout": "0s",
-                "disposition": "INLINE",
-            },
+    async def _resolve_warehouse_id(self) -> str:
+        return await self.resolve_warehouse_id()
+
+    async def execute(self, statement: str) -> list[dict[str, Any]]:
+        payload = await self._execute_statement(
+            statement,
+            wait_timeout=f"{max(5, int(self.settings.timeout_seconds))}s",
         )
 
         if _is_pending(payload):
@@ -317,3 +344,103 @@ class DatabricksSqlClient:
         if payload.get("status", {}).get("state") == "SUCCEEDED":
             return []
         raise DatabricksSqlError("Databricks SQL statement did not return rows.")
+
+    async def query_sql(self, statement: str) -> list[dict[str, Any]]:
+        payload = await self._execute_statement(
+            statement,
+            wait_timeout="0s",
+        )
+
+        if _is_pending(payload):
+            statement_id = str(payload.get("statement_id", "")).strip()
+            if not statement_id:
+                raise DatabricksSqlError(
+                    "Databricks SQL returned a pending result without a statement id."
+                )
+            for _ in range(self.settings.poll_attempts):
+                await asyncio.sleep(self.settings.poll_interval_seconds)
+                payload = await self._request(
+                    "GET",
+                    f"/api/2.0/sql/statements/{statement_id}",
+                )
+                if not _is_pending(payload):
+                    break
+
+        rows = _extract_rows(payload)
+        if rows:
+            return rows
+        if payload.get("status", {}).get("state") == "SUCCEEDED":
+            return []
+        raise DatabricksSqlError("Databricks SQL statement did not return rows.")
+
+    async def _execute_statement(self, statement: str, *, wait_timeout: str) -> dict[str, Any]:
+        warehouse_id = await self.resolve_warehouse_id()
+        try:
+            return await self._request(
+                "POST",
+                "/api/2.0/sql/statements",
+                json_payload={
+                    "statement": statement,
+                    "warehouse_id": warehouse_id,
+                    "wait_timeout": wait_timeout,
+                    "disposition": "INLINE",
+                },
+            )
+        except DatabricksSqlError as exc:
+            if not self._should_retry_with_fresh_warehouse(exc):
+                raise
+            self._resolved_warehouse_id = None
+            warehouse_id = await self.resolve_warehouse_id()
+            return await self._request(
+                "POST",
+                "/api/2.0/sql/statements",
+                json_payload={
+                    "statement": statement,
+                    "warehouse_id": warehouse_id,
+                    "wait_timeout": wait_timeout,
+                    "disposition": "INLINE",
+                },
+            )
+
+    def _should_retry_with_fresh_warehouse(self, exc: DatabricksSqlError) -> bool:
+        if self._resolved_warehouse_id is None:
+            return False
+
+        cursor: BaseException | None = exc
+        while cursor is not None:
+            message = str(cursor).lower()
+            if "warehouse" in message and "not found" in message:
+                return True
+            cursor = cursor.__cause__
+        return False
+
+
+def _format_databricks_http_error(response: httpx.Response) -> str:
+    status = response.status_code
+    body_text = response.text.strip()
+    if not body_text:
+        return f"Databricks request failed with HTTP {status}."
+
+    try:
+        payload = response.json()
+    except json.JSONDecodeError:
+        return f"Databricks request failed with HTTP {status}: {body_text[:500]}"
+
+    if isinstance(payload, dict):
+        status_payload = payload.get("status")
+        if isinstance(status_payload, dict):
+            error_payload = status_payload.get("error")
+            if isinstance(error_payload, dict):
+                message = str(error_payload.get("message", "")).strip()
+                if message:
+                    return f"Databricks request failed with HTTP {status}: {message}"
+        message = str(payload.get("message", "")).strip()
+        if message:
+            return f"Databricks request failed with HTTP {status}: {message}"
+        detail = str(payload.get("detail", "")).strip()
+        if detail:
+            return f"Databricks request failed with HTTP {status}: {detail}"
+        if payload.get("error_code") is not None:
+            return f"Databricks request failed with HTTP {status}: {json.dumps(payload, sort_keys=True)[:500]}"
+
+    return f"Databricks request failed with HTTP {status}: {body_text[:500]}"

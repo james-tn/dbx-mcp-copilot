@@ -1,7 +1,9 @@
 -- Databricks seed script for the Daily Account Planner MVP
 -- Enriched synthetic demo data with secure contract views
 
+CREATE CATALOG IF NOT EXISTS veeam_demo;
 CREATE SCHEMA IF NOT EXISTS veeam_demo.ri;
+CREATE SCHEMA IF NOT EXISTS veeam_demo.ri_security;
 CREATE SCHEMA IF NOT EXISTS veeam_demo.ri_secure;
 
 CREATE OR REPLACE TABLE veeam_demo.ri.accounts (
@@ -137,22 +139,71 @@ INSERT INTO veeam_demo.ri.contacts VALUES
   ('001SC0004', 'Jamie', 'Cole', 'Jamie Cole', 'Head of Security', 'Executive Leaders', 'jcole@honey.example', '555-0430', NULL, 'Marketing Qualified Contact', DATE '2025-11-10', false),
   ('001SC0006', 'Riley', 'Ng', 'Riley Ng', 'Infrastructure Manager', 'IT Practitioner', 'riley.ng@spacex.example', '555-0440', NULL, 'Marketing Qualified Contact', DATE '2025-09-01', false);
 
+CREATE OR REPLACE TABLE veeam_demo.ri_security.user_territory_entitlements (
+  user_upn STRING NOT NULL,
+  territory STRING NOT NULL
+);
+
+INSERT OVERWRITE veeam_demo.ri_security.user_territory_entitlements VALUES
+  ('ri-test-na@m365cpi89838450.onmicrosoft.com', 'GreatLakes-ENT-Named-1'),
+  ('ri-test-na@m365cpi89838450.onmicrosoft.com', 'SoCal-VEL-Named-2'),
+  ('DaichiM@M365CPI89838450.OnMicrosoft.com', 'Germany-ENT-Named-5'),
+  ('DaichiM@M365CPI89838450.OnMicrosoft.com', 'UK-COM-Named-3');
+
 CREATE OR REPLACE VIEW veeam_demo.ri_secure.accounts AS
-SELECT * FROM veeam_demo.ri.accounts;
+SELECT a.*
+FROM veeam_demo.ri.accounts a
+WHERE EXISTS (
+  SELECT 1
+  FROM veeam_demo.ri_security.user_territory_entitlements ent
+  WHERE lower(ent.user_upn) = lower(session_user())
+    AND ent.territory = a.sales_team
+);
 
 CREATE OR REPLACE VIEW veeam_demo.ri_secure.reps AS
 SELECT * FROM veeam_demo.ri.reps;
 
 CREATE OR REPLACE VIEW veeam_demo.ri_secure.opportunities AS
-SELECT * FROM veeam_demo.ri.opportunities;
+SELECT o.*
+FROM veeam_demo.ri.opportunities o
+WHERE EXISTS (
+  SELECT 1
+  FROM veeam_demo.ri_security.user_territory_entitlements ent
+  WHERE lower(ent.user_upn) = lower(session_user())
+    AND ent.territory = o.sales_team
+);
 
 CREATE OR REPLACE VIEW veeam_demo.ri_secure.contacts AS
-SELECT * FROM veeam_demo.ri.contacts;
+SELECT c.*
+FROM veeam_demo.ri.contacts c
+INNER JOIN veeam_demo.ri.accounts a
+  ON a.account_id = c.account_id
+WHERE EXISTS (
+  SELECT 1
+  FROM veeam_demo.ri_security.user_territory_entitlements ent
+  WHERE lower(ent.user_upn) = lower(session_user())
+    AND ent.territory = a.sales_team
+);
+
+GRANT USE CATALOG ON CATALOG veeam_demo TO `ri-test-na@m365cpi89838450.onmicrosoft.com`;
+GRANT USE CATALOG ON CATALOG veeam_demo TO `DaichiM@M365CPI89838450.OnMicrosoft.com`;
+
+GRANT USE SCHEMA ON SCHEMA veeam_demo.ri_secure TO `ri-test-na@m365cpi89838450.onmicrosoft.com`;
+GRANT USE SCHEMA ON SCHEMA veeam_demo.ri_secure TO `DaichiM@M365CPI89838450.OnMicrosoft.com`;
+
+GRANT SELECT ON TABLE veeam_demo.ri_secure.accounts TO `ri-test-na@m365cpi89838450.onmicrosoft.com`;
+GRANT SELECT ON TABLE veeam_demo.ri_secure.opportunities TO `ri-test-na@m365cpi89838450.onmicrosoft.com`;
+GRANT SELECT ON TABLE veeam_demo.ri_secure.contacts TO `ri-test-na@m365cpi89838450.onmicrosoft.com`;
+
+GRANT SELECT ON TABLE veeam_demo.ri_secure.accounts TO `DaichiM@M365CPI89838450.OnMicrosoft.com`;
+GRANT SELECT ON TABLE veeam_demo.ri_secure.opportunities TO `DaichiM@M365CPI89838450.OnMicrosoft.com`;
+GRANT SELECT ON TABLE veeam_demo.ri_secure.contacts TO `DaichiM@M365CPI89838450.OnMicrosoft.com`;
 
 SELECT 'accounts' AS object_name, COUNT(*) AS row_count FROM veeam_demo.ri.accounts
 UNION ALL SELECT 'reps', COUNT(*) FROM veeam_demo.ri.reps
 UNION ALL SELECT 'opportunities', COUNT(*) FROM veeam_demo.ri.opportunities
 UNION ALL SELECT 'contacts', COUNT(*) FROM veeam_demo.ri.contacts
+UNION ALL SELECT 'entitlements', COUNT(*) FROM veeam_demo.ri_security.user_territory_entitlements
 UNION ALL SELECT 'secure_accounts', COUNT(*) FROM veeam_demo.ri_secure.accounts
 UNION ALL SELECT 'secure_reps', COUNT(*) FROM veeam_demo.ri_secure.reps
 UNION ALL SELECT 'secure_opportunities', COUNT(*) FROM veeam_demo.ri_secure.opportunities

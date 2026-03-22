@@ -21,7 +21,7 @@ boundary.
 ## Recommended execution order
 
 1. fill in [`mvp/.env.example`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.example) as `mvp/.env`
-2. create app registrations and bot OAuth wiring
+2. create app registrations
 3. seed Databricks and validate direct query access
 4. bring up the planner locally and validate direct chat
 5. bring up the wrapper locally and validate the forwarder path
@@ -32,6 +32,10 @@ boundary.
 
 Use [`mvp/.env.example`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.example)
 as the baseline contract.
+
+For the secure side-by-side environment, start from
+[`mvp/.env.secure.example`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure.example)
+instead and keep `SECURE_DEPLOYMENT=true`.
 
 High-value required values:
 
@@ -63,7 +67,7 @@ Required MVP defaults:
 Create or reuse the planner API app and wrapper/bot app:
 
 ```bash
-bash mvp/scripts/setup-custom-engine-app-registrations.sh
+bash mvp/infra/scripts/setup-custom-engine-app-registrations.sh
 ```
 
 Copy the emitted values into `.env`.
@@ -78,27 +82,6 @@ The script sets up:
   - `BOT_SSO_RESOURCE=api://botid-<bot-app-id>`
   - Teams trusted client preauthorization
   - Bot Framework redirect URI for sign-in
-
-Create the Azure Bot OAuth connection used by the wrapper's non-agentic
-Microsoft 365 path:
-
-```bash
-bash mvp/scripts/setup-bot-oauth-connection.sh
-```
-
-This creates the Azure Bot `SERVICE_CONNECTION` AAD v2 auth setting on the bot
-app itself, with:
-
-- `clientId = BOT_APP_ID`
-- `TokenExchangeUrl = BOT_SSO_RESOURCE`
-- planner API delegated scope in `provider-scope-string`
-
-This is the live sign-in path used by non-agentic Microsoft 365 Copilot and
-Teams traffic.
-
-Do not create a second OAuth client app for this step unless you are
-intentionally changing the auth model. The working MVP path uses the bot app
-itself as the OAuth client for the Azure Bot connection.
 
 Admin consent still needs to be completed for:
 
@@ -162,7 +145,7 @@ If `DATABRICKS_WAREHOUSE_ID` is not set, the seed and validation scripts will:
 Seed the enriched MVP dataset:
 
 ```bash
-bash mvp/scripts/seed-databricks-ri.sh
+bash mvp/infra/scripts/seed-databricks-ri.sh
 ```
 
 What the script does:
@@ -178,24 +161,68 @@ Optional overrides:
 
 - `ENV_FILE=/path/to/.env`
 - `SQL_FILE=/path/to/seed-databricks-ri.sql`
+- `DEPLOYMENT_MODE=secure`
+
+In secure mode, the seed script starts a private ACA Job from inside the
+secure Container Apps environment. For that path, also set:
+
+- `DATABRICKS_BOOTSTRAP_AUTH_MODE`
+- `DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID`
+- optionally `DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_RESOURCE_ID`
+- `DATABRICKS_SEED_JOB_NAME`
+- `DATABRICKS_SEED_TIMEOUT_SECONDS`
+- `DATABRICKS_SEED_POLL_SECONDS`
+- `DATABRICKS_AZURE_RESOURCE_ID`
+- optionally `DATABRICKS_BOOTSTRAP_WAREHOUSE_ID`
+- `DATABRICKS_SKIP_CATALOG_CREATE=true` when the workspace catalog is already
+  provisioned by Databricks workspace setup
+
+The secure job uses a bootstrap-only user-assigned managed identity rather than
+a Databricks PAT, and the secure path no longer relies on temporarily enabling
+Databricks public network access.
+
+Secure bootstrap order:
+
+1. authenticate from the private ACA Job with the bootstrap managed identity
+2. verify or create required workspace principals through Databricks SCIM/admin
+   APIs
+3. run the SQL seed for catalog objects, base tables, entitlements, views,
+   grants, and bootstrap state
+4. validate seeded base tables, entitlements, and secure-view existence
+
+Important secure-path note:
+
+- the bootstrap identity is not a seller principal, so seller-scoped
+  `session_user()` secure views are expected to be empty for that identity
+- do not use bootstrap execution to assert seller-visible secure-view row
+  counts
+- validate seller visibility later with delegated seller tests such as
+  `validate-databricks-direct-query.sh` and `validate-seller-access.sh`
 
 Seed success criteria:
 
 1. the script exits successfully
-2. it prints `Seed completed successfully using warehouse ...`
-3. the secure views exist:
-   - `veeam_demo.ri_secure.accounts`
-   - `veeam_demo.ri_secure.reps`
-   - `veeam_demo.ri_secure.opportunities`
-   - `veeam_demo.ri_secure.contacts`
-4. those views return non-zero row counts for the seeded demo territories
+2. in secure mode it prints `Secure Databricks seed completed successfully via ACA Job: ...`
+3. the base tables contain seeded rows:
+   - `<catalog>.ri.accounts`
+   - `<catalog>.ri.reps`
+   - `<catalog>.ri.opportunities`
+   - `<catalog>.ri.contacts`
+   - `<catalog>.ri_security.user_territory_entitlements`
+4. the secure views exist:
+   - `<catalog>.ri_secure.accounts`
+   - `<catalog>.ri_secure.reps`
+   - `<catalog>.ri_secure.opportunities`
+   - `<catalog>.ri_secure.contacts`
+5. seller-specific row visibility is validated separately through delegated
+   seller tests
 
 ### 2.4 Validate direct Databricks connectivity after seed
 
 Validate the planner’s direct-query path before deploying the full planner:
 
 ```bash
-bash mvp/scripts/validate-databricks-direct-query.sh
+bash mvp/infra/scripts/validate-databricks-direct-query.sh
 ```
 
 If `PLANNER_API_BEARER_TOKEN` is set, the validation uses the delegated OBO
@@ -225,10 +252,46 @@ rerun:
 
 ```bash
 PLANNER_API_BEARER_TOKEN=<planner-api-user-token> \
-bash mvp/scripts/validate-databricks-direct-query.sh
+bash mvp/infra/scripts/validate-databricks-direct-query.sh
 ```
 
 This verifies the same OBO pattern the planner service will use in production.
+
+### 2.6 Secure repeatability destroy/rebuild flow
+
+After the secure seed succeeds once in the current stack, validate the secure
+path is repeatable with a full teardown and rebuild:
+
+1. destroy the secure stack, secure app registrations, and secure M365 app
+   publication:
+
+```bash
+ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/destroy-stack.sh secure
+```
+
+2. wait until the secure resource group is fully deleted before redeploying
+3. redeploy the secure stack from the canonical entrypoint:
+
+```bash
+ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/deploy-stack.sh secure
+```
+
+4. publish the secure M365 package:
+
+```bash
+ENV_FILE=mvp/.env.secure bash mvp/scripts/publish-m365-app-package-graph.sh
+```
+
+5. self-install the secure M365 package for the test operator:
+
+```bash
+ENV_FILE=mvp/.env.secure bash mvp/scripts/install-m365-app-for-self-graph.sh
+```
+
+6. rerun seller and end-to-end checks:
+   - `bash mvp/infra/scripts/validate-databricks-direct-query.sh`
+   - `bash mvp/infra/scripts/validate-seller-access.sh`
+   - `bash mvp/infra/scripts/validate-planner-service-e2e.sh`
 
 ## 3. Local MVP bring-up
 
@@ -269,7 +332,7 @@ Set these in `mvp/.env` for local validation if they are not already set:
 Run:
 
 ```bash
-bash mvp/scripts/validate-planner-service-e2e.sh
+bash mvp/infra/scripts/validate-planner-service-e2e.sh
 ```
 
 If `PLANNER_API_BEARER_TOKEN` is not set, the script only validates `/healthz`.
@@ -309,11 +372,27 @@ Use this before changing the default `ACCOUNT_PULSE_EXECUTION_MODE`.
 
 Build and publish the planner image, then set `PLANNER_API_IMAGE`.
 
+For new environments, deploy the shared infra foundation first:
+
+```bash
+bash mvp/infra/scripts/deploy-foundation.sh open
+```
+
+or:
+
+```bash
+bash mvp/infra/scripts/deploy-foundation.sh secure
+```
+
 Deploy or update the planner ACA app:
 
 ```bash
-bash mvp/scripts/deploy-planner-api.sh
+bash mvp/infra/scripts/deploy-planner-api.sh
 ```
+
+For secure mode, this script also provisions or reuses the Databricks bootstrap
+managed identity, attaches it to the planner app and secure ACA Job, resolves
+the workspace catalog, and configures the secure seed job contract.
 
 After deployment:
 
@@ -330,7 +409,7 @@ If you have a planner API bearer token for the signed-in seller, set:
 Then run:
 
 ```bash
-bash mvp/scripts/validate-planner-service-e2e.sh
+bash mvp/infra/scripts/validate-planner-service-e2e.sh
 ```
 
 Minimum checks:
@@ -347,7 +426,7 @@ Build and publish the wrapper image, then set `WRAPPER_IMAGE`.
 Deploy or update the wrapper ACA app:
 
 ```bash
-bash mvp/scripts/deploy-m365-wrapper.sh
+bash mvp/infra/scripts/deploy-m365-wrapper.sh
 ```
 
 After deployment:
@@ -359,11 +438,58 @@ After deployment:
    - `WRAPPER_FORWARD_TIMEOUT_SECONDS=300`
    - `WRAPPER_LONG_RUNNING_ACK_THRESHOLD_SECONDS=10`
    - `WRAPPER_ENABLE_LONG_RUNNING_MESSAGES=true`
-5. if the bot app secret changed, rerun:
+5. create or update the Azure Bot registration after the wrapper endpoint exists:
 
 ```bash
-bash mvp/scripts/setup-bot-oauth-connection.sh
+bash mvp/infra/scripts/create-azure-bot-resource.sh
 ```
+
+This creates or updates the Azure Bot resource and keeps its messaging endpoint
+aligned with `https://<wrapper-host>/api/messages`.
+
+6. create or update the Azure Bot OAuth connection:
+
+```bash
+bash mvp/infra/scripts/setup-bot-oauth-connection.sh
+```
+
+This creates the Azure Bot `SERVICE_CONNECTION` AAD v2 auth setting on the bot
+app itself, with:
+
+- `clientId = BOT_APP_ID`
+- `TokenExchangeUrl = BOT_SSO_RESOURCE`
+- planner API delegated scope in `provider-scope-string`
+
+This is the live sign-in path used by non-agentic Microsoft 365 Copilot and
+Teams traffic.
+
+Do not create a second OAuth client app for this step unless you are
+intentionally changing the auth model. The working MVP path uses the bot app
+itself as the OAuth client for the Azure Bot connection.
+
+For secure CLI proof against the wrapper-owned debug path, also set:
+
+- `WRAPPER_ENABLE_DEBUG_CHAT=true`
+- `WRAPPER_DEBUG_ALLOWED_UPNS`
+
+Then validate seller-specific access with:
+
+```bash
+bash mvp/infra/scripts/validate-seller-access.sh
+```
+
+If you use the wrapper debug endpoint from the Azure CLI, the signed-in user
+must also consent to the wrapper audience `api://botid-<bot-app-id>/access_as_user`.
+For a newly created side-by-side bot identity, that usually means one
+interactive sign-in like:
+
+```bash
+az logout
+az login --tenant <tenant-id> --scope api://botid-<bot-app-id>/access_as_user
+```
+
+After that, `az account get-access-token --scope api://botid-<bot-app-id>/access_as_user`
+can mint the wrapper token needed by `validate-seller-access.sh`.
 
 ## 7. Wrapper preflight
 
@@ -437,11 +563,21 @@ Current package note:
 
 ## 9. Wire to Azure Bot and Copilot
 
-1. Create or reuse an Azure Bot registration.
-2. Point the messaging endpoint to:
-   - `https://<wrapper-host>/api/messages`
-3. Configure the Custom Engine Agent to use the wrapper path.
-4. Publish the custom engine package / app manifest through the tenant path.
+1. Create or update the Azure Bot registration:
+
+```bash
+bash mvp/infra/scripts/create-azure-bot-resource.sh
+```
+
+2. Create or update the Azure Bot OAuth connection:
+
+```bash
+bash mvp/infra/scripts/setup-bot-oauth-connection.sh
+```
+
+3. Build and publish the custom engine package / app manifest through the tenant
+   path.
+4. Install the app for your test user or assign it through your tenant process.
 5. Test in Microsoft 365 Copilot with a signed-in seller account.
 
 Optional Graph publish path:
@@ -450,6 +586,16 @@ Optional Graph publish path:
 bash mvp/scripts/setup-m365-cli-publisher-app.sh
 bash mvp/scripts/publish-m365-app-package-graph.sh
 bash mvp/scripts/install-m365-app-for-self-graph.sh
+```
+
+For a side-by-side secure M365 app that reuses the existing secure planner API
+but creates a separate bot identity, run app registration setup like this:
+
+```bash
+ENV_FILE=mvp/.env.secure \
+APP_NAME_PREFIX=daily-secured-planner \
+REUSE_PLANNER_API_APP_ID=$PLANNER_API_CLIENT_ID \
+bash mvp/infra/scripts/setup-custom-engine-app-registrations.sh
 ```
 
 The CLI publisher app uses device-code sign-in and delegated Microsoft Graph
@@ -481,6 +627,12 @@ Suggested prompts:
 
 - the same Copilot conversation maps to the same planner session
 - the wrapper stays stateless and orchestration-free
+- secure Databricks seeding succeeds through the private ACA Job without
+  temporarily enabling Databricks public access
+- secure planner runtime stays on seller OBO access for seller data
+- seller-specific Databricks results differ for the two test identities
+- `destroy-stack.sh secure` and `deploy-stack.sh secure` can be used as the
+  canonical secure repeatability path once Azure deletion fully completes
 - planner auth failures return a clean sign-in / retry message
 - planner data access is governed by the signed-in user context
 - planner data access runs through the app-owned direct-query layer

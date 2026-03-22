@@ -1,0 +1,313 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.41.2.15936",
+      "templateHash": "13294451258076677687"
+    }
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "namePrefix": {
+      "type": "string",
+      "defaultValue": "dailyacctplanner"
+    },
+    "secureDeployment": {
+      "type": "bool",
+      "defaultValue": false
+    },
+    "vnetAddressSpace": {
+      "type": "string",
+      "defaultValue": "10.42.0.0/16"
+    },
+    "acaSubnetPrefix": {
+      "type": "string",
+      "defaultValue": "10.42.0.0/23"
+    },
+    "databricksPublicSubnetPrefix": {
+      "type": "string",
+      "defaultValue": "10.42.2.0/24"
+    },
+    "databricksPrivateSubnetPrefix": {
+      "type": "string",
+      "defaultValue": "10.42.3.0/24"
+    },
+    "privateEndpointSubnetPrefix": {
+      "type": "string",
+      "defaultValue": "10.42.4.0/24"
+    },
+    "createAcr": {
+      "type": "bool",
+      "defaultValue": true
+    },
+    "keyVaultName": {
+      "type": "string",
+      "defaultValue": "[take(replace(format('{0}kv', parameters('namePrefix')), '-', ''), 24)]"
+    },
+    "acrName": {
+      "type": "string",
+      "defaultValue": "[take(replace(format('{0}acr', parameters('namePrefix')), '-', ''), 50)]"
+    },
+    "logAnalyticsName": {
+      "type": "string",
+      "defaultValue": "[format('{0}-logs', parameters('namePrefix'))]"
+    },
+    "vnetName": {
+      "type": "string",
+      "defaultValue": "[format('{0}-vnet', parameters('namePrefix'))]"
+    },
+    "acaSubnetName": {
+      "type": "string",
+      "defaultValue": "aca-infra"
+    },
+    "databricksPublicSubnetName": {
+      "type": "string",
+      "defaultValue": "databricks-public"
+    },
+    "databricksPrivateSubnetName": {
+      "type": "string",
+      "defaultValue": "databricks-private"
+    },
+    "privateEndpointSubnetName": {
+      "type": "string",
+      "defaultValue": "private-endpoints"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2023-09-01",
+      "name": "[parameters('logAnalyticsName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": 30
+      }
+    },
+    {
+      "type": "Microsoft.KeyVault/vaults",
+      "apiVersion": "2023-07-01",
+      "name": "[parameters('keyVaultName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "tenantId": "[subscription().tenantId]",
+        "enableRbacAuthorization": true,
+        "enableSoftDelete": true,
+        "softDeleteRetentionInDays": 90,
+        "sku": {
+          "family": "A",
+          "name": "standard"
+        },
+        "publicNetworkAccess": "[if(parameters('secureDeployment'), 'Disabled', 'Enabled')]"
+      }
+    },
+    {
+      "condition": "[parameters('createAcr')]",
+      "type": "Microsoft.ContainerRegistry/registries",
+      "apiVersion": "2023-07-01",
+      "name": "[parameters('acrName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "[if(parameters('secureDeployment'), 'Premium', 'Basic')]"
+      },
+      "properties": {
+        "adminUserEnabled": true,
+        "publicNetworkAccess": "[if(parameters('secureDeployment'), 'Disabled', 'Enabled')]"
+      }
+    },
+    {
+      "condition": "[parameters('secureDeployment')]",
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2024-05-01",
+      "name": "[parameters('vnetName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "[parameters('vnetAddressSpace')]"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "[parameters('acaSubnetName')]",
+            "properties": {
+              "addressPrefix": "[parameters('acaSubnetPrefix')]",
+              "delegations": [
+                {
+                  "name": "acaDelegation",
+                  "properties": {
+                    "serviceName": "Microsoft.App/environments"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "[parameters('databricksPublicSubnetName')]",
+            "properties": {
+              "addressPrefix": "[parameters('databricksPublicSubnetPrefix')]",
+              "delegations": [
+                {
+                  "name": "databricksPublicDelegation",
+                  "properties": {
+                    "serviceName": "Microsoft.Databricks/workspaces"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "[parameters('databricksPrivateSubnetName')]",
+            "properties": {
+              "addressPrefix": "[parameters('databricksPrivateSubnetPrefix')]",
+              "delegations": [
+                {
+                  "name": "databricksPrivateDelegation",
+                  "properties": {
+                    "serviceName": "Microsoft.Databricks/workspaces"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "[parameters('privateEndpointSubnetName')]",
+            "properties": {
+              "addressPrefix": "[parameters('privateEndpointSubnetPrefix')]",
+              "privateEndpointNetworkPolicies": "Disabled"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('secureDeployment')]",
+      "type": "Microsoft.Network/privateDnsZones",
+      "apiVersion": "2020-06-01",
+      "name": "privatelink.cognitiveservices.azure.com",
+      "location": "global"
+    },
+    {
+      "condition": "[parameters('secureDeployment')]",
+      "type": "Microsoft.Network/privateDnsZones",
+      "apiVersion": "2020-06-01",
+      "name": "privatelink.vaultcore.azure.net",
+      "location": "global"
+    },
+    {
+      "condition": "[parameters('secureDeployment')]",
+      "type": "Microsoft.Network/privateDnsZones",
+      "apiVersion": "2020-06-01",
+      "name": "privatelink.azuredatabricks.net",
+      "location": "global"
+    },
+    {
+      "condition": "[parameters('secureDeployment')]",
+      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+      "apiVersion": "2020-06-01",
+      "name": "[format('{0}/{1}-link', 'privatelink.cognitiveservices.azure.com', parameters('vnetName'))]",
+      "location": "global",
+      "properties": {
+        "registrationEnabled": false,
+        "virtualNetwork": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', 'privatelink.cognitiveservices.azure.com')]",
+        "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('secureDeployment')]",
+      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+      "apiVersion": "2020-06-01",
+      "name": "[format('{0}/{1}-link', 'privatelink.vaultcore.azure.net', parameters('vnetName'))]",
+      "location": "global",
+      "properties": {
+        "registrationEnabled": false,
+        "virtualNetwork": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', 'privatelink.vaultcore.azure.net')]",
+        "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('secureDeployment')]",
+      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+      "apiVersion": "2020-06-01",
+      "name": "[format('{0}/{1}-link', 'privatelink.azuredatabricks.net', parameters('vnetName'))]",
+      "location": "global",
+      "properties": {
+        "registrationEnabled": false,
+        "virtualNetwork": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', 'privatelink.azuredatabricks.net')]",
+        "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "secureDeploymentMode": {
+      "type": "bool",
+      "value": "[parameters('secureDeployment')]"
+    },
+    "logAnalyticsWorkspaceName": {
+      "type": "string",
+      "value": "[parameters('logAnalyticsName')]"
+    },
+    "logAnalyticsWorkspaceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]"
+    },
+    "keyVaultName": {
+      "type": "string",
+      "value": "[parameters('keyVaultName')]"
+    },
+    "keyVaultId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+    },
+    "acrName": {
+      "type": "string",
+      "value": "[if(parameters('createAcr'), parameters('acrName'), '')]"
+    },
+    "acrId": {
+      "type": "string",
+      "value": "[if(parameters('createAcr'), resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), '')]"
+    },
+    "vnetId": {
+      "type": "string",
+      "value": "[if(parameters('secureDeployment'), resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName')), '')]"
+    },
+    "acaSubnetId": {
+      "type": "string",
+      "value": "[if(parameters('secureDeployment'), resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('acaSubnetName')), '')]"
+    },
+    "databricksPublicSubnetId": {
+      "type": "string",
+      "value": "[if(parameters('secureDeployment'), resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('databricksPublicSubnetName')), '')]"
+    },
+    "databricksPrivateSubnetId": {
+      "type": "string",
+      "value": "[if(parameters('secureDeployment'), resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('databricksPrivateSubnetName')), '')]"
+    },
+    "privateEndpointSubnetId": {
+      "type": "string",
+      "value": "[if(parameters('secureDeployment'), resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('privateEndpointSubnetName')), '')]"
+    }
+  }
+}

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
 APP_NAME_PREFIX="${APP_NAME_PREFIX:-daily-account-planner}"
 DATABRICKS_RESOURCE_APP_ID="${DATABRICKS_RESOURCE_APP_ID:-2ff814a6-3304-4ab8-85cb-cd0e6f879c1d}"
 BOT_SSO_RESOURCE_PREFIX="${BOT_SSO_RESOURCE_PREFIX:-api://botid-}"
 TEAMS_DESKTOP_MOBILE_CLIENT_ID="${TEAMS_DESKTOP_MOBILE_CLIENT_ID:-1fec8e78-bce4-4aaf-ab1b-5451cc387264}"
 TEAMS_WEB_CLIENT_ID="${TEAMS_WEB_CLIENT_ID:-5e3ce6c0-2b1f-4285-8d4b-75ee78787346}"
+REUSE_PLANNER_API_APP_ID="${REUSE_PLANNER_API_APP_ID:-${PLANNER_API_CLIENT_ID:-}}"
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a
@@ -53,6 +54,11 @@ PY
   echo "$created"
 }
 
+load_existing_app() {
+  local app_id="$1"
+  az ad app show --id "$app_id" -o json
+}
+
 ensure_service_principal() {
   local app_id="$1"
   local existing
@@ -73,7 +79,11 @@ patch_application() {
     >/dev/null
 }
 
-planner_json="$(ensure_app "$APP_NAME_PREFIX-planner-api" true)"
+if [[ -n "$REUSE_PLANNER_API_APP_ID" ]]; then
+  planner_json="$(load_existing_app "$REUSE_PLANNER_API_APP_ID")"
+else
+  planner_json="$(ensure_app "$APP_NAME_PREFIX-planner-api" true)"
+fi
 bot_json="$(ensure_app "$APP_NAME_PREFIX-bot" false)"
 
 planner_object_id="$(python - <<'PY' "$planner_json"
@@ -245,21 +255,31 @@ JSON
 patch_application "$bot_object_id" "$wrapper_access_file"
 rm -f "$wrapper_access_file"
 
-planner_secret_json="$(az ad app credential reset --id "$planner_object_id" --append --display-name "planner-api-secret" --years 1 -o json)"
 bot_secret_json="$(az ad app credential reset --id "$bot_object_id" --append --display-name "bot-secret" --years 1 -o json)"
-planner_secret="$(python - <<'PY' "$planner_secret_json"
-import json, sys
-print(json.loads(sys.argv[1])["password"])
-PY
-)"
 bot_secret="$(python - <<'PY' "$bot_secret_json"
 import json, sys
 print(json.loads(sys.argv[1])["password"])
 PY
 )"
 
+if [[ -n "$REUSE_PLANNER_API_APP_ID" ]]; then
+  planner_secret="${PLANNER_API_CLIENT_SECRET:-}"
+else
+  planner_secret_json="$(az ad app credential reset --id "$planner_object_id" --append --display-name "planner-api-secret" --years 1 -o json)"
+  planner_secret="$(python - <<'PY' "$planner_secret_json"
+import json, sys
+print(json.loads(sys.argv[1])["password"])
+PY
+)"
+fi
+
+planner_status="created-or-reused"
+if [[ -n "$REUSE_PLANNER_API_APP_ID" ]]; then
+  planner_status="reused-existing"
+fi
+
 cat <<EOF
-Planner API app created or reused.
+Planner API app $planner_status.
 M365 wrapper / bot app created or reused.
 
 Add these values to $ENV_FILE:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
 FIRST_PROMPT="${FIRST_PROMPT:-Where should I focus?}"
 FOLLOW_UP_PROMPT="${FOLLOW_UP_PROMPT:-Give me two more details on the top account.}"
