@@ -574,7 +574,6 @@ fi
 
 common_env_vars=(
   "AZURE_TENANT_ID=$AZURE_TENANT_ID"
-  "AZURE_CLIENT_ID=$PLANNER_API_CLIENT_ID"
   "AZURE_OPENAI_ENDPOINT=$AZURE_OPENAI_ENDPOINT"
   "AZURE_OPENAI_DEPLOYMENT=$AZURE_OPENAI_DEPLOYMENT"
   "AZURE_OPENAI_TIMEOUT_SECONDS=${AZURE_OPENAI_TIMEOUT_SECONDS:-120}"
@@ -615,7 +614,6 @@ common_env_vars=(
 
 secret_env_vars=(
   "PLANNER_API_CLIENT_SECRET=secretref:planner-api-client-secret"
-  "AZURE_CLIENT_SECRET=secretref:planner-api-client-secret"
 )
 
 secret_pairs=(
@@ -711,27 +709,47 @@ PY
   fi
 fi
 
-remove_env_args=()
-if [[ "$SECURE_MODE" == "true" ]]; then
-  remove_env_args=(
-    --remove-env-vars
-    AZURE_OPENAI_API_KEY
-  )
-fi
+remove_env_args=(
+  --remove-env-vars
+  AZURE_OPENAI_API_KEY
+  AZURE_CLIENT_ID
+  AZURE_CLIENT_SECRET
+)
 
+assign_openai_managed_identity() {
+  local app_name="$1"
+  local openai_scope="$2"
+
+  az containerapp identity assign \
+    --name "$app_name" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --system-assigned \
+    >/dev/null
+
+  local principal_id=""
+  principal_id="$(az containerapp show \
+    --name "$app_name" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query identity.principalId \
+    -o tsv 2>/dev/null || true)"
+
+  if [[ -n "$principal_id" && -n "$openai_scope" ]]; then
+    az role assignment create \
+      --assignee-object-id "$principal_id" \
+      --assignee-principal-type ServicePrincipal \
+      --role "Cognitive Services OpenAI User" \
+      --scope "$openai_scope" \
+      >/dev/null 2>&1 || true
+  fi
+}
+
+openai_resource_id=""
 if [[ -n "${AZURE_OPENAI_ACCOUNT_NAME:-}" ]]; then
   openai_resource_id="$(az cognitiveservices account show \
     --resource-group "$AZURE_RESOURCE_GROUP" \
     --name "$AZURE_OPENAI_ACCOUNT_NAME" \
     --query id \
     -o tsv)"
-  if [[ -n "$openai_resource_id" ]]; then
-    az role assignment create \
-      --assignee "$PLANNER_API_CLIENT_ID" \
-      --role "Cognitive Services OpenAI User" \
-      --scope "$openai_resource_id" \
-      >/dev/null 2>&1 || true
-  fi
 fi
 
 if resource_exists "$AZURE_RESOURCE_GROUP" "$PLANNER_ACA_APP_NAME" "Microsoft.App/containerApps"; then
@@ -768,6 +786,8 @@ else
     --env-vars "${common_env_vars[@]}" "${secret_env_vars[@]}" \
     >/dev/null
 fi
+
+assign_openai_managed_identity "$PLANNER_ACA_APP_NAME" "$openai_resource_id"
 
 fqdn="$(get_resource_field "$AZURE_RESOURCE_GROUP" "$PLANNER_ACA_APP_NAME" "Microsoft.App/containerApps" "properties.configuration.ingress.fqdn")"
 base_url="https://$fqdn"
