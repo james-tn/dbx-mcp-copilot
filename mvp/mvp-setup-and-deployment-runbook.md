@@ -70,7 +70,16 @@ Create or reuse the planner API app and wrapper/bot app:
 bash mvp/infra/scripts/setup-custom-engine-app-registrations.sh
 ```
 
-Copy the emitted values into `.env`.
+For the secure side-by-side path, run the same script against `.env.secure`:
+
+```bash
+ENV_FILE=mvp/.env.secure DEPLOYMENT_MODE=secure \
+bash mvp/infra/scripts/setup-custom-engine-app-registrations.sh
+```
+
+The script now writes the generated values back into `ENV_FILE` and prints the
+final values for verification, so secure-side app rebinds do not depend on a
+manual copy step.
 
 The script sets up:
 
@@ -88,6 +97,16 @@ Admin consent still needs to be completed for:
 1. planner API delegated access to Azure Databricks `user_impersonation`
 2. wrapper/channel delegated access to planner API `access_as_user`
 3. bot app delegated access to planner API `access_as_user`
+
+Secure registration notes:
+
+- secure mode defaults to the `daily-account-planner-secure` app name prefix
+  unless you override `APP_NAME_PREFIX`
+- the secure path does not automatically reuse `PLANNER_API_CLIENT_ID`; set
+  `REUSE_PLANNER_API_APP_ID` explicitly only when you intentionally want to
+  bind a second app package or bot identity to an existing planner API app
+- `.env.secure` will contain live secrets after this step and must not be
+  committed
 
 ## 2. Databricks prep
 
@@ -168,7 +187,9 @@ secure Container Apps environment. For that path, also set:
 
 - `DATABRICKS_BOOTSTRAP_AUTH_MODE`
 - `DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID`
+- `DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_PRINCIPAL_ID`
 - optionally `DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_RESOURCE_ID`
+- optionally `DATABRICKS_BOOTSTRAP_PRINCIPAL_NAME`
 - `DATABRICKS_SEED_JOB_NAME`
 - `DATABRICKS_SEED_TIMEOUT_SECONDS`
 - `DATABRICKS_SEED_POLL_SECONDS`
@@ -186,9 +207,14 @@ Secure bootstrap order:
 1. authenticate from the private ACA Job with the bootstrap managed identity
 2. verify or create required workspace principals through Databricks SCIM/admin
    APIs
-3. run the SQL seed for catalog objects, base tables, entitlements, views,
+3. ensure the bootstrap service principal exists in the workspace and has
+   `workspace-access` plus `databricks-sql-access`
+4. attempt SQL warehouse `CAN_USE` permission bootstrap for the managed
+   identity identifiers; if the workspace exposes no mutable permissions
+   endpoint, continue and let SQL execution decide effective access
+5. run the SQL seed for catalog objects, base tables, entitlements, views,
    grants, and bootstrap state
-4. validate seeded base tables, entitlements, and secure-view existence
+6. validate seeded base tables, entitlements, and secure-view existence
 
 Important secure-path note:
 
@@ -275,6 +301,12 @@ ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/destroy-stack.sh secure
 ```bash
 ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/deploy-stack.sh secure
 ```
+
+`deploy-stack.sh` now passes `ENV_FILE` and `DEPLOYMENT_MODE` through to every
+child script, so the secure path stays pinned to `.env.secure` for app
+registration updates, planner deployment, secure seed, wrapper deployment, and
+bot setup. The app-registration step also writes any newly generated IDs,
+secrets, scopes, and audiences back into `.env.secure`.
 
 4. publish the secure M365 package:
 

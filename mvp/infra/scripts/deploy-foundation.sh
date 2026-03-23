@@ -33,6 +33,36 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+upsert_env_value() {
+  local key="$1"
+  local value="$2"
+
+  python - <<'PY' "$ENV_FILE" "$key" "$value"
+from pathlib import Path
+import sys
+
+env_path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+
+lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+updated = False
+rendered = f"{key}={value}"
+for index, line in enumerate(lines):
+    if line.startswith(f"{key}="):
+        lines[index] = rendered
+        updated = True
+        break
+
+if not updated:
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.append(rendered)
+
+env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}
+
 resource_exists() {
   local resource_group="$1"
   local resource_name="$2"
@@ -43,6 +73,47 @@ resource_exists() {
     --name "$resource_name" \
     --resource-type "$resource_type" \
     >/dev/null 2>&1
+}
+
+delete_private_endpoint_if_unhealthy() {
+  local pe_name="$1"
+
+  if ! az network private-endpoint show \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --name "$pe_name" \
+    >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local provisioning_state=""
+  provisioning_state="$(az network private-endpoint show \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --name "$pe_name" \
+    --query provisioningState \
+    -o tsv 2>/dev/null || true)"
+
+  if [[ "$provisioning_state" == "Succeeded" ]]; then
+    return 0
+  fi
+
+  echo "Recreating unhealthy private endpoint '$pe_name' (state: ${provisioning_state:-unknown})."
+  az network private-endpoint delete \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --name "$pe_name" \
+    >/dev/null
+
+  for _ in {1..60}; do
+    if ! az network private-endpoint show \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      --name "$pe_name" \
+      >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 5
+  done
+
+  echo "Timed out waiting for private endpoint '$pe_name' to delete." >&2
+  return 1
 }
 
 required_vars=(
@@ -223,14 +294,14 @@ for config in payload.get("customDnsConfigs", []) or []:
     if not fqdn.endswith(suffix):
         continue
     record_name = fqdn[: -len(suffix)].rstrip(".")
-    subprocess.run(
+    if subprocess.run(
         [
             "az",
             "network",
             "private-dns",
             "record-set",
             "a",
-            "create",
+            "show",
             "--resource-group",
             resource_group,
             "--zone-name",
@@ -238,9 +309,28 @@ for config in payload.get("customDnsConfigs", []) or []:
             "--name",
             record_name,
         ],
-        check=True,
+        check=False,
         stdout=subprocess.DEVNULL,
-    )
+        stderr=subprocess.DEVNULL,
+    ).returncode != 0:
+        subprocess.run(
+            [
+                "az",
+                "network",
+                "private-dns",
+                "record-set",
+                "a",
+                "create",
+                "--resource-group",
+                resource_group,
+                "--zone-name",
+                zone_name,
+                "--name",
+                record_name,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
     existing = subprocess.check_output(
         [
             "az",
@@ -298,6 +388,8 @@ ensure_private_endpoint() {
   local resource_id="$2"
   local group_id="$3"
   local dns_zone_name="$4"
+
+  delete_private_endpoint_if_unhealthy "$pe_name"
 
   if ! az network private-endpoint show -g "$AZURE_RESOURCE_GROUP" -n "$pe_name" >/dev/null 2>&1; then
     az network private-endpoint create \
@@ -368,13 +460,19 @@ ensure_databricks_private_endpoints() {
     --workspace-name "$workspace_name" \
     -o json)"
 
-  python - <<'PY' "$resources_json"
+python - <<'PY' "$resources_json"
 import json
 import sys
 
 resources = json.loads(sys.argv[1])
 for item in resources:
-    group_id = str(item.get("groupId") or "").strip()
+    properties = item.get("properties") or {}
+    group_id = str(
+        item.get("groupId")
+        or properties.get("groupId")
+        or item.get("name")
+        or ""
+    ).strip()
     if group_id:
         print(group_id)
 PY
@@ -579,6 +677,15 @@ if [[ "$SECURE_MODE" == "true" ]]; then
       "$group_id" \
       "privatelink.azuredatabricks.net"
   done < <(ensure_databricks_private_endpoints "$DATABRICKS_WORKSPACE_NAME" "$databricks_resource_id")
+fi
+
+resolved_workspace_url="$(az databricks workspace show \
+  -g "$AZURE_RESOURCE_GROUP" \
+  -n "$DATABRICKS_WORKSPACE_NAME" \
+  --query workspaceUrl \
+  -o tsv 2>/dev/null || true)"
+if [[ -n "$resolved_workspace_url" ]]; then
+  upsert_env_value "DATABRICKS_HOST" "https://${resolved_workspace_url}"
 fi
 
 cat <<EOF

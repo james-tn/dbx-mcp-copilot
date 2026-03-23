@@ -110,3 +110,96 @@ def test_ensure_workspace_user_raises_permission_error() -> None:
 
     with pytest.raises(DatabricksAdminPermissionError, match="not allowed"):
         asyncio.run(client.ensure_workspace_user("seller@example.com"))
+
+
+def test_ensure_workspace_service_principal_entitlements_patches_missing_values() -> None:
+    credential = _FakeCredential()
+    http_client = _FakeAsyncHttpClient(
+        [
+            {
+                "payload": {
+                    "Resources": [
+                        {
+                            "id": "sp-1",
+                            "applicationId": "app-123",
+                            "entitlements": [{"value": "workspace-access"}],
+                        }
+                    ]
+                }
+            },
+            {"payload": {}},
+        ]
+    )
+    client = DatabricksAdminClient(
+        settings=DatabricksAdminSettings(
+            host="https://example.databricks.net",
+            token_scope="scope",
+            azure_management_scope="https://management.core.windows.net//.default",
+            azure_workspace_resource_id="/subscriptions/123/resourceGroups/rg/providers/Microsoft.Databricks/workspaces/ws",
+            timeout_seconds=5.0,
+            pat=None,
+        ),
+        credential=credential,
+        http_client=http_client,
+    )
+
+    result = asyncio.run(
+        client.ensure_workspace_service_principal_entitlements(
+            "app-123",
+            required_entitlements=("workspace-access", "databricks-sql-access"),
+        )
+    )
+
+    assert result == {
+        "status": "patched",
+        "applied": ["databricks-sql-access"],
+        "required": ["databricks-sql-access", "workspace-access"],
+    }
+    assert http_client.calls[1]["method"] == "PATCH"
+    assert http_client.calls[1]["url"].endswith("/api/2.0/preview/scim/v2/ServicePrincipals/sp-1")
+    assert http_client.calls[1]["json"] == {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [
+            {
+                "op": "add",
+                "path": "entitlements",
+                "value": [{"value": "databricks-sql-access"}],
+            }
+        ],
+    }
+
+
+def test_ensure_sql_warehouse_permission_falls_back_to_put_on_method_error() -> None:
+    credential = _FakeCredential()
+    http_client = _FakeAsyncHttpClient(
+        [
+            {"status_code": 405, "payload": {"message": "method not allowed"}},
+            {"payload": {}},
+        ]
+    )
+    client = DatabricksAdminClient(
+        settings=DatabricksAdminSettings(
+            host="https://example.databricks.net",
+            token_scope="scope",
+            azure_management_scope="https://management.core.windows.net//.default",
+            azure_workspace_resource_id="/subscriptions/123/resourceGroups/rg/providers/Microsoft.Databricks/workspaces/ws",
+            timeout_seconds=5.0,
+            pat=None,
+        ),
+        credential=credential,
+        http_client=http_client,
+    )
+
+    asyncio.run(client.ensure_sql_warehouse_permission("wh-123", "mi-client"))
+
+    assert [call["method"] for call in http_client.calls] == ["PATCH", "PUT"]
+    assert http_client.calls[0]["url"].endswith("/api/2.0/permissions/warehouses/wh-123")
+    assert http_client.calls[1]["url"].endswith("/api/2.0/permissions/warehouses/wh-123")
+    assert http_client.calls[1]["json"] == {
+        "access_control_list": [
+            {
+                "service_principal_name": "mi-client",
+                "permission_level": "CAN_USE",
+            }
+        ]
+    }

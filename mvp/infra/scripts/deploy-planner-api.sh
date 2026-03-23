@@ -13,6 +13,38 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+configured_databricks_host="${DATABRICKS_HOST:-}"
+
+upsert_env_value() {
+  local key="$1"
+  local value="$2"
+
+  python - <<'PY' "$ENV_FILE" "$key" "$value"
+from pathlib import Path
+import sys
+
+env_path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+
+lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+updated = False
+rendered = f"{key}={value}"
+for index, line in enumerate(lines):
+    if line.startswith(f"{key}="):
+        lines[index] = rendered
+        updated = True
+        break
+
+if not updated:
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.append(rendered)
+
+env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}
+
 if [[ -n "${DATABRICKS_RESOURCE_GROUP:-}" && -n "${DATABRICKS_WORKSPACE_NAME:-}" ]]; then
   resolved_workspace_url="$(az databricks workspace show \
     --resource-group "$DATABRICKS_RESOURCE_GROUP" \
@@ -23,6 +55,77 @@ if [[ -n "${DATABRICKS_RESOURCE_GROUP:-}" && -n "${DATABRICKS_WORKSPACE_NAME:-}"
     DATABRICKS_HOST="https://${resolved_workspace_url}"
   fi
 fi
+
+workspace_host_changed="false"
+if [[ -n "${configured_databricks_host:-}" && "${DATABRICKS_HOST:-}" != "${configured_databricks_host:-}" ]]; then
+  workspace_host_changed="true"
+fi
+
+resolve_databricks_token() {
+  if [[ -n "${DATABRICKS_PAT:-}" ]]; then
+    printf '%s\n' "$DATABRICKS_PAT"
+    return 0
+  fi
+
+  az account get-access-token \
+    --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d \
+    --query accessToken \
+    -o tsv
+}
+
+resolve_valid_warehouse_id() {
+  local current_warehouse_id="${DATABRICKS_WAREHOUSE_ID:-}"
+  local dbx_token=""
+  dbx_token="$(resolve_databricks_token)"
+  export DBX_HOST="$DATABRICKS_HOST"
+  export DBX_TOKEN="$dbx_token"
+  export DBX_CURRENT_WAREHOUSE_ID="$current_warehouse_id"
+
+  python - <<'PY'
+import json
+import os
+import urllib.error
+import urllib.request
+
+host = os.environ["DBX_HOST"].rstrip("/")
+token = os.environ["DBX_TOKEN"]
+current = os.environ.get("DBX_CURRENT_WAREHOUSE_ID", "").strip()
+
+request = urllib.request.Request(
+    f"{host}/api/2.0/sql/warehouses",
+    headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    },
+)
+with urllib.request.urlopen(request, timeout=30) as response:
+    payload = json.load(response)
+
+warehouses = payload.get("warehouses", [])
+preferred = None
+if current:
+    for warehouse in warehouses:
+        if str(warehouse.get("id", "")).strip() == current:
+            preferred = warehouse
+            break
+
+if preferred is None:
+    for warehouse in warehouses:
+        state = str(warehouse.get("state", "")).upper()
+        if state in {"RUNNING", "STARTING", "STARTED"}:
+            preferred = warehouse
+            break
+
+if preferred is None and warehouses:
+    preferred = warehouses[0]
+
+warehouse_id = str((preferred or {}).get("id", "")).strip()
+if not warehouse_id:
+    raise SystemExit("No Databricks SQL warehouse was found.")
+
+print(warehouse_id)
+PY
+}
 
 resolve_secure_workspace_catalog() {
   local workspace_name="$1"
@@ -323,7 +426,7 @@ effective_databricks_catalog="${DATABRICKS_CATALOG:-veeam_demo}"
 if [[ "$SECURE_MODE" == "true" && -n "${DATABRICKS_RESOURCE_GROUP:-}" && -n "${DATABRICKS_WORKSPACE_NAME:-}" && "${DATABRICKS_SKIP_CATALOG_CREATE:-false}" == "true" ]]; then
   databricks_workspace_id="$(
     az databricks workspace show \
-      --resource-group "$DATABRICKS_RESOURCE_GROUP" \
+    --resource-group "$DATABRICKS_RESOURCE_GROUP" \
       --name "$DATABRICKS_WORKSPACE_NAME" \
       --query workspaceId \
       -o tsv
@@ -331,6 +434,21 @@ if [[ "$SECURE_MODE" == "true" && -n "${DATABRICKS_RESOURCE_GROUP:-}" && -n "${D
   effective_databricks_catalog="$(resolve_secure_workspace_catalog "$DATABRICKS_WORKSPACE_NAME" "$databricks_workspace_id" "${DATABRICKS_CATALOG:-}")"
   DATABRICKS_CATALOG="$effective_databricks_catalog"
   echo "Using secure Databricks workspace catalog: $effective_databricks_catalog"
+fi
+
+upsert_env_value "DATABRICKS_HOST" "$DATABRICKS_HOST"
+upsert_env_value "DATABRICKS_CATALOG" "$effective_databricks_catalog"
+if [[ "$SECURE_MODE" == "true" ]]; then
+  if [[ "$workspace_host_changed" == "true" ]]; then
+    DATABRICKS_WAREHOUSE_ID=""
+    DATABRICKS_BOOTSTRAP_WAREHOUSE_ID=""
+    upsert_env_value "DATABRICKS_WAREHOUSE_ID" ""
+    upsert_env_value "DATABRICKS_BOOTSTRAP_WAREHOUSE_ID" ""
+  fi
+else
+  DATABRICKS_WAREHOUSE_ID="$(resolve_valid_warehouse_id)"
+  upsert_env_value "DATABRICKS_WAREHOUSE_ID" "$DATABRICKS_WAREHOUSE_ID"
+  upsert_env_value "DATABRICKS_BOOTSTRAP_WAREHOUSE_ID" "$DATABRICKS_WAREHOUSE_ID"
 fi
 
 mapfile -t registry_settings < <(resolve_registry_settings "$PLANNER_API_IMAGE")
@@ -473,10 +591,16 @@ PY
     "DATABRICKS_BOOTSTRAP_WAREHOUSE_ID=${DATABRICKS_BOOTSTRAP_WAREHOUSE_ID:-${DATABRICKS_WAREHOUSE_ID:-}}"
     "DATABRICKS_BOOTSTRAP_AUTH_MODE=${bootstrap_auth_mode}"
     "DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID=${DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID:-$bootstrap_identity_client_id}"
+    "DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_PRINCIPAL_ID=${DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_PRINCIPAL_ID:-$bootstrap_identity_principal_id}"
     "DATABRICKS_SEED_VERSION=${DATABRICKS_SEED_VERSION:-2026-03-secure-bootstrap-v2}"
     "DATABRICKS_AZURE_RESOURCE_ID=$databricks_workspace_resource_id"
     "DATABRICKS_WORKSPACE_USER_UPNS=${DATABRICKS_WORKSPACE_USER_UPNS:-ri-test-na@m365cpi89838450.onmicrosoft.com,DaichiM@M365CPI89838450.OnMicrosoft.com}"
   )
+  if [[ -n "${DATABRICKS_BOOTSTRAP_PRINCIPAL_NAME:-}" ]]; then
+    seed_job_env_vars+=(
+      "DATABRICKS_BOOTSTRAP_PRINCIPAL_NAME=${DATABRICKS_BOOTSTRAP_PRINCIPAL_NAME}"
+    )
+  fi
   if [[ "$bootstrap_auth_mode" == "azure_service_principal" ]]; then
     seed_job_env_vars+=(
       "ARM_TENANT_ID=$AZURE_TENANT_ID"
@@ -546,6 +670,7 @@ fi
 
 fqdn="$(get_resource_field "$AZURE_RESOURCE_GROUP" "$PLANNER_ACA_APP_NAME" "Microsoft.App/containerApps" "properties.configuration.ingress.fqdn")"
 base_url="https://$fqdn"
+upsert_env_value "PLANNER_API_BASE_URL" "$base_url"
 echo "Daily Account Planner planner service deployed to: $base_url"
 echo "Set PLANNER_API_BASE_URL=$base_url in $ENV_FILE for validation."
 
@@ -554,7 +679,7 @@ if [[ "$SECURE_MODE" == "true" && -n "$bootstrap_identity_resource_id" ]]; then
     --name "$PLANNER_ACA_APP_NAME" \
     --resource-group "$AZURE_RESOURCE_GROUP" \
     --user-assigned "$bootstrap_identity_resource_id" \
-    >/dev/null
+    >/dev/null 2>&1 || true
 fi
 
 if [[ "$SECURE_MODE" == "true" ]]; then
@@ -565,7 +690,7 @@ if [[ "$SECURE_MODE" == "true" ]]; then
       --name "$seed_job_name" \
       --resource-group "$AZURE_RESOURCE_GROUP" \
       --user-assigned "$bootstrap_identity_resource_id" \
-      >/dev/null
+      >/dev/null 2>&1 || true
   fi
   wait_for_containerapp_job "$AZURE_RESOURCE_GROUP" "$seed_job_name" "${DATABRICKS_SEED_JOB_CREATE_TIMEOUT_SECONDS:-300}"
   echo "Secure Databricks seed job configured: $seed_job_name"

@@ -12,6 +12,36 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+upsert_env_value() {
+  local key="$1"
+  local value="$2"
+
+  python - <<'PY' "$ENV_FILE" "$key" "$value"
+from pathlib import Path
+import sys
+
+env_path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+
+lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+updated = False
+rendered = f"{key}={value}"
+for index, line in enumerate(lines):
+    if line.startswith(f"{key}="):
+        lines[index] = rendered
+        updated = True
+        break
+
+if not updated:
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.append(rendered)
+
+env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}
+
 resource_exists() {
   local resource_group="$1"
   local resource_name="$2"
@@ -138,6 +168,10 @@ if [[ -z "${PLANNER_SERVICE_BASE_URL:-}" && "$SECURE_MODE" == "true" ]]; then
   fi
 fi
 
+if [[ -n "${PLANNER_SERVICE_BASE_URL:-}" ]]; then
+  upsert_env_value "PLANNER_SERVICE_BASE_URL" "$PLANNER_SERVICE_BASE_URL"
+fi
+
 if [[ -z "${PLANNER_SERVICE_BASE_URL:-}" ]]; then
   echo "PLANNER_SERVICE_BASE_URL is required in $ENV_FILE or the environment." >&2
   exit 1
@@ -196,5 +230,6 @@ else
 fi
 
 fqdn="$(get_resource_field "$AZURE_RESOURCE_GROUP" "$WRAPPER_ACA_APP_NAME" "Microsoft.App/containerApps" "properties.configuration.ingress.fqdn")"
+upsert_env_value "WRAPPER_BASE_URL" "https://$fqdn"
 echo "Daily Account Planner M365 wrapper deployed to: https://$fqdn"
 echo "Set WRAPPER_BASE_URL=https://$fqdn in $ENV_FILE and use https://$fqdn/api/messages for the Azure Bot endpoint."

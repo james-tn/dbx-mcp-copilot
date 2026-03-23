@@ -39,6 +39,7 @@ _DEFAULT_SEED_VERSION = "2026-03-secure-bootstrap-v2"
 _DEFAULT_STATE_SCHEMA = "ri_ops"
 _DEFAULT_STATE_TABLE = "bootstrap_state"
 _DEFAULT_AUTH_MODE = "managed_identity"
+_DEFAULT_BOOTSTRAP_REQUIRED_ENTITLEMENTS = ("workspace-access", "databricks-sql-access")
 _DEFAULT_WORKSPACE_USERS = (
     "ri-test-na@m365cpi89838450.onmicrosoft.com,"
     "DaichiM@M365CPI89838450.OnMicrosoft.com"
@@ -63,6 +64,8 @@ class DatabricksSeedConfig:
     arm_client_id: str | None
     arm_client_secret: str | None
     managed_identity_client_id: str | None
+    managed_identity_principal_id: str | None
+    bootstrap_principal_names: tuple[str, ...]
     warehouse_id: str | None
 
     @property
@@ -88,6 +91,14 @@ def load_seed_config() -> DatabricksSeedConfig:
         or os.environ.get("ARM_CLIENT_ID", "").strip()
         or None
     )
+    managed_identity_principal_id = (
+        os.environ.get("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_PRINCIPAL_ID", "").strip()
+        or None
+    )
+    explicit_bootstrap_principal_name = (
+        os.environ.get("DATABRICKS_BOOTSTRAP_PRINCIPAL_NAME", "").strip()
+        or None
+    )
 
     if auth_mode == "azure_service_principal" and not (arm_tenant_id and arm_client_id and arm_client_secret):
         raise DatabricksSeedError(
@@ -96,6 +107,20 @@ def load_seed_config() -> DatabricksSeedConfig:
     if auth_mode == "managed_identity" and not managed_identity_client_id:
         raise DatabricksSeedError(
             "DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID or ARM_CLIENT_ID is required for managed_identity secure seeding."
+        )
+    bootstrap_principal_names: list[str] = []
+    for candidate in (
+        explicit_bootstrap_principal_name,
+        managed_identity_client_id if auth_mode == "managed_identity" else arm_client_id,
+        managed_identity_principal_id if auth_mode == "managed_identity" else None,
+    ):
+        normalized = str(candidate or "").strip()
+        if normalized and normalized not in bootstrap_principal_names:
+            bootstrap_principal_names.append(normalized)
+
+    if not bootstrap_principal_names:
+        raise DatabricksSeedError(
+            "At least one Databricks bootstrap principal identifier is required for secure seeding."
         )
 
     workspace_user_upns = tuple(
@@ -106,6 +131,11 @@ def load_seed_config() -> DatabricksSeedConfig:
     if not workspace_user_upns:
         raise DatabricksSeedError("At least one DATABRICKS_WORKSPACE_USER_UPNS value is required.")
 
+    warehouse_id = (
+        os.environ.get("DATABRICKS_BOOTSTRAP_WAREHOUSE_ID", "").strip()
+        or os.environ.get("DATABRICKS_WAREHOUSE_ID", "").strip()
+        or None
+    )
     return DatabricksSeedConfig(
         sql_file=sql_file,
         catalog=os.environ.get("DATABRICKS_CATALOG", "veeam_demo").strip() or "veeam_demo",
@@ -119,9 +149,9 @@ def load_seed_config() -> DatabricksSeedConfig:
         arm_client_id=arm_client_id,
         arm_client_secret=arm_client_secret,
         managed_identity_client_id=managed_identity_client_id,
-        warehouse_id=os.environ.get("DATABRICKS_BOOTSTRAP_WAREHOUSE_ID", "").strip()
-        or os.environ.get("DATABRICKS_WAREHOUSE_ID", "").strip()
-        or None,
+        managed_identity_principal_id=managed_identity_principal_id,
+        bootstrap_principal_names=tuple(bootstrap_principal_names),
+        warehouse_id=warehouse_id,
     )
 
 
@@ -194,6 +224,94 @@ async def _ensure_workspace_principals(
     for user_upn in config.workspace_user_upns:
         results[user_upn] = await admin_client.ensure_workspace_user(user_upn)
     return results
+
+
+async def _ensure_bootstrap_workspace_principal(
+    admin_client: DatabricksAdminClient,
+    config: DatabricksSeedConfig,
+) -> str | None:
+    application_id: str | None
+    if config.auth_mode == "managed_identity":
+        application_id = config.managed_identity_client_id
+    else:
+        application_id = config.arm_client_id
+
+    normalized_application_id = str(application_id or "").strip()
+    if not normalized_application_id:
+        return None
+
+    return await admin_client.ensure_workspace_service_principal(
+        normalized_application_id,
+        display_name=config.bootstrap_principal_names[0] if config.bootstrap_principal_names else None,
+        entitlements=_DEFAULT_BOOTSTRAP_REQUIRED_ENTITLEMENTS,
+    )
+
+
+async def _ensure_bootstrap_workspace_principal_entitlements(
+    admin_client: DatabricksAdminClient,
+    config: DatabricksSeedConfig,
+) -> dict[str, Any] | None:
+    application_id: str | None
+    if config.auth_mode == "managed_identity":
+        application_id = config.managed_identity_client_id
+    else:
+        application_id = config.arm_client_id
+
+    normalized_application_id = str(application_id or "").strip()
+    if not normalized_application_id:
+        return None
+
+    return await admin_client.ensure_workspace_service_principal_entitlements(
+        normalized_application_id,
+        required_entitlements=_DEFAULT_BOOTSTRAP_REQUIRED_ENTITLEMENTS,
+    )
+
+
+async def _ensure_bootstrap_warehouse_access(
+    admin_client: DatabricksAdminClient,
+    config: DatabricksSeedConfig,
+    warehouse_id: str,
+) -> dict[str, Any]:
+    if not warehouse_id or not config.bootstrap_principal_names:
+        raise DatabricksSeedError(
+            "Databricks bootstrap warehouse access requires a warehouse id and at least one bootstrap principal identifier."
+        )
+    applied_principals: list[str] = []
+    errors: list[str] = []
+    for principal_name in config.bootstrap_principal_names:
+        try:
+            await admin_client.ensure_sql_warehouse_permission(
+                warehouse_id,
+                principal_name,
+            )
+            applied_principals.append(principal_name)
+        except DatabricksAdminError as exc:
+            errors.append(f"{principal_name}: {exc}")
+
+    if applied_principals:
+        return {
+            "status": "applied",
+            "applied_principals": applied_principals,
+            "errors": errors,
+        }
+
+    # Some workspaces do not expose a mutable warehouse-permissions endpoint for
+    # this identity. In that case we continue and let the SQL bootstrap path be
+    # the source of truth for effective warehouse access.
+    if errors and all("HTTP 404" in error for error in errors):
+        return {
+            "status": "skipped",
+            "reason": "permissions_endpoint_not_available",
+            "applied_principals": [],
+            "errors": errors,
+        }
+
+    attempted = ", ".join(config.bootstrap_principal_names)
+    detail = "; ".join(errors) if errors else "no successful warehouse permission assignments"
+    raise DatabricksSeedError(
+        "Failed to grant Databricks SQL warehouse access for bootstrap principal identifiers "
+        f"[{attempted}]: {detail}"
+    )
 
 
 async def _ensure_catalog_exists(client: DatabricksSqlClient, config: DatabricksSeedConfig) -> None:
@@ -326,6 +444,22 @@ async def run_secure_seed() -> dict[str, Any]:
     )
     try:
         principal_results = await _ensure_workspace_principals(admin_client, config)
+        bootstrap_service_principal_result = await _ensure_bootstrap_workspace_principal(
+            admin_client,
+            config,
+        )
+        bootstrap_service_principal_entitlement_result = (
+            await _ensure_bootstrap_workspace_principal_entitlements(
+                admin_client,
+                config,
+            )
+        )
+        resolved_warehouse_id = config.warehouse_id or await client.resolve_warehouse_id()
+        warehouse_permission_result = await _ensure_bootstrap_warehouse_access(
+            admin_client,
+            config,
+            resolved_warehouse_id,
+        )
         if not config.skip_catalog_create:
             await _ensure_catalog_exists(client, config)
         await _ensure_state_storage(client, config)
@@ -334,11 +468,14 @@ async def run_secure_seed() -> dict[str, Any]:
                 "auth_mode": config.auth_mode,
                 "catalog": config.catalog,
                 "principal_results": principal_results,
+                "bootstrap_service_principal_result": bootstrap_service_principal_result,
+                "bootstrap_service_principal_entitlement_result": bootstrap_service_principal_entitlement_result,
+                "warehouse_permission_result": warehouse_permission_result,
                 "status": "skipped",
                 "reason": "already_current",
                 "seed_version": config.seed_version,
                 "skip_catalog_create": config.skip_catalog_create,
-                "warehouse_id": await client.resolve_warehouse_id(),
+                "warehouse_id": resolved_warehouse_id,
             }
 
         statements = _render_seed_script(config)
@@ -351,11 +488,14 @@ async def run_secure_seed() -> dict[str, Any]:
             "auth_mode": config.auth_mode,
             "catalog": config.catalog,
             "principal_results": principal_results,
+            "bootstrap_service_principal_result": bootstrap_service_principal_result,
+            "bootstrap_service_principal_entitlement_result": bootstrap_service_principal_entitlement_result,
+            "warehouse_permission_result": warehouse_permission_result,
             "status": "seeded",
             "seed_version": config.seed_version,
             "skip_catalog_create": config.skip_catalog_create,
             "statement_count": len(statements),
-            "warehouse_id": await client.resolve_warehouse_id(),
+            "warehouse_id": resolved_warehouse_id,
         }
     except DatabricksSqlError as exc:
         raise DatabricksSeedError(str(exc)) from exc

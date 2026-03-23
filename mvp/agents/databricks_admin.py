@@ -175,6 +175,191 @@ class DatabricksAdminClient:
             raise
         return "created"
 
+    async def get_workspace_service_principal(self, application_id: str) -> dict[str, Any] | None:
+        encoded_filter = quote(f'applicationId eq "{application_id}"', safe="")
+        payload = await self._request(
+            "GET",
+            f"/api/2.0/preview/scim/v2/ServicePrincipals?filter={encoded_filter}",
+            content_type="application/json",
+        )
+        resources = payload.get("Resources", [])
+        if isinstance(resources, list) and resources:
+            first = resources[0]
+            if isinstance(first, dict):
+                return first
+        return None
+
+    async def create_workspace_service_principal(
+        self,
+        application_id: str,
+        *,
+        display_name: str | None = None,
+        entitlements: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        normalized_application_id = application_id.strip()
+        normalized_entitlements = sorted(
+            {
+                entitlement.strip()
+                for entitlement in entitlements
+                if entitlement and entitlement.strip()
+            }
+        )
+        payload = await self._request(
+            "POST",
+            "/api/2.0/preview/scim/v2/ServicePrincipals",
+            json_payload={
+                "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ServicePrincipal"],
+                "applicationId": normalized_application_id,
+                "displayName": display_name or normalized_application_id,
+                "entitlements": [
+                    {"value": entitlement}
+                    for entitlement in normalized_entitlements
+                ],
+            },
+        )
+        return payload
+
+    async def ensure_workspace_service_principal(
+        self,
+        application_id: str,
+        *,
+        display_name: str | None = None,
+        entitlements: tuple[str, ...] = (),
+    ) -> str:
+        normalized_application_id = application_id.strip()
+        if not normalized_application_id:
+            raise DatabricksAdminError("Databricks service principal application id is required.")
+
+        existing = await self.get_workspace_service_principal(normalized_application_id)
+        if existing is not None:
+            return "existing"
+        try:
+            await self.create_workspace_service_principal(
+                normalized_application_id,
+                display_name=display_name,
+                entitlements=entitlements,
+            )
+        except DatabricksAdminError:
+            retry_existing = await self.get_workspace_service_principal(normalized_application_id)
+            if retry_existing is not None:
+                return "existing"
+            raise
+        return "created"
+
+    async def ensure_workspace_service_principal_entitlements(
+        self,
+        application_id: str,
+        *,
+        required_entitlements: tuple[str, ...],
+    ) -> dict[str, Any]:
+        normalized_application_id = application_id.strip()
+        if not normalized_application_id:
+            raise DatabricksAdminError("Databricks service principal application id is required.")
+
+        normalized_required_entitlements = sorted(
+            {
+                entitlement.strip()
+                for entitlement in required_entitlements
+                if entitlement and entitlement.strip()
+            }
+        )
+        if not normalized_required_entitlements:
+            raise DatabricksAdminError("At least one required Databricks entitlement is required.")
+
+        service_principal = await self.get_workspace_service_principal(normalized_application_id)
+        if service_principal is None:
+            raise DatabricksAdminError(
+                "Databricks service principal does not exist in workspace for entitlement bootstrap."
+            )
+
+        service_principal_id = str(service_principal.get("id", "")).strip()
+        if not service_principal_id:
+            raise DatabricksAdminError("Databricks service principal id was missing from SCIM response.")
+
+        current_entitlements = _extract_entitlements(service_principal)
+        missing_entitlements = [
+            entitlement
+            for entitlement in normalized_required_entitlements
+            if entitlement not in current_entitlements
+        ]
+        if not missing_entitlements:
+            return {
+                "status": "already_set",
+                "applied": [],
+                "required": normalized_required_entitlements,
+            }
+
+        await self._request(
+            "PATCH",
+            f"/api/2.0/preview/scim/v2/ServicePrincipals/{quote(service_principal_id, safe='')}",
+            json_payload={
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                "Operations": [
+                    {
+                        "op": "add",
+                        "path": "entitlements",
+                        "value": [{"value": entitlement} for entitlement in missing_entitlements],
+                    }
+                ],
+            },
+            content_type="application/scim+json",
+        )
+        return {
+            "status": "patched",
+            "applied": missing_entitlements,
+            "required": normalized_required_entitlements,
+        }
+
+    async def ensure_sql_warehouse_permission(
+        self,
+        warehouse_id: str,
+        principal_name: str,
+        *,
+        permission_level: str = "CAN_USE",
+    ) -> None:
+        normalized_warehouse_id = warehouse_id.strip()
+        normalized_principal_name = principal_name.strip()
+        if not normalized_warehouse_id:
+            raise DatabricksAdminError("Databricks SQL warehouse id is required.")
+        if not normalized_principal_name:
+            raise DatabricksAdminError("Databricks bootstrap principal name is required.")
+
+        payload = {
+            "access_control_list": [
+                {
+                    "service_principal_name": normalized_principal_name,
+                    "permission_level": permission_level,
+                }
+            ]
+        }
+        candidate_paths = (
+            f"/api/2.0/permissions/warehouses/{normalized_warehouse_id}",
+            f"/api/2.0/preview/permissions/warehouses/{normalized_warehouse_id}",
+            f"/api/2.0/permissions/sql/warehouses/{normalized_warehouse_id}",
+            f"/api/2.0/preview/permissions/sql/warehouses/{normalized_warehouse_id}",
+        )
+
+        last_error: DatabricksAdminError | None = None
+        for path in candidate_paths:
+            for method in ("PATCH", "PUT"):
+                try:
+                    await self._request(
+                        method,
+                        path,
+                        json_payload=payload,
+                        content_type="application/json",
+                    )
+                    return
+                except DatabricksAdminError as exc:
+                    last_error = exc
+                    error_message = str(exc)
+                    if "HTTP 404" in error_message or "HTTP 405" in error_message:
+                        continue
+                    raise
+
+        if last_error is not None:
+            raise last_error
+
 
 def _format_databricks_error(response: httpx.Response) -> str:
     status = response.status_code
@@ -199,3 +384,20 @@ def _format_databricks_error(response: httpx.Response) -> str:
             )
 
     return f"Databricks admin API request failed with HTTP {status}: {body_text[:500]}"
+
+
+def _extract_entitlements(resource: dict[str, Any]) -> set[str]:
+    entitlements = resource.get("entitlements", [])
+    normalized: set[str] = set()
+    if isinstance(entitlements, list):
+        for raw_item in entitlements:
+            value: str | None = None
+            if isinstance(raw_item, dict):
+                raw_value = raw_item.get("value")
+                if isinstance(raw_value, str):
+                    value = raw_value
+            elif isinstance(raw_item, str):
+                value = raw_item
+            if value:
+                normalized.add(value.strip())
+    return normalized

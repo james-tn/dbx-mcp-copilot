@@ -13,9 +13,37 @@ def test_load_seed_config_requires_managed_identity(monkeypatch, tmp_path: Path)
     monkeypatch.delenv("ARM_CLIENT_ID", raising=False)
     monkeypatch.delenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID", raising=False)
     monkeypatch.setenv("DATABRICKS_BOOTSTRAP_AUTH_MODE", "managed_identity")
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh-1")
 
     with pytest.raises(databricks_seed.DatabricksSeedError, match="managed_identity"):
         databricks_seed.load_seed_config()
+
+
+def test_load_seed_config_allows_missing_warehouse_id(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DATABRICKS_SEED_SQL_FILE", str(tmp_path / "seed.sql"))
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_AUTH_MODE", "managed_identity")
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID", "mi-client")
+    monkeypatch.delenv("DATABRICKS_BOOTSTRAP_WAREHOUSE_ID", raising=False)
+    monkeypatch.delenv("DATABRICKS_WAREHOUSE_ID", raising=False)
+
+    config = databricks_seed.load_seed_config()
+
+    assert config.warehouse_id is None
+
+
+def test_load_seed_config_includes_managed_identity_principal_candidates(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("DATABRICKS_SEED_SQL_FILE", str(tmp_path / "seed.sql"))
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_AUTH_MODE", "managed_identity")
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID", "mi-client")
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_PRINCIPAL_ID", "mi-principal")
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh-1")
+
+    config = databricks_seed.load_seed_config()
+
+    assert config.bootstrap_principal_names == ("mi-client", "mi-principal")
 
 
 def test_split_statements_skips_comments_and_keeps_tail() -> None:
@@ -50,6 +78,7 @@ def test_render_seed_script_removes_catalog_create_when_skipping(monkeypatch, tm
     monkeypatch.setenv("DATABRICKS_SKIP_CATALOG_CREATE", "true")
     monkeypatch.setenv("DATABRICKS_BOOTSTRAP_AUTH_MODE", "managed_identity")
     monkeypatch.setenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID", "mi-client")
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh-1")
 
     config = databricks_seed.load_seed_config()
     statements = databricks_seed._render_seed_script(config)
@@ -72,6 +101,9 @@ def test_run_secure_seed_skips_when_current(monkeypatch, tmp_path: Path) -> None
 
     executed: list[str] = []
     ensured_users: list[str] = []
+    ensured_service_principals: list[str] = []
+    ensured_service_principal_entitlements: list[tuple[str, tuple[str, ...]]] = []
+    warehouse_permissions: list[tuple[str, str]] = []
 
     class FakeClient:
         def __init__(self, settings=None, **kwargs) -> None:
@@ -97,6 +129,34 @@ def test_run_secure_seed_skips_when_current(monkeypatch, tmp_path: Path) -> None
             ensured_users.append(user_upn)
             return "existing"
 
+        async def ensure_workspace_service_principal(
+            self,
+            application_id: str,
+            *,
+            display_name: str | None = None,
+            entitlements: tuple[str, ...] = (),
+        ) -> str:
+            ensured_service_principals.append(application_id)
+            return "existing"
+
+        async def ensure_workspace_service_principal_entitlements(
+            self,
+            application_id: str,
+            *,
+            required_entitlements: tuple[str, ...],
+        ) -> dict[str, str | list[str]]:
+            ensured_service_principal_entitlements.append((application_id, required_entitlements))
+            return {"status": "already_set", "applied": [], "required": list(required_entitlements)}
+
+        async def ensure_sql_warehouse_permission(
+            self,
+            warehouse_id: str,
+            principal_name: str,
+            *,
+            permission_level: str = "CAN_USE",
+        ) -> None:
+            warehouse_permissions.append((warehouse_id, principal_name))
+
         async def close(self) -> None:
             return None
 
@@ -115,10 +175,25 @@ def test_run_secure_seed_skips_when_current(monkeypatch, tmp_path: Path) -> None
         "ri-test-na@m365cpi89838450.onmicrosoft.com": "existing",
         "DaichiM@M365CPI89838450.OnMicrosoft.com": "existing",
     }
+    assert result["warehouse_permission_result"] == {
+        "status": "applied",
+        "applied_principals": ["mi-client"],
+        "errors": [],
+    }
+    assert result["bootstrap_service_principal_entitlement_result"] == {
+        "status": "already_set",
+        "applied": [],
+        "required": ["workspace-access", "databricks-sql-access"],
+    }
     assert ensured_users == [
         "ri-test-na@m365cpi89838450.onmicrosoft.com",
         "DaichiM@M365CPI89838450.OnMicrosoft.com",
     ]
+    assert ensured_service_principals == ["mi-client"]
+    assert ensured_service_principal_entitlements == [
+        ("mi-client", ("workspace-access", "databricks-sql-access"))
+    ]
+    assert warehouse_permissions == [("wh-1", "mi-client")]
     assert all("CREATE USER IF NOT EXISTS" not in statement for statement in executed)
     assert any("CREATE TABLE IF NOT EXISTS veeam_demo.ri_ops.bootstrap_state" in statement for statement in executed)
 
@@ -143,6 +218,9 @@ def test_run_secure_seed_honors_skip_catalog_create(monkeypatch, tmp_path: Path)
     monkeypatch.setenv("DATABRICKS_SKIP_CATALOG_CREATE", "true")
 
     executed: list[str] = []
+    ensured_service_principals: list[str] = []
+    ensured_service_principal_entitlements: list[tuple[str, tuple[str, ...]]] = []
+    warehouse_permissions: list[tuple[str, str]] = []
 
     class FakeClient:
         def __init__(self, settings=None, **kwargs) -> None:
@@ -182,6 +260,34 @@ def test_run_secure_seed_honors_skip_catalog_create(monkeypatch, tmp_path: Path)
         async def ensure_workspace_user(self, user_upn: str) -> str:
             return "existing"
 
+        async def ensure_workspace_service_principal(
+            self,
+            application_id: str,
+            *,
+            display_name: str | None = None,
+            entitlements: tuple[str, ...] = (),
+        ) -> str:
+            ensured_service_principals.append(application_id)
+            return "existing"
+
+        async def ensure_workspace_service_principal_entitlements(
+            self,
+            application_id: str,
+            *,
+            required_entitlements: tuple[str, ...],
+        ) -> dict[str, str | list[str]]:
+            ensured_service_principal_entitlements.append((application_id, required_entitlements))
+            return {"status": "patched", "applied": ["workspace-access"], "required": list(required_entitlements)}
+
+        async def ensure_sql_warehouse_permission(
+            self,
+            warehouse_id: str,
+            principal_name: str,
+            *,
+            permission_level: str = "CAN_USE",
+        ) -> None:
+            warehouse_permissions.append((warehouse_id, principal_name))
+
         async def close(self) -> None:
             return None
 
@@ -194,9 +300,244 @@ def test_run_secure_seed_honors_skip_catalog_create(monkeypatch, tmp_path: Path)
     assert result["catalog"] == "workspace_catalog"
     assert result["skip_catalog_create"] is True
     assert result["status"] == "seeded"
+    assert result["warehouse_permission_result"] == {
+        "status": "applied",
+        "applied_principals": ["mi-client"],
+        "errors": [],
+    }
+    assert result["bootstrap_service_principal_entitlement_result"] == {
+        "status": "patched",
+        "applied": ["workspace-access"],
+        "required": ["workspace-access", "databricks-sql-access"],
+    }
+    assert ensured_service_principals == ["mi-client"]
+    assert ensured_service_principal_entitlements == [
+        ("mi-client", ("workspace-access", "databricks-sql-access"))
+    ]
+    assert warehouse_permissions == [("wh-1", "mi-client")]
     assert all("CREATE CATALOG IF NOT EXISTS" not in statement for statement in executed)
     assert any("CREATE SCHEMA IF NOT EXISTS workspace_catalog.ri" in statement for statement in executed)
     assert any("CREATE SCHEMA IF NOT EXISTS workspace_catalog.ri_ops" in statement for statement in executed)
+
+
+def test_run_secure_seed_retries_warehouse_acl_with_multiple_bootstrap_principals(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    sql_file = tmp_path / "seed.sql"
+    sql_file.write_text("SELECT 1;", encoding="utf-8")
+
+    monkeypatch.setenv("DATABRICKS_SEED_SQL_FILE", str(sql_file))
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_AUTH_MODE", "managed_identity")
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID", "mi-client")
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_PRINCIPAL_ID", "mi-principal")
+    monkeypatch.setenv("DATABRICKS_HOST", "https://example.azuredatabricks.net")
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh-1")
+
+    executed: list[str] = []
+    ensured_service_principals: list[str] = []
+    ensured_service_principal_entitlements: list[tuple[str, tuple[str, ...]]] = []
+    warehouse_permissions: list[tuple[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, settings=None, **kwargs) -> None:
+            self.settings = settings
+
+        async def execute(self, statement: str):
+            executed.append(" ".join(statement.split()))
+            if "SELECT seed_version" in statement:
+                return [{"seed_version": "stale"}]
+            if "SELECT 'accounts'" in statement:
+                return [
+                    {"object_name": "accounts", "row_count": 1},
+                    {"object_name": "reps", "row_count": 1},
+                    {"object_name": "opportunities", "row_count": 1},
+                    {"object_name": "contacts", "row_count": 1},
+                    {"object_name": "entitlements", "row_count": 2},
+                ]
+            if "SHOW TABLES IN veeam_demo.ri_secure" in statement:
+                return [
+                    {"tableName": "accounts"},
+                    {"tableName": "reps"},
+                    {"tableName": "opportunities"},
+                    {"tableName": "contacts"},
+                ]
+            return []
+
+        async def resolve_warehouse_id(self) -> str:
+            return "wh-1"
+
+        async def close(self) -> None:
+            return None
+
+    class FakeAdminClient:
+        def __init__(self, settings=None, **kwargs) -> None:
+            self.settings = settings
+
+        async def ensure_workspace_user(self, user_upn: str) -> str:
+            return "existing"
+
+        async def ensure_workspace_service_principal(
+            self,
+            application_id: str,
+            *,
+            display_name: str | None = None,
+            entitlements: tuple[str, ...] = (),
+        ) -> str:
+            ensured_service_principals.append(application_id)
+            return "created"
+
+        async def ensure_workspace_service_principal_entitlements(
+            self,
+            application_id: str,
+            *,
+            required_entitlements: tuple[str, ...],
+        ) -> dict[str, str | list[str]]:
+            ensured_service_principal_entitlements.append((application_id, required_entitlements))
+            return {"status": "patched", "applied": ["databricks-sql-access"], "required": list(required_entitlements)}
+
+        async def ensure_sql_warehouse_permission(
+            self,
+            warehouse_id: str,
+            principal_name: str,
+            *,
+            permission_level: str = "CAN_USE",
+        ) -> None:
+            warehouse_permissions.append((warehouse_id, principal_name))
+            if principal_name == "mi-client":
+                raise databricks_seed.DatabricksAdminError("principal not found")
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(databricks_seed, "DatabricksSqlClient", FakeClient)
+    monkeypatch.setattr(databricks_seed, "DatabricksAdminClient", FakeAdminClient)
+    monkeypatch.setattr(databricks_seed, "_build_bootstrap_credential", lambda config: object())
+
+    result = asyncio.run(databricks_seed.run_secure_seed())
+
+    assert result["status"] == "seeded"
+    assert result["warehouse_permission_result"] == {
+        "status": "applied",
+        "applied_principals": ["mi-principal"],
+        "errors": ["mi-client: principal not found"],
+    }
+    assert result["bootstrap_service_principal_entitlement_result"] == {
+        "status": "patched",
+        "applied": ["databricks-sql-access"],
+        "required": ["workspace-access", "databricks-sql-access"],
+    }
+    assert ensured_service_principals == ["mi-client"]
+    assert ensured_service_principal_entitlements == [
+        ("mi-client", ("workspace-access", "databricks-sql-access"))
+    ]
+    assert warehouse_permissions == [("wh-1", "mi-client"), ("wh-1", "mi-principal")]
+    assert any("CREATE TABLE IF NOT EXISTS veeam_demo.ri_ops.bootstrap_state" in statement for statement in executed)
+
+
+def test_run_secure_seed_continues_when_warehouse_permissions_endpoint_missing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    sql_file = tmp_path / "seed.sql"
+    sql_file.write_text("SELECT 1;", encoding="utf-8")
+
+    monkeypatch.setenv("DATABRICKS_SEED_SQL_FILE", str(sql_file))
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_AUTH_MODE", "managed_identity")
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID", "mi-client")
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_PRINCIPAL_ID", "mi-principal")
+    monkeypatch.setenv("DATABRICKS_HOST", "https://example.azuredatabricks.net")
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh-1")
+
+    class FakeClient:
+        def __init__(self, settings=None, **kwargs) -> None:
+            self.settings = settings
+
+        async def execute(self, statement: str):
+            if "SELECT seed_version" in statement:
+                return [{"seed_version": "stale"}]
+            if "SELECT 'accounts'" in statement:
+                return [
+                    {"object_name": "accounts", "row_count": 1},
+                    {"object_name": "reps", "row_count": 1},
+                    {"object_name": "opportunities", "row_count": 1},
+                    {"object_name": "contacts", "row_count": 1},
+                    {"object_name": "entitlements", "row_count": 2},
+                ]
+            if "SHOW TABLES IN veeam_demo.ri_secure" in statement:
+                return [
+                    {"tableName": "accounts"},
+                    {"tableName": "reps"},
+                    {"tableName": "opportunities"},
+                    {"tableName": "contacts"},
+                ]
+            return []
+
+        async def resolve_warehouse_id(self) -> str:
+            return "wh-1"
+
+        async def close(self) -> None:
+            return None
+
+    class FakeAdminClient:
+        def __init__(self, settings=None, **kwargs) -> None:
+            self.settings = settings
+
+        async def ensure_workspace_user(self, user_upn: str) -> str:
+            return "existing"
+
+        async def ensure_workspace_service_principal(
+            self,
+            application_id: str,
+            *,
+            display_name: str | None = None,
+            entitlements: tuple[str, ...] = (),
+        ) -> str:
+            return "existing"
+
+        async def ensure_workspace_service_principal_entitlements(
+            self,
+            application_id: str,
+            *,
+            required_entitlements: tuple[str, ...],
+        ) -> dict[str, str | list[str]]:
+            return {"status": "already_set", "applied": [], "required": list(required_entitlements)}
+
+        async def ensure_sql_warehouse_permission(
+            self,
+            warehouse_id: str,
+            principal_name: str,
+            *,
+            permission_level: str = "CAN_USE",
+        ) -> None:
+            raise databricks_seed.DatabricksAdminError(
+                "Databricks admin API request failed with HTTP 404: warehouses wh-1 does not exist"
+            )
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(databricks_seed, "DatabricksSqlClient", FakeClient)
+    monkeypatch.setattr(databricks_seed, "DatabricksAdminClient", FakeAdminClient)
+    monkeypatch.setattr(databricks_seed, "_build_bootstrap_credential", lambda config: object())
+
+    result = asyncio.run(databricks_seed.run_secure_seed())
+
+    assert result["status"] == "seeded"
+    assert result["warehouse_permission_result"] == {
+        "status": "skipped",
+        "reason": "permissions_endpoint_not_available",
+        "applied_principals": [],
+        "errors": [
+            "mi-client: Databricks admin API request failed with HTTP 404: warehouses wh-1 does not exist",
+            "mi-principal: Databricks admin API request failed with HTTP 404: warehouses wh-1 does not exist",
+        ],
+    }
+    assert result["bootstrap_service_principal_entitlement_result"] == {
+        "status": "already_set",
+        "applied": [],
+        "required": ["workspace-access", "databricks-sql-access"],
+    }
 
 
 def test_validate_seed_output_checks_base_tables_and_view_existence(monkeypatch, tmp_path: Path) -> None:

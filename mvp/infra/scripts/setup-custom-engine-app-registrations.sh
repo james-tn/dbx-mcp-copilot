@@ -2,13 +2,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
-APP_NAME_PREFIX="${APP_NAME_PREFIX:-daily-account-planner}"
+DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-${1:-open}}"
+if [[ "$DEPLOYMENT_MODE" == "secure" && -f "$ROOT_DIR/.env.secure" ]]; then
+  ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env.secure}"
+else
+  ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
+fi
 DATABRICKS_RESOURCE_APP_ID="${DATABRICKS_RESOURCE_APP_ID:-2ff814a6-3304-4ab8-85cb-cd0e6f879c1d}"
 BOT_SSO_RESOURCE_PREFIX="${BOT_SSO_RESOURCE_PREFIX:-api://botid-}"
 TEAMS_DESKTOP_MOBILE_CLIENT_ID="${TEAMS_DESKTOP_MOBILE_CLIENT_ID:-1fec8e78-bce4-4aaf-ab1b-5451cc387264}"
 TEAMS_WEB_CLIENT_ID="${TEAMS_WEB_CLIENT_ID:-5e3ce6c0-2b1f-4285-8d4b-75ee78787346}"
-REUSE_PLANNER_API_APP_ID="${REUSE_PLANNER_API_APP_ID:-${PLANNER_API_CLIENT_ID:-}}"
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a
@@ -16,6 +19,14 @@ if [[ -f "$ENV_FILE" ]]; then
   source <(sed 's/\r$//' "$ENV_FILE")
   set +a
 fi
+
+if [[ "${DEPLOYMENT_MODE,,}" == "secure" ]]; then
+  APP_NAME_PREFIX="${APP_NAME_PREFIX:-daily-account-planner-secure}"
+else
+  APP_NAME_PREFIX="${APP_NAME_PREFIX:-daily-account-planner}"
+fi
+
+REUSE_PLANNER_API_APP_ID="${REUSE_PLANNER_API_APP_ID:-}"
 
 if [[ -z "${AZURE_TENANT_ID:-}" ]]; then
   echo "AZURE_TENANT_ID must be set in $ENV_FILE or the environment." >&2
@@ -77,6 +88,36 @@ patch_application() {
     --headers "Content-Type=application/json" \
     --body "@$body_file" \
     >/dev/null
+}
+
+upsert_env_value() {
+  local key="$1"
+  local value="$2"
+
+  python - <<'PY' "$ENV_FILE" "$key" "$value"
+from pathlib import Path
+import sys
+
+env_path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+
+lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+updated = False
+rendered = f"{key}={value}"
+for index, line in enumerate(lines):
+    if line.startswith(f"{key}="):
+        lines[index] = rendered
+        updated = True
+        break
+
+if not updated:
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.append(rendered)
+
+env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
 }
 
 if [[ -n "$REUSE_PLANNER_API_APP_ID" ]]; then
@@ -278,11 +319,24 @@ if [[ -n "$REUSE_PLANNER_API_APP_ID" ]]; then
   planner_status="reused-existing"
 fi
 
+upsert_env_value "PLANNER_API_CLIENT_ID" "$planner_app_id"
+upsert_env_value "PLANNER_API_CLIENT_SECRET" "$planner_secret"
+upsert_env_value "PLANNER_API_EXPECTED_AUDIENCE" "api://$planner_app_id"
+upsert_env_value "PLANNER_API_SCOPE" "api://$planner_app_id/access_as_user"
+upsert_env_value "BOT_APP_ID" "$bot_app_id"
+upsert_env_value "BOT_APP_PASSWORD" "$bot_secret"
+upsert_env_value "BOT_SSO_APP_ID" "$bot_app_id"
+upsert_env_value "BOT_SSO_RESOURCE" "$bot_sso_resource"
+upsert_env_value "AZUREBOTOAUTHCONNECTIONNAME" "SERVICE_CONNECTION"
+upsert_env_value "OBOCONNECTIONNAME" "PLANNER_API_CONNECTION"
+upsert_env_value "M365_AUTH_HANDLER_ID" "planner_api"
+upsert_env_value "WRAPPER_DEBUG_EXPECTED_AUDIENCE" "$bot_sso_resource"
+
 cat <<EOF
 Planner API app $planner_status.
 M365 wrapper / bot app created or reused.
 
-Add these values to $ENV_FILE:
+Updated $ENV_FILE with:
 PLANNER_API_CLIENT_ID=$planner_app_id
 PLANNER_API_CLIENT_SECRET=$planner_secret
 PLANNER_API_EXPECTED_AUDIENCE=api://$planner_app_id
