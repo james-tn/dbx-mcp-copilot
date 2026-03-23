@@ -195,9 +195,15 @@ Admin consent may also require:
 - `Privileged Role Administrator`
 - `Global Administrator`
 
+The Azure bootstrap now attempts admin consent automatically for:
+
+- Planner API -> Azure Databricks `user_impersonation`
+- Wrapper/channel app -> Planner API `access_as_user`
+
 If the operator can create app registrations but cannot grant admin consent, the
-Azure bootstrap can still finish, but Teams sign-in will remain blocked until an
-admin completes consent for the generated applications.
+Azure bootstrap can still finish, but Databricks delegated access and Teams
+sign-in will remain blocked until an admin completes consent for the generated
+applications.
 
 ## Required M365 / Graph Permissions
 
@@ -251,6 +257,13 @@ Missing input values:
 Not signed in to Azure:
 
 - Run `az login` and rerun the bootstrap.
+
+Admin consent missing:
+
+- If the live app says it cannot retrieve scoped accounts or delegated access is
+  unavailable, check the generated Entra apps and complete admin consent for:
+  - Planner API -> Azure Databricks `user_impersonation`
+  - Wrapper/channel app -> Planner API `access_as_user`
 
 Missing Azure CLI extensions:
 

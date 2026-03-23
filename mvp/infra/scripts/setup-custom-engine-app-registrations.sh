@@ -90,6 +90,29 @@ patch_application() {
     >/dev/null
 }
 
+try_admin_consent() {
+  local app_id="$1"
+  local label="$2"
+  local stderr_file
+  stderr_file="$(mktemp)"
+  if az ad app permission admin-consent --id "$app_id" 2>"$stderr_file" >/dev/null; then
+    rm -f "$stderr_file"
+    echo "granted"
+    return 0
+  fi
+
+  cat >&2 <<EOF
+Warning: automatic admin consent failed for $label.
+Grant it manually with:
+az ad app permission admin-consent --id $app_id
+Reason:
+$(sed 's/^/  /' "$stderr_file")
+EOF
+  rm -f "$stderr_file"
+  echo "manual-required"
+  return 1
+}
+
 upsert_env_value() {
   local key="$1"
   local value="$2"
@@ -296,6 +319,9 @@ JSON
 patch_application "$bot_object_id" "$wrapper_access_file"
 rm -f "$wrapper_access_file"
 
+planner_admin_consent_status="$(try_admin_consent "$planner_app_id" "Planner API -> Azure Databricks user_impersonation" || true)"
+bot_admin_consent_status="$(try_admin_consent "$bot_app_id" "Wrapper/channel app -> Planner API access_as_user" || true)"
+
 bot_secret_json="$(az ad app credential reset --id "$bot_object_id" --append --display-name "bot-secret" --years 1 -o json)"
 bot_secret="$(python - <<'PY' "$bot_secret_json"
 import json, sys
@@ -349,7 +375,11 @@ AZUREBOTOAUTHCONNECTIONNAME=SERVICE_CONNECTION
 OBOCONNECTIONNAME=PLANNER_API_CONNECTION
 M365_AUTH_HANDLER_ID=planner_api
 
-Admin consent is still required for:
-- Planner API -> Azure Databricks user_impersonation
-- Wrapper/channel app -> Planner API access_as_user
+Admin consent status:
+- Planner API -> Azure Databricks user_impersonation: $planner_admin_consent_status
+- Wrapper/channel app -> Planner API access_as_user: $bot_admin_consent_status
+
+If either value is manual-required, complete:
+- az ad app permission admin-consent --id $planner_app_id
+- az ad app permission admin-consent --id $bot_app_id
 EOF
