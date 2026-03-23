@@ -340,6 +340,96 @@ Repeatability and reruns:
   group deletion to finish, then rerun the Azure bootstrap from the same
   `*.inputs` file.
 
+## Debugging And Troubleshooting
+
+Secure ACA apps do not require shell access for first-line debugging:
+
+- the ACA environment sends logs to Azure Log Analytics during foundation deploy
+- use Azure Monitor / Log Analytics queries first, even for private secure-mode
+  apps that are not directly reachable from the operator machine
+
+Recommended startup steps:
+
+```bash
+cd /mnt/c/testing/veeam/revenue_intelligence/mvp
+set -a
+source .env.secure
+set +a
+
+workspace_id=$(az monitor log-analytics workspace show \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
+  --workspace-name "$LOG_ANALYTICS_NAME" \
+  --query customerId -o tsv)
+```
+
+Find the latest ready revision for the app you want to inspect:
+
+```bash
+az containerapp show \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
+  --name "$WRAPPER_ACA_APP_NAME" \
+  --query properties.latestReadyRevisionName -o tsv
+```
+
+Use console logs for application stdout/stderr:
+
+```bash
+az monitor log-analytics query -w "$workspace_id" \
+  --analytics-query "
+    ContainerAppConsoleLogs
+    | where TimeGenerated > ago(30m)
+    | where ContainerAppName == '$WRAPPER_ACA_APP_NAME'
+    | project TimeGenerated, ContainerAppName, RevisionName, ContainerName, Log
+    | top 100 by TimeGenerated desc
+  " -o table
+```
+
+Use system logs for revision, replica, probe, startup, and platform failures:
+
+```bash
+az monitor log-analytics query -w "$workspace_id" \
+  --analytics-query "
+    ContainerAppSystemLogs
+    | where TimeGenerated > ago(30m)
+    | where ContainerAppName == '$WRAPPER_ACA_APP_NAME'
+    | project TimeGenerated, ContainerAppName, RevisionName, ReplicaName, Reason, Log
+    | top 100 by TimeGenerated desc
+  " -o table
+```
+
+Filter to one specific revision when you are debugging a rollout:
+
+```bash
+revision_name=$(az containerapp show \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
+  --name "$PLANNER_ACA_APP_NAME" \
+  --query properties.latestReadyRevisionName -o tsv)
+
+az monitor log-analytics query -w "$workspace_id" \
+  --analytics-query "
+    ContainerAppConsoleLogs
+    | where TimeGenerated > ago(30m)
+    | where ContainerAppName == '$PLANNER_ACA_APP_NAME'
+    | where RevisionName == '$revision_name'
+    | project TimeGenerated, RevisionName, Log
+    | top 100 by TimeGenerated desc
+  " -o table
+```
+
+Practical guidance:
+
+- `ContainerAppConsoleLogs` is the best first stop for Python tracebacks,
+  import failures, auth errors, and request-time exceptions
+- `ContainerAppSystemLogs` is the best first stop for image-pull failures,
+  bad startup commands, health-probe failures, crash loops, and revision
+  provisioning problems
+- in this environment the table names are `ContainerAppConsoleLogs` and
+  `ContainerAppSystemLogs` without the older `_CL` suffix
+- secure mode does not change this workflow; the app can stay private while
+  logs remain queryable through Azure Monitor
+- if the log query returns nothing, widen the window from `ago(30m)` to
+  `ago(24h)` and confirm you are filtering on the right `ContainerAppName`
+
 ## Advanced / Manual Recovery
 
 The new bootstraps are the recommended operator path. The lower-level scripts
