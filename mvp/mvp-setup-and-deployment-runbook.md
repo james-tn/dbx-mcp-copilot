@@ -110,10 +110,24 @@ Open defaults are already prefilled in
 Optional operator input:
 
 - `M365_GRAPH_PUBLISHER_CLIENT_ID`
+- `AZURE_OPENAI_DEPLOYMENT`
+- `AZURE_OPENAI_MODEL`
+- `AZURE_OPENAI_MODEL_NAME`
+- `AZURE_OPENAI_MODEL_VERSION`
+- `AZURE_OPENAI_DEPLOYMENT_CAPACITY`
 
 Everything else is derived or backfilled into the generated runtime env,
 including app IDs, secrets, image refs, container app URLs, Databricks
 workspace values, bot metadata, and derived internal resource names.
+
+Starter Azure OpenAI default:
+
+- both open and secure mode now default to `gpt-5.2-chat` with
+  `GlobalStandard` capacity `500`
+- that smaller starter footprint makes it easier to host both demo
+  environments in the same subscription
+- if your tenant uses a different quota profile, set the optional
+  `AZURE_OPENAI_*` overrides in the operator input env before bootstrap
 
 ## What The Azure Script Creates
 
@@ -200,10 +214,9 @@ The Azure bootstrap now attempts admin consent automatically for:
 - Planner API -> Azure Databricks `user_impersonation`
 - Wrapper/channel app -> Planner API `access_as_user`
 
-If the operator can create app registrations but cannot grant admin consent, the
-Azure bootstrap can still finish, but Databricks delegated access and Teams
-sign-in will remain blocked until an admin completes consent for the generated
-applications.
+If the operator cannot grant admin consent, the Azure bootstrap now fails fast.
+That is intentional: the generated planner and wrapper apps are not treated as
+successfully bootstrapped until tenant-wide consent is in place.
 
 ## Required M365 / Graph Permissions
 
@@ -278,8 +291,16 @@ Unable to create app registrations:
 
 Admin consent still pending:
 
-- The Azure bootstrap may complete with consent still pending.
-  Finish consent, then rerun the M365 bootstrap.
+- The Azure bootstrap now treats this as a blocking failure.
+  Grant the required Entra role, rerun the Azure bootstrap, and only then run
+  the M365 bootstrap.
+
+Azure OpenAI deployment creation fails with quota or model-capacity errors:
+
+- Set the optional `AZURE_OPENAI_*` override values in
+  [`mvp/.env.inputs`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.inputs)
+  or [`mvp/.env.secure.inputs`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure.inputs)
+  so the bootstrap requests a deployment footprint your tenant can host.
 
 Graph token missing Teams publish/install scopes:
 

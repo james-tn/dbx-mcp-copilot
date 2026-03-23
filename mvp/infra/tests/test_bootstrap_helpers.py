@@ -65,7 +65,7 @@ def test_build_runtime_env_preserves_existing_generated_values_for_same_inputs(t
     runtime_file = tmp_path / ".env"
     input_file = tmp_path / ".env.inputs"
 
-    write_env(runtime_example, "AZURE_OPENAI_DEPLOYMENT=gpt-5.3-chat")
+    write_env(runtime_example, "AZURE_OPENAI_DEPLOYMENT=gpt-5.2-chat")
     signature = compute_input_signature(
         {
             "AZURE_TENANT_ID": "tenant-id",
@@ -113,7 +113,7 @@ def test_build_runtime_env_drops_stale_generated_values_when_inputs_change(tmp_p
     runtime_file = tmp_path / ".env"
     input_file = tmp_path / ".env.inputs"
 
-    write_env(runtime_example, "AZURE_OPENAI_DEPLOYMENT=gpt-5.3-chat")
+    write_env(runtime_example, "AZURE_OPENAI_DEPLOYMENT=gpt-5.2-chat")
     stale_signature = compute_input_signature(
         {
             "AZURE_TENANT_ID": "old-tenant",

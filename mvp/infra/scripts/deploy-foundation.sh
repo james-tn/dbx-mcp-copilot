@@ -147,11 +147,11 @@ ACR_NAME="${ACR_NAME:-$(printf '%s' "${NAME_PREFIX}acr" | tr -d '-')}"
 LOG_ANALYTICS_NAME="${LOG_ANALYTICS_NAME:-${NAME_PREFIX}-logs}"
 VNET_NAME="${SECURE_VNET_NAME:-${NAME_PREFIX}-vnet}"
 FOUNDATION_OUTPUT_FILE="$OUTPUT_DIR/foundation-${DEPLOYMENT_MODE}.json"
-AZURE_OPENAI_DEPLOYMENT="${AZURE_OPENAI_DEPLOYMENT:-${AZURE_OPENAI_MODEL:-gpt-5.3-chat}}"
+AZURE_OPENAI_DEPLOYMENT="${AZURE_OPENAI_DEPLOYMENT:-${AZURE_OPENAI_MODEL:-gpt-5.2-chat}}"
 AZURE_OPENAI_MODEL_NAME="${AZURE_OPENAI_MODEL_NAME:-$AZURE_OPENAI_DEPLOYMENT}"
-AZURE_OPENAI_MODEL_VERSION="${AZURE_OPENAI_MODEL_VERSION:-2026-03-03}"
+AZURE_OPENAI_MODEL_VERSION="${AZURE_OPENAI_MODEL_VERSION:-2026-02-10}"
 AZURE_OPENAI_DEPLOYMENT_SKU_NAME="${AZURE_OPENAI_DEPLOYMENT_SKU_NAME:-GlobalStandard}"
-AZURE_OPENAI_DEPLOYMENT_CAPACITY="${AZURE_OPENAI_DEPLOYMENT_CAPACITY:-1000}"
+AZURE_OPENAI_DEPLOYMENT_CAPACITY="${AZURE_OPENAI_DEPLOYMENT_CAPACITY:-500}"
 
 az account set --subscription "$AZURE_SUBSCRIPTION_ID"
 az group create --name "$AZURE_RESOURCE_GROUP" --location "$AZURE_LOCATION" >/dev/null
@@ -535,18 +535,37 @@ upsert_env_value "LOG_ANALYTICS_NAME" "$LOG_ANALYTICS_NAME"
 upsert_env_value "SECURE_VNET_NAME" "$VNET_NAME"
 
 if ! resource_exists "$AZURE_RESOURCE_GROUP" "$ACA_ENVIRONMENT_NAME" "Microsoft.App/managedEnvironments"; then
+  workspace_customer_id="$(az monitor log-analytics workspace show \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --workspace-name "$LOG_ANALYTICS_NAME" \
+    --query customerId \
+    -o tsv 2>/dev/null || true)"
+  workspace_shared_key="$(az monitor log-analytics workspace get-shared-keys \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --workspace-name "$LOG_ANALYTICS_NAME" \
+    --query primarySharedKey \
+    -o tsv 2>/dev/null || true)"
+  if [[ -z "$workspace_customer_id" || -z "$workspace_shared_key" ]]; then
+    echo "Unable to resolve Log Analytics workspace '$LOG_ANALYTICS_NAME' for Container Apps environment creation." >&2
+    echo "Confirm the foundation deployment created the workspace and rerun the bootstrap." >&2
+    exit 1
+  fi
   if [[ "$SECURE_MODE" == "true" ]]; then
     az containerapp env create \
       --name "$ACA_ENVIRONMENT_NAME" \
       --resource-group "$AZURE_RESOURCE_GROUP" \
       --location "$AZURE_LOCATION" \
       --infrastructure-subnet-resource-id "$SECURE_ACA_SUBNET_ID" \
+      --logs-workspace-id "$workspace_customer_id" \
+      --logs-workspace-key "$workspace_shared_key" \
       >/dev/null
   else
     az containerapp env create \
       --name "$ACA_ENVIRONMENT_NAME" \
       --resource-group "$AZURE_RESOURCE_GROUP" \
       --location "$AZURE_LOCATION" \
+      --logs-workspace-id "$workspace_customer_id" \
+      --logs-workspace-key "$workspace_shared_key" \
       >/dev/null
   fi
 fi
@@ -577,7 +596,7 @@ if ! az cognitiveservices account deployment show \
   -n "$OPENAI_ACCOUNT_NAME" \
   --deployment-name "$AZURE_OPENAI_DEPLOYMENT" \
   >/dev/null 2>&1; then
-  az cognitiveservices account deployment create \
+  if ! az cognitiveservices account deployment create \
     -g "$AZURE_RESOURCE_GROUP" \
     -n "$OPENAI_ACCOUNT_NAME" \
     --deployment-name "$AZURE_OPENAI_DEPLOYMENT" \
@@ -586,7 +605,11 @@ if ! az cognitiveservices account deployment show \
     --model-version "$AZURE_OPENAI_MODEL_VERSION" \
     --sku-name "$AZURE_OPENAI_DEPLOYMENT_SKU_NAME" \
     --sku-capacity "$AZURE_OPENAI_DEPLOYMENT_CAPACITY" \
-    >/dev/null
+    >/dev/null; then
+    echo "Azure OpenAI deployment creation failed for '$AZURE_OPENAI_DEPLOYMENT' in account '$OPENAI_ACCOUNT_NAME'." >&2
+    echo "If your tenant uses a different quota profile, set AZURE_OPENAI_DEPLOYMENT, AZURE_OPENAI_MODEL, AZURE_OPENAI_MODEL_NAME, AZURE_OPENAI_MODEL_VERSION, and/or AZURE_OPENAI_DEPLOYMENT_CAPACITY in your operator input env and rerun." >&2
+    exit 1
+  fi
 fi
 
 if [[ "$SECURE_MODE" == "true" ]]; then

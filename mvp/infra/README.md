@@ -40,6 +40,20 @@ The new bootstrap scripts:
 - preserve generated runtime values only when the same bootstrap input
   signature still matches the current tenant / subscription / prefix / demo-user
   set
+- default both open and secure mode to a smaller starter Azure OpenAI
+  deployment footprint (`gpt-5.2-chat`, `GlobalStandard`, capacity `500`) so a
+  customer demo tenant can more easily host both environments at once
+- create the Container Apps environment against the named Log Analytics
+  workspace instead of letting Azure generate a random fallback workspace on the
+  first run
+
+Optional operator overrides:
+
+- if your tenant uses a different Azure OpenAI quota profile, set
+  `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_MODEL`,
+  `AZURE_OPENAI_MODEL_NAME`, `AZURE_OPENAI_MODEL_VERSION`, and
+  `AZURE_OPENAI_DEPLOYMENT_CAPACITY` in the operator-owned `*.inputs` file
+  before you run the Azure bootstrap
 
 Secure-mode ACR note:
 

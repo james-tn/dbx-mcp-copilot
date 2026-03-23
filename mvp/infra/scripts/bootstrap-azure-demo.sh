@@ -238,7 +238,7 @@ import sys
 
 
 def run_az(*args: str) -> str:
-    return subprocess.check_output(["az", *args], text=True).strip()
+    return subprocess.check_output(["az", *args], text=True, stderr=subprocess.DEVNULL).strip()
 
 
 def role_names() -> list[str]:
