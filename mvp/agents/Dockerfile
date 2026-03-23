@@ -6,6 +6,7 @@ WORKDIR /app
 
 # Copy agent code
 COPY agents/ ./
+COPY shared/ /app/shared/
 COPY infra/ /app/infra/
 
 RUN pip install --no-cache-dir -r requirements.txt

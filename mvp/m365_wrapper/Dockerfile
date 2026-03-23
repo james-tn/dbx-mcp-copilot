@@ -5,6 +5,7 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 COPY m365_wrapper/ ./
+COPY shared/ /app/shared/
 
 RUN pip install --no-cache-dir -r requirements.txt
 
