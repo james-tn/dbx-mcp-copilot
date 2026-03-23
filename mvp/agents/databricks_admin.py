@@ -175,6 +175,70 @@ class DatabricksAdminClient:
             raise
         return "created"
 
+    async def ensure_workspace_user_entitlements(
+        self,
+        user_upn: str,
+        *,
+        required_entitlements: tuple[str, ...],
+    ) -> dict[str, Any]:
+        normalized_user_upn = user_upn.strip()
+        if not normalized_user_upn:
+            raise DatabricksAdminError("Databricks workspace user upn is required.")
+
+        normalized_required_entitlements = sorted(
+            {
+                entitlement.strip()
+                for entitlement in required_entitlements
+                if entitlement and entitlement.strip()
+            }
+        )
+        if not normalized_required_entitlements:
+            raise DatabricksAdminError("At least one required Databricks entitlement is required.")
+
+        user = await self.get_workspace_user(normalized_user_upn)
+        if user is None:
+            raise DatabricksAdminError(
+                "Databricks workspace user does not exist for entitlement bootstrap."
+            )
+
+        user_id = str(user.get("id", "")).strip()
+        if not user_id:
+            raise DatabricksAdminError("Databricks workspace user id was missing from SCIM response.")
+
+        current_entitlements = _extract_entitlements(user)
+        missing_entitlements = [
+            entitlement
+            for entitlement in normalized_required_entitlements
+            if entitlement not in current_entitlements
+        ]
+        if not missing_entitlements:
+            return {
+                "status": "already_set",
+                "applied": [],
+                "required": normalized_required_entitlements,
+            }
+
+        await self._request(
+            "PATCH",
+            f"/api/2.0/preview/scim/v2/Users/{quote(user_id, safe='')}",
+            json_payload={
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                "Operations": [
+                    {
+                        "op": "add",
+                        "path": "entitlements",
+                        "value": [{"value": entitlement} for entitlement in missing_entitlements],
+                    }
+                ],
+            },
+            content_type="application/scim+json",
+        )
+        return {
+            "status": "patched",
+            "applied": missing_entitlements,
+            "required": normalized_required_entitlements,
+        }
+
     async def get_workspace_service_principal(self, application_id: str) -> dict[str, Any] | None:
         encoded_filter = quote(f'applicationId eq "{application_id}"', safe="")
         payload = await self._request(
@@ -316,6 +380,7 @@ class DatabricksAdminClient:
         principal_name: str,
         *,
         permission_level: str = "CAN_USE",
+        principal_type: str | None = None,
     ) -> None:
         normalized_warehouse_id = warehouse_id.strip()
         normalized_principal_name = principal_name.strip()
@@ -324,10 +389,22 @@ class DatabricksAdminClient:
         if not normalized_principal_name:
             raise DatabricksAdminError("Databricks bootstrap principal name is required.")
 
+        normalized_principal_type = (principal_type or "").strip().lower()
+        if not normalized_principal_type:
+            normalized_principal_type = "user" if "@" in normalized_principal_name else "service_principal"
+        if normalized_principal_type not in {"service_principal", "user"}:
+            raise DatabricksAdminError(
+                "Databricks SQL warehouse principal type must be service_principal or user."
+            )
+
         payload = {
             "access_control_list": [
                 {
-                    "service_principal_name": normalized_principal_name,
+                    (
+                        "service_principal_name"
+                        if normalized_principal_type == "service_principal"
+                        else "user_name"
+                    ): normalized_principal_name,
                     "permission_level": permission_level,
                 }
             ]

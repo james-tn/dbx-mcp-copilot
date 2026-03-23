@@ -9,11 +9,13 @@ import sys
 from types import SimpleNamespace
 
 import httpx
+from httpx import ASGITransport, AsyncClient
 from microsoft_agents.hosting.core import ApplicationOptions, MemoryStorage
 
 os.environ.setdefault("PLANNER_SERVICE_BASE_URL", "http://planner.example.com")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+import m365_wrapper.app as app_module
 from m365_wrapper.app import (
     AUTH_RETRY_MESSAGE,
     BUSY_MESSAGE,
@@ -23,6 +25,7 @@ from m365_wrapper.app import (
     UNAVAILABLE_MESSAGE,
     WORKING_MESSAGE,
     WrapperRuntime,
+    acknowledge_invoke_activity,
     handle_wrapper_message,
 )
 from m365_wrapper.planner_client import PlannerServiceAuthError, PlannerServiceError
@@ -38,6 +41,19 @@ class FakeContext:
         self.sent_messages: list[str] = []
 
     async def send_activity(self, message: str) -> None:
+        self.sent_messages.append(message)
+
+
+class FakeInvokeContext:
+    def __init__(self, *, activity_name: str = "adaptiveCard/action", session_id: str = "conversation-1") -> None:
+        self.activity = SimpleNamespace(
+            type="invoke",
+            name=activity_name,
+            conversation=SimpleNamespace(id=session_id),
+        )
+        self.sent_messages: list[object] = []
+
+    async def send_activity(self, message: object) -> None:
         self.sent_messages.append(message)
 
 
@@ -423,3 +439,179 @@ def test_handle_wrapper_message_maps_timeout_to_temporary_unavailable() -> None:
     )
 
     assert context.sent_messages == [UNAVAILABLE_MESSAGE]
+
+
+def test_acknowledge_invoke_activity_sends_200_invoke_response() -> None:
+    context = FakeInvokeContext()
+
+    asyncio.run(acknowledge_invoke_activity(context))
+
+    assert len(context.sent_messages) == 1
+    activity = context.sent_messages[0]
+    assert activity.type == "invokeResponse"
+    assert activity.value.status == 200
+
+
+def test_debug_chat_endpoint_validates_allowlist_and_forwards_to_planner(monkeypatch) -> None:
+    class _FakeConnectionManager:
+        def get_default_connection_configuration(self):
+            return {}
+
+    class _FakeAuthorization:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    class _FakeCloudAdapter:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    class _FakeAgentApplication:
+        def __init__(self, *args, **kwargs) -> None:
+            self.auth = SimpleNamespace()
+
+        def add_route(self, *args, **kwargs) -> None:
+            return None
+
+        def error(self, func):
+            return func
+
+    fake_runtime = WrapperRuntime(
+        FakeClient(reply="Ford and ServiceTitan are in scope."),
+        long_running_messages_enabled=True,
+        ack_threshold_seconds=10.0,
+    )
+
+    monkeypatch.setattr(app_module, "build_connection_manager", lambda: _FakeConnectionManager())
+    monkeypatch.setattr(app_module, "Authorization", _FakeAuthorization)
+    monkeypatch.setattr(app_module, "CloudAdapter", _FakeCloudAdapter)
+    monkeypatch.setattr(app_module, "CompatAgentApplication", _FakeAgentApplication)
+    monkeypatch.setattr(app_module, "build_auth_handlers", lambda: {})
+    monkeypatch.setattr(app_module, "PlannerServiceClient", lambda **kwargs: fake_runtime.client)
+    monkeypatch.setattr(app_module, "get_planner_service_base_url", lambda: "http://planner.example.com")
+    monkeypatch.setattr(app_module, "get_wrapper_timeout_seconds", lambda: 30.0)
+    monkeypatch.setattr(app_module, "get_wrapper_ack_threshold_seconds", lambda: 10.0)
+    monkeypatch.setattr(app_module, "get_wrapper_long_running_messages_enabled", lambda: True)
+    monkeypatch.setattr(app_module, "get_bot_app_id", lambda: "bot-app-id")
+    monkeypatch.setattr(app_module, "get_handler_ids", lambda: ("planner_api_agentic", "planner_api_connector"))
+    monkeypatch.setattr(app_module, "get_wrapper_debug_chat_enabled", lambda: True)
+    monkeypatch.setattr(
+        app_module,
+        "get_wrapper_debug_allowed_upns",
+        lambda: {"ri-test-na@m365cpi89838450.onmicrosoft.com"},
+    )
+    monkeypatch.setattr(
+        app_module,
+        "get_wrapper_debug_expected_audience",
+        lambda: "api://botid-bot-app-id",
+    )
+    monkeypatch.setattr(
+        app_module,
+        "validate_debug_token",
+        lambda token, *, expected_audience: SimpleNamespace(
+            user_id="user-123",
+            upn="ri-test-na@m365cpi89838450.onmicrosoft.com",
+        ),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "acquire_planner_token_on_behalf_of",
+        lambda *, user_assertion, expected_audience: "planner-obo-token",
+    )
+
+    app = app_module.create_app()
+
+    async def _run():
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            return await client.post(
+                "/api/debug/chat",
+                json={"text": "tell me my accounts"},
+                headers={"Authorization": "Bearer wrapper-token"},
+            )
+
+    response = asyncio.run(_run())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "session_id": "debug::user-123",
+        "reply": "Ford and ServiceTitan are in scope.",
+        "user_id": "user-123",
+        "upn": "ri-test-na@m365cpi89838450.onmicrosoft.com",
+    }
+    assert fake_runtime.client.calls == [
+        {
+            "session_id": "debug::user-123",
+            "text": "tell me my accounts",
+            "access_token": "planner-obo-token",
+        }
+    ]
+
+
+def test_debug_chat_endpoint_rejects_non_allowlisted_upn(monkeypatch) -> None:
+    class _FakeConnectionManager:
+        def get_default_connection_configuration(self):
+            return {}
+
+    class _FakeAuthorization:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    class _FakeCloudAdapter:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    class _FakeAgentApplication:
+        def __init__(self, *args, **kwargs) -> None:
+            self.auth = SimpleNamespace()
+
+        def add_route(self, *args, **kwargs) -> None:
+            return None
+
+        def error(self, func):
+            return func
+
+    monkeypatch.setattr(app_module, "build_connection_manager", lambda: _FakeConnectionManager())
+    monkeypatch.setattr(app_module, "Authorization", _FakeAuthorization)
+    monkeypatch.setattr(app_module, "CloudAdapter", _FakeCloudAdapter)
+    monkeypatch.setattr(app_module, "CompatAgentApplication", _FakeAgentApplication)
+    monkeypatch.setattr(app_module, "build_auth_handlers", lambda: {})
+    monkeypatch.setattr(app_module, "PlannerServiceClient", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(app_module, "get_planner_service_base_url", lambda: "http://planner.example.com")
+    monkeypatch.setattr(app_module, "get_wrapper_timeout_seconds", lambda: 30.0)
+    monkeypatch.setattr(app_module, "get_wrapper_ack_threshold_seconds", lambda: 10.0)
+    monkeypatch.setattr(app_module, "get_wrapper_long_running_messages_enabled", lambda: True)
+    monkeypatch.setattr(app_module, "get_bot_app_id", lambda: "bot-app-id")
+    monkeypatch.setattr(app_module, "get_handler_ids", lambda: ("planner_api_agentic", "planner_api_connector"))
+    monkeypatch.setattr(app_module, "get_wrapper_debug_chat_enabled", lambda: True)
+    monkeypatch.setattr(
+        app_module,
+        "get_wrapper_debug_allowed_upns",
+        lambda: {"ri-test-na@m365cpi89838450.onmicrosoft.com"},
+    )
+    monkeypatch.setattr(
+        app_module,
+        "get_wrapper_debug_expected_audience",
+        lambda: "api://botid-bot-app-id",
+    )
+    monkeypatch.setattr(
+        app_module,
+        "validate_debug_token",
+        lambda token, *, expected_audience: SimpleNamespace(
+            user_id="user-999",
+            upn="someone-else@example.com",
+        ),
+    )
+
+    app = app_module.create_app()
+
+    async def _run():
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            return await client.post(
+                "/api/debug/chat",
+                json={"text": "tell me my accounts"},
+                headers={"Authorization": "Bearer wrapper-token"},
+            )
+
+    response = asyncio.run(_run())
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Caller is not allowed to use wrapper debug chat."

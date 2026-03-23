@@ -7,6 +7,16 @@ import pytest
 
 import databricks_seed
 
+SELLER_A_UPN = "seller-a@example.com"
+SELLER_B_UPN = "seller-b@example.com"
+
+
+@pytest.fixture(autouse=True)
+def _demo_sellers(monkeypatch) -> None:
+    monkeypatch.setenv("SELLER_A_UPN", SELLER_A_UPN)
+    monkeypatch.setenv("SELLER_B_UPN", SELLER_B_UPN)
+    monkeypatch.setenv("DATABRICKS_WORKSPACE_USER_UPNS", f"{SELLER_A_UPN},{SELLER_B_UPN}")
+
 
 def test_load_seed_config_requires_managed_identity(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("DATABRICKS_SEED_SQL_FILE", str(tmp_path / "seed.sql"))
@@ -101,9 +111,10 @@ def test_run_secure_seed_skips_when_current(monkeypatch, tmp_path: Path) -> None
 
     executed: list[str] = []
     ensured_users: list[str] = []
+    ensured_user_entitlements: list[tuple[str, tuple[str, ...]]] = []
     ensured_service_principals: list[str] = []
     ensured_service_principal_entitlements: list[tuple[str, tuple[str, ...]]] = []
-    warehouse_permissions: list[tuple[str, str]] = []
+    warehouse_permissions: list[tuple[str, str, str | None]] = []
 
     class FakeClient:
         def __init__(self, settings=None, **kwargs) -> None:
@@ -128,6 +139,15 @@ def test_run_secure_seed_skips_when_current(monkeypatch, tmp_path: Path) -> None
         async def ensure_workspace_user(self, user_upn: str) -> str:
             ensured_users.append(user_upn)
             return "existing"
+
+        async def ensure_workspace_user_entitlements(
+            self,
+            user_upn: str,
+            *,
+            required_entitlements: tuple[str, ...],
+        ) -> dict[str, str | list[str]]:
+            ensured_user_entitlements.append((user_upn, required_entitlements))
+            return {"status": "already_set", "applied": [], "required": list(required_entitlements)}
 
         async def ensure_workspace_service_principal(
             self,
@@ -154,8 +174,9 @@ def test_run_secure_seed_skips_when_current(monkeypatch, tmp_path: Path) -> None
             principal_name: str,
             *,
             permission_level: str = "CAN_USE",
+            principal_type: str | None = None,
         ) -> None:
-            warehouse_permissions.append((warehouse_id, principal_name))
+            warehouse_permissions.append((warehouse_id, principal_name, principal_type))
 
         async def close(self) -> None:
             return None
@@ -172,12 +193,24 @@ def test_run_secure_seed_skips_when_current(monkeypatch, tmp_path: Path) -> None
     assert result["reason"] == "already_current"
     assert result["skip_catalog_create"] is False
     assert result["principal_results"] == {
-        "ri-test-na@m365cpi89838450.onmicrosoft.com": "existing",
-        "DaichiM@M365CPI89838450.OnMicrosoft.com": "existing",
+        SELLER_A_UPN: "existing",
+        SELLER_B_UPN: "existing",
+    }
+    assert result["workspace_user_entitlement_results"] == {
+        SELLER_A_UPN: {
+            "status": "already_set",
+            "applied": [],
+            "required": ["workspace-access", "databricks-sql-access"],
+        },
+        SELLER_B_UPN: {
+            "status": "already_set",
+            "applied": [],
+            "required": ["workspace-access", "databricks-sql-access"],
+        },
     }
     assert result["warehouse_permission_result"] == {
         "status": "applied",
-        "applied_principals": ["mi-client"],
+        "applied_principals": [SELLER_A_UPN, SELLER_B_UPN, "mi-client"],
         "errors": [],
     }
     assert result["bootstrap_service_principal_entitlement_result"] == {
@@ -186,14 +219,22 @@ def test_run_secure_seed_skips_when_current(monkeypatch, tmp_path: Path) -> None
         "required": ["workspace-access", "databricks-sql-access"],
     }
     assert ensured_users == [
-        "ri-test-na@m365cpi89838450.onmicrosoft.com",
-        "DaichiM@M365CPI89838450.OnMicrosoft.com",
+        SELLER_A_UPN,
+        SELLER_B_UPN,
+    ]
+    assert ensured_user_entitlements == [
+        (SELLER_A_UPN, ("workspace-access", "databricks-sql-access")),
+        (SELLER_B_UPN, ("workspace-access", "databricks-sql-access")),
     ]
     assert ensured_service_principals == ["mi-client"]
     assert ensured_service_principal_entitlements == [
         ("mi-client", ("workspace-access", "databricks-sql-access"))
     ]
-    assert warehouse_permissions == [("wh-1", "mi-client")]
+    assert warehouse_permissions == [
+        ("wh-1", SELLER_A_UPN, "user"),
+        ("wh-1", SELLER_B_UPN, "user"),
+        ("wh-1", "mi-client", "service_principal"),
+    ]
     assert all("CREATE USER IF NOT EXISTS" not in statement for statement in executed)
     assert any("CREATE TABLE IF NOT EXISTS veeam_demo.ri_ops.bootstrap_state" in statement for statement in executed)
 
@@ -218,9 +259,10 @@ def test_run_secure_seed_honors_skip_catalog_create(monkeypatch, tmp_path: Path)
     monkeypatch.setenv("DATABRICKS_SKIP_CATALOG_CREATE", "true")
 
     executed: list[str] = []
+    ensured_user_entitlements: list[tuple[str, tuple[str, ...]]] = []
     ensured_service_principals: list[str] = []
     ensured_service_principal_entitlements: list[tuple[str, tuple[str, ...]]] = []
-    warehouse_permissions: list[tuple[str, str]] = []
+    warehouse_permissions: list[tuple[str, str, str | None]] = []
 
     class FakeClient:
         def __init__(self, settings=None, **kwargs) -> None:
@@ -260,6 +302,15 @@ def test_run_secure_seed_honors_skip_catalog_create(monkeypatch, tmp_path: Path)
         async def ensure_workspace_user(self, user_upn: str) -> str:
             return "existing"
 
+        async def ensure_workspace_user_entitlements(
+            self,
+            user_upn: str,
+            *,
+            required_entitlements: tuple[str, ...],
+        ) -> dict[str, str | list[str]]:
+            ensured_user_entitlements.append((user_upn, required_entitlements))
+            return {"status": "already_set", "applied": [], "required": list(required_entitlements)}
+
         async def ensure_workspace_service_principal(
             self,
             application_id: str,
@@ -285,8 +336,9 @@ def test_run_secure_seed_honors_skip_catalog_create(monkeypatch, tmp_path: Path)
             principal_name: str,
             *,
             permission_level: str = "CAN_USE",
+            principal_type: str | None = None,
         ) -> None:
-            warehouse_permissions.append((warehouse_id, principal_name))
+            warehouse_permissions.append((warehouse_id, principal_name, principal_type))
 
         async def close(self) -> None:
             return None
@@ -302,19 +354,39 @@ def test_run_secure_seed_honors_skip_catalog_create(monkeypatch, tmp_path: Path)
     assert result["status"] == "seeded"
     assert result["warehouse_permission_result"] == {
         "status": "applied",
-        "applied_principals": ["mi-client"],
+        "applied_principals": [SELLER_A_UPN, SELLER_B_UPN, "mi-client"],
         "errors": [],
+    }
+    assert result["workspace_user_entitlement_results"] == {
+        SELLER_A_UPN: {
+            "status": "already_set",
+            "applied": [],
+            "required": ["workspace-access", "databricks-sql-access"],
+        },
+        SELLER_B_UPN: {
+            "status": "already_set",
+            "applied": [],
+            "required": ["workspace-access", "databricks-sql-access"],
+        },
     }
     assert result["bootstrap_service_principal_entitlement_result"] == {
         "status": "patched",
         "applied": ["workspace-access"],
         "required": ["workspace-access", "databricks-sql-access"],
     }
+    assert ensured_user_entitlements == [
+        (SELLER_A_UPN, ("workspace-access", "databricks-sql-access")),
+        (SELLER_B_UPN, ("workspace-access", "databricks-sql-access")),
+    ]
     assert ensured_service_principals == ["mi-client"]
     assert ensured_service_principal_entitlements == [
         ("mi-client", ("workspace-access", "databricks-sql-access"))
     ]
-    assert warehouse_permissions == [("wh-1", "mi-client")]
+    assert warehouse_permissions == [
+        ("wh-1", SELLER_A_UPN, "user"),
+        ("wh-1", SELLER_B_UPN, "user"),
+        ("wh-1", "mi-client", "service_principal"),
+    ]
     assert all("CREATE CATALOG IF NOT EXISTS" not in statement for statement in executed)
     assert any("CREATE SCHEMA IF NOT EXISTS workspace_catalog.ri" in statement for statement in executed)
     assert any("CREATE SCHEMA IF NOT EXISTS workspace_catalog.ri_ops" in statement for statement in executed)
@@ -335,9 +407,10 @@ def test_run_secure_seed_retries_warehouse_acl_with_multiple_bootstrap_principal
     monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh-1")
 
     executed: list[str] = []
+    ensured_user_entitlements: list[tuple[str, tuple[str, ...]]] = []
     ensured_service_principals: list[str] = []
     ensured_service_principal_entitlements: list[tuple[str, tuple[str, ...]]] = []
-    warehouse_permissions: list[tuple[str, str]] = []
+    warehouse_permissions: list[tuple[str, str, str | None]] = []
 
     class FakeClient:
         def __init__(self, settings=None, **kwargs) -> None:
@@ -377,6 +450,15 @@ def test_run_secure_seed_retries_warehouse_acl_with_multiple_bootstrap_principal
         async def ensure_workspace_user(self, user_upn: str) -> str:
             return "existing"
 
+        async def ensure_workspace_user_entitlements(
+            self,
+            user_upn: str,
+            *,
+            required_entitlements: tuple[str, ...],
+        ) -> dict[str, str | list[str]]:
+            ensured_user_entitlements.append((user_upn, required_entitlements))
+            return {"status": "already_set", "applied": [], "required": list(required_entitlements)}
+
         async def ensure_workspace_service_principal(
             self,
             application_id: str,
@@ -402,9 +484,10 @@ def test_run_secure_seed_retries_warehouse_acl_with_multiple_bootstrap_principal
             principal_name: str,
             *,
             permission_level: str = "CAN_USE",
+            principal_type: str | None = None,
         ) -> None:
-            warehouse_permissions.append((warehouse_id, principal_name))
-            if principal_name == "mi-client":
+            warehouse_permissions.append((warehouse_id, principal_name, principal_type))
+            if principal_name in {SELLER_A_UPN, "mi-client"}:
                 raise databricks_seed.DatabricksAdminError("principal not found")
 
         async def close(self) -> None:
@@ -419,19 +502,43 @@ def test_run_secure_seed_retries_warehouse_acl_with_multiple_bootstrap_principal
     assert result["status"] == "seeded"
     assert result["warehouse_permission_result"] == {
         "status": "applied",
-        "applied_principals": ["mi-principal"],
-        "errors": ["mi-client: principal not found"],
+        "applied_principals": [SELLER_B_UPN, "mi-principal"],
+        "errors": [
+            f"{SELLER_A_UPN}: principal not found",
+            "mi-client: principal not found",
+        ],
+    }
+    assert result["workspace_user_entitlement_results"] == {
+        SELLER_A_UPN: {
+            "status": "already_set",
+            "applied": [],
+            "required": ["workspace-access", "databricks-sql-access"],
+        },
+        SELLER_B_UPN: {
+            "status": "already_set",
+            "applied": [],
+            "required": ["workspace-access", "databricks-sql-access"],
+        },
     }
     assert result["bootstrap_service_principal_entitlement_result"] == {
         "status": "patched",
         "applied": ["databricks-sql-access"],
         "required": ["workspace-access", "databricks-sql-access"],
     }
+    assert ensured_user_entitlements == [
+        (SELLER_A_UPN, ("workspace-access", "databricks-sql-access")),
+        (SELLER_B_UPN, ("workspace-access", "databricks-sql-access")),
+    ]
     assert ensured_service_principals == ["mi-client"]
     assert ensured_service_principal_entitlements == [
         ("mi-client", ("workspace-access", "databricks-sql-access"))
     ]
-    assert warehouse_permissions == [("wh-1", "mi-client"), ("wh-1", "mi-principal")]
+    assert warehouse_permissions == [
+        ("wh-1", SELLER_A_UPN, "user"),
+        ("wh-1", SELLER_B_UPN, "user"),
+        ("wh-1", "mi-client", "service_principal"),
+        ("wh-1", "mi-principal", "service_principal"),
+    ]
     assert any("CREATE TABLE IF NOT EXISTS veeam_demo.ri_ops.bootstrap_state" in statement for statement in executed)
 
 
@@ -486,6 +593,14 @@ def test_run_secure_seed_continues_when_warehouse_permissions_endpoint_missing(
         async def ensure_workspace_user(self, user_upn: str) -> str:
             return "existing"
 
+        async def ensure_workspace_user_entitlements(
+            self,
+            user_upn: str,
+            *,
+            required_entitlements: tuple[str, ...],
+        ) -> dict[str, str | list[str]]:
+            return {"status": "already_set", "applied": [], "required": list(required_entitlements)}
+
         async def ensure_workspace_service_principal(
             self,
             application_id: str,
@@ -509,6 +624,7 @@ def test_run_secure_seed_continues_when_warehouse_permissions_endpoint_missing(
             principal_name: str,
             *,
             permission_level: str = "CAN_USE",
+            principal_type: str | None = None,
         ) -> None:
             raise databricks_seed.DatabricksAdminError(
                 "Databricks admin API request failed with HTTP 404: warehouses wh-1 does not exist"
@@ -529,9 +645,23 @@ def test_run_secure_seed_continues_when_warehouse_permissions_endpoint_missing(
         "reason": "permissions_endpoint_not_available",
         "applied_principals": [],
         "errors": [
+            f"{SELLER_A_UPN}: Databricks admin API request failed with HTTP 404: warehouses wh-1 does not exist",
+            f"{SELLER_B_UPN}: Databricks admin API request failed with HTTP 404: warehouses wh-1 does not exist",
             "mi-client: Databricks admin API request failed with HTTP 404: warehouses wh-1 does not exist",
             "mi-principal: Databricks admin API request failed with HTTP 404: warehouses wh-1 does not exist",
         ],
+    }
+    assert result["workspace_user_entitlement_results"] == {
+        SELLER_A_UPN: {
+            "status": "already_set",
+            "applied": [],
+            "required": ["workspace-access", "databricks-sql-access"],
+        },
+        SELLER_B_UPN: {
+            "status": "already_set",
+            "applied": [],
+            "required": ["workspace-access", "databricks-sql-access"],
+        },
     }
     assert result["bootstrap_service_principal_entitlement_result"] == {
         "status": "already_set",

@@ -14,10 +14,12 @@ import time
 from typing import Any, Awaitable, Callable, Protocol
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request, status
+from microsoft_agents.activity import Activity, ActivityTypes, InvokeResponse
 from microsoft_agents.hosting.core import AgentApplication, ApplicationOptions, Authorization, MemoryStorage
 from microsoft_agents.hosting.core.turn_context import TurnContext
 from microsoft_agents.hosting.fastapi import CloudAdapter, JwtAuthorizationMiddleware, start_agent_process
+from pydantic import BaseModel, Field
 
 try:
     from .config import (
@@ -26,9 +28,20 @@ try:
         build_connection_manager,
         get_handler_ids,
         get_planner_service_base_url,
+        get_wrapper_debug_allowed_upns,
+        get_wrapper_debug_chat_enabled,
+        get_wrapper_debug_expected_audience,
         get_wrapper_ack_threshold_seconds,
         get_wrapper_long_running_messages_enabled,
         get_wrapper_timeout_seconds,
+    )
+    from .debug_auth import (
+        DebugAuthConfigurationError,
+        DebugAuthOboError,
+        DebugAuthValidationError,
+        acquire_planner_token_on_behalf_of,
+        extract_bearer_token,
+        validate_debug_token,
     )
     from .planner_client import PlannerServiceAuthError, PlannerServiceClient, PlannerServiceError
 except ImportError:
@@ -38,9 +51,20 @@ except ImportError:
         build_connection_manager,
         get_handler_ids,
         get_planner_service_base_url,
+        get_wrapper_debug_allowed_upns,
+        get_wrapper_debug_chat_enabled,
+        get_wrapper_debug_expected_audience,
         get_wrapper_ack_threshold_seconds,
         get_wrapper_long_running_messages_enabled,
         get_wrapper_timeout_seconds,
+    )
+    from debug_auth import (
+        DebugAuthConfigurationError,
+        DebugAuthOboError,
+        DebugAuthValidationError,
+        acquire_planner_token_on_behalf_of,
+        extract_bearer_token,
+        validate_debug_token,
     )
     from planner_client import PlannerServiceAuthError, PlannerServiceClient, PlannerServiceError
 
@@ -57,6 +81,18 @@ AUTH_RETRY_MESSAGE = (
 UNAVAILABLE_MESSAGE = "Daily Account Planner is temporarily unavailable. Please try again in a moment."
 WORKING_MESSAGE = "I'm still working on this request. It may take some time."
 BUSY_MESSAGE = "I'm still working on your previous request. I'll send the result here when it's ready."
+
+
+class DebugChatRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+    session_id: str | None = None
+
+
+class DebugChatResponse(BaseModel):
+    session_id: str
+    reply: str
+    user_id: str
+    upn: str | None = None
 
 
 def _get_agents_sdk_versions() -> dict[str, str]:
@@ -225,6 +261,25 @@ class WrapperRuntime:
     async def finish_turn(self, session_id: str) -> None:
         async with self._busy_lock:
             self._busy_sessions.discard(session_id)
+
+
+async def _run_direct_wrapper_turn(
+    *,
+    runtime: WrapperRuntime,
+    session_id: str,
+    text: str,
+    planner_access_token: str,
+) -> str:
+    if not await runtime.try_begin_turn(session_id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=BUSY_MESSAGE)
+    try:
+        return await runtime.forward_message(
+            session_id=session_id,
+            text=text,
+            planner_access_token=planner_access_token,
+        )
+    finally:
+        await runtime.finish_turn(session_id)
 
 
 class _AgentAuth(Protocol):
@@ -398,9 +453,25 @@ async def handle_wrapper_message(
         )
 
 
+async def acknowledge_invoke_activity(context: Any) -> None:
+    logger.info(
+        "Wrapper acknowledged invoke activity.",
+        extra={
+            "activity_name": getattr(context.activity, "name", None),
+            "session_id": str(getattr(getattr(context.activity, "conversation", None), "id", "") or "").strip(),
+        },
+    )
+    await context.send_activity(
+        Activity(
+            type=ActivityTypes.invoke_response,
+            value=InvokeResponse(status=200),
+        )
+    )
+
+
 class ConditionalJwtAuthorizationMiddleware(JwtAuthorizationMiddleware):
     async def __call__(self, scope, receive, send):
-        if scope.get("type") == "http" and scope.get("path") == "/healthz":
+        if scope.get("type") == "http" and scope.get("path") in {"/healthz", "/api/debug/chat"}:
             await self.app(scope, receive, send)
             return
         await super().__call__(scope, receive, send)
@@ -435,6 +506,9 @@ def create_app() -> FastAPI:
         long_running_messages_enabled=long_running_messages_enabled,
         ack_threshold_seconds=get_wrapper_ack_threshold_seconds(),
     )
+    debug_chat_enabled = get_wrapper_debug_chat_enabled()
+    debug_expected_audience = get_wrapper_debug_expected_audience() if debug_chat_enabled else ""
+    debug_allowed_upns = get_wrapper_debug_allowed_upns() if debug_chat_enabled else set()
     agentic_handler_id, connector_handler_id = get_handler_ids()
 
     async def _handle_message(context, state, *, auth_handler_id: str):
@@ -449,7 +523,7 @@ def create_app() -> FastAPI:
         await context.send_activity(READY_MESSAGE)
 
     async def _handle_invoke(context, state):
-        return
+        await acknowledge_invoke_activity(context)
 
     @agent_app.error
     async def _handle_app_error(context, err: Exception):
@@ -506,6 +580,80 @@ def create_app() -> FastAPI:
     @fastapi_app.post("/api/messages", response_model=None)
     async def messages(request: Request):
         return await start_agent_process(request, agent_app, adapter)
+
+    @fastapi_app.post("/api/debug/chat", response_model=DebugChatResponse)
+    async def debug_chat(payload: DebugChatRequest, request: Request) -> DebugChatResponse:
+        if not debug_chat_enabled:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
+
+        try:
+            user_assertion = extract_bearer_token(request.headers.get("authorization"))
+            claims = validate_debug_token(
+                user_assertion,
+                expected_audience=debug_expected_audience,
+            )
+        except DebugAuthValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+        except DebugAuthConfigurationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(exc),
+            ) from exc
+
+        normalized_upn = (claims.upn or "").strip().lower()
+        if debug_allowed_upns and normalized_upn not in debug_allowed_upns:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Caller is not allowed to use wrapper debug chat.",
+            )
+
+        try:
+            planner_access_token = acquire_planner_token_on_behalf_of(
+                user_assertion=user_assertion,
+                expected_audience=debug_expected_audience,
+            )
+        except DebugAuthOboError as exc:
+            logger.warning(
+                "Wrapper debug chat planner OBO failed.",
+                extra={"user_id": claims.user_id, "upn": claims.upn},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Planner delegated access is unavailable.",
+            ) from exc
+        except DebugAuthConfigurationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(exc),
+            ) from exc
+
+        session_id = (payload.session_id or f"debug::{claims.user_id}").strip()
+        if not session_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="session_id is required.")
+
+        try:
+            reply = await _run_direct_wrapper_turn(
+                runtime=runtime,
+                session_id=session_id,
+                text=payload.text,
+                planner_access_token=planner_access_token,
+            )
+        except HTTPException:
+            raise
+        except PlannerServiceAuthError as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=AUTH_RETRY_MESSAGE) from exc
+        except (PlannerServiceError, httpx.TimeoutException) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=UNAVAILABLE_MESSAGE,
+            ) from exc
+
+        return DebugChatResponse(
+            session_id=session_id,
+            reply=reply or UNAVAILABLE_MESSAGE,
+            user_id=claims.user_id,
+            upn=claims.upn,
+        )
 
     return fastapi_app
 

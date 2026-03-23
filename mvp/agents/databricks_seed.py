@@ -22,6 +22,7 @@ from databricks_admin import (
     DatabricksAdminSettings,
 )
 from databricks_sql import DatabricksSqlClient, DatabricksSqlError, DatabricksSqlSettings, load_settings
+from infra.bootstrap_helpers import derive_demo_users, render_seed_sql_template
 
 _MODULE_DIR = Path(__file__).resolve().parent
 
@@ -39,11 +40,8 @@ _DEFAULT_SEED_VERSION = "2026-03-secure-bootstrap-v2"
 _DEFAULT_STATE_SCHEMA = "ri_ops"
 _DEFAULT_STATE_TABLE = "bootstrap_state"
 _DEFAULT_AUTH_MODE = "managed_identity"
+_DEFAULT_WORKSPACE_USER_REQUIRED_ENTITLEMENTS = ("workspace-access", "databricks-sql-access")
 _DEFAULT_BOOTSTRAP_REQUIRED_ENTITLEMENTS = ("workspace-access", "databricks-sql-access")
-_DEFAULT_WORKSPACE_USERS = (
-    "ri-test-na@m365cpi89838450.onmicrosoft.com,"
-    "DaichiM@M365CPI89838450.OnMicrosoft.com"
-)
 
 
 class DatabricksSeedError(RuntimeError):
@@ -58,6 +56,8 @@ class DatabricksSeedConfig:
     seed_version: str
     state_schema: str
     state_table: str
+    seller_a_upn: str
+    seller_b_upn: str
     workspace_user_upns: tuple[str, ...]
     auth_mode: str
     arm_tenant_id: str | None
@@ -123,9 +123,15 @@ def load_seed_config() -> DatabricksSeedConfig:
             "At least one Databricks bootstrap principal identifier is required for secure seeding."
         )
 
+    seller_a_upn, seller_b_upn = derive_demo_users(dict(os.environ))
+    if not seller_a_upn or not seller_b_upn:
+        raise DatabricksSeedError(
+            "SELLER_A_UPN and SELLER_B_UPN, or DATABRICKS_WORKSPACE_USER_UPNS with two users, are required."
+        )
+
     workspace_user_upns = tuple(
         item.strip()
-        for item in os.environ.get("DATABRICKS_WORKSPACE_USER_UPNS", _DEFAULT_WORKSPACE_USERS).split(",")
+        for item in os.environ.get("DATABRICKS_WORKSPACE_USER_UPNS", f"{seller_a_upn},{seller_b_upn}").split(",")
         if item.strip()
     )
     if not workspace_user_upns:
@@ -143,6 +149,8 @@ def load_seed_config() -> DatabricksSeedConfig:
         seed_version=os.environ.get("DATABRICKS_SEED_VERSION", _DEFAULT_SEED_VERSION).strip() or _DEFAULT_SEED_VERSION,
         state_schema=os.environ.get("DATABRICKS_SEED_STATE_SCHEMA", _DEFAULT_STATE_SCHEMA).strip() or _DEFAULT_STATE_SCHEMA,
         state_table=os.environ.get("DATABRICKS_SEED_STATE_TABLE", _DEFAULT_STATE_TABLE).strip() or _DEFAULT_STATE_TABLE,
+        seller_a_upn=seller_a_upn,
+        seller_b_upn=seller_b_upn,
         workspace_user_upns=workspace_user_upns,
         auth_mode=auth_mode,
         arm_tenant_id=arm_tenant_id,
@@ -204,6 +212,7 @@ def _render_seed_script(config: DatabricksSeedConfig) -> list[str]:
         raise DatabricksSeedError(f"Seed SQL file not found: {config.sql_file}")
 
     script = config.sql_file.read_text(encoding="utf-8")
+    script = render_seed_sql_template(script, config.seller_a_upn, config.seller_b_upn)
     if config.catalog != "veeam_demo":
         script = script.replace("veeam_demo", config.catalog)
     statements = _split_statements(script)
@@ -223,6 +232,19 @@ async def _ensure_workspace_principals(
     results: dict[str, str] = {}
     for user_upn in config.workspace_user_upns:
         results[user_upn] = await admin_client.ensure_workspace_user(user_upn)
+    return results
+
+
+async def _ensure_workspace_user_entitlements(
+    admin_client: DatabricksAdminClient,
+    config: DatabricksSeedConfig,
+) -> dict[str, dict[str, Any]]:
+    results: dict[str, dict[str, Any]] = {}
+    for user_upn in config.workspace_user_upns:
+        results[user_upn] = await admin_client.ensure_workspace_user_entitlements(
+            user_upn,
+            required_entitlements=_DEFAULT_WORKSPACE_USER_REQUIRED_ENTITLEMENTS,
+        )
     return results
 
 
@@ -267,22 +289,34 @@ async def _ensure_bootstrap_workspace_principal_entitlements(
     )
 
 
-async def _ensure_bootstrap_warehouse_access(
+async def _ensure_sql_warehouse_access(
     admin_client: DatabricksAdminClient,
     config: DatabricksSeedConfig,
     warehouse_id: str,
 ) -> dict[str, Any]:
-    if not warehouse_id or not config.bootstrap_principal_names:
+    seller_principals = [
+        ("user", user_upn)
+        for user_upn in config.workspace_user_upns
+        if str(user_upn).strip()
+    ]
+    bootstrap_principals = [
+        ("service_principal", principal_name)
+        for principal_name in config.bootstrap_principal_names
+        if str(principal_name).strip()
+    ]
+    principal_specs = seller_principals + bootstrap_principals
+    if not warehouse_id or not principal_specs:
         raise DatabricksSeedError(
-            "Databricks bootstrap warehouse access requires a warehouse id and at least one bootstrap principal identifier."
+            "Databricks SQL warehouse access requires a warehouse id and at least one seller or bootstrap principal identifier."
         )
     applied_principals: list[str] = []
     errors: list[str] = []
-    for principal_name in config.bootstrap_principal_names:
+    for principal_type, principal_name in principal_specs:
         try:
             await admin_client.ensure_sql_warehouse_permission(
                 warehouse_id,
                 principal_name,
+                principal_type=principal_type,
             )
             applied_principals.append(principal_name)
         except DatabricksAdminError as exc:
@@ -306,10 +340,10 @@ async def _ensure_bootstrap_warehouse_access(
             "errors": errors,
         }
 
-    attempted = ", ".join(config.bootstrap_principal_names)
+    attempted = ", ".join(principal_name for _, principal_name in principal_specs)
     detail = "; ".join(errors) if errors else "no successful warehouse permission assignments"
     raise DatabricksSeedError(
-        "Failed to grant Databricks SQL warehouse access for bootstrap principal identifiers "
+        "Failed to grant Databricks SQL warehouse access for seller or bootstrap principal identifiers "
         f"[{attempted}]: {detail}"
     )
 
@@ -444,6 +478,10 @@ async def run_secure_seed() -> dict[str, Any]:
     )
     try:
         principal_results = await _ensure_workspace_principals(admin_client, config)
+        workspace_user_entitlement_results = await _ensure_workspace_user_entitlements(
+            admin_client,
+            config,
+        )
         bootstrap_service_principal_result = await _ensure_bootstrap_workspace_principal(
             admin_client,
             config,
@@ -455,7 +493,7 @@ async def run_secure_seed() -> dict[str, Any]:
             )
         )
         resolved_warehouse_id = config.warehouse_id or await client.resolve_warehouse_id()
-        warehouse_permission_result = await _ensure_bootstrap_warehouse_access(
+        warehouse_permission_result = await _ensure_sql_warehouse_access(
             admin_client,
             config,
             resolved_warehouse_id,
@@ -468,6 +506,7 @@ async def run_secure_seed() -> dict[str, Any]:
                 "auth_mode": config.auth_mode,
                 "catalog": config.catalog,
                 "principal_results": principal_results,
+                "workspace_user_entitlement_results": workspace_user_entitlement_results,
                 "bootstrap_service_principal_result": bootstrap_service_principal_result,
                 "bootstrap_service_principal_entitlement_result": bootstrap_service_principal_entitlement_result,
                 "warehouse_permission_result": warehouse_permission_result,
@@ -488,6 +527,7 @@ async def run_secure_seed() -> dict[str, Any]:
             "auth_mode": config.auth_mode,
             "catalog": config.catalog,
             "principal_results": principal_results,
+            "workspace_user_entitlement_results": workspace_user_entitlement_results,
             "bootstrap_service_principal_result": bootstrap_service_principal_result,
             "bootstrap_service_principal_entitlement_result": bootstrap_service_principal_entitlement_result,
             "warehouse_permission_result": warehouse_permission_result,
