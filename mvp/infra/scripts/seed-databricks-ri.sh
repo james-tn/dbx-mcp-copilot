@@ -76,6 +76,36 @@ if command -v python3 >/dev/null 2>&1; then
   python_bin="python3"
 fi
 
+upsert_env_value() {
+  local key="$1"
+  local value="$2"
+
+  "$python_bin" - <<'PY' "$ENV_FILE" "$key" "$value"
+from pathlib import Path
+import sys
+
+env_path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+
+lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+updated = False
+rendered = f"{key}={value}"
+for index, line in enumerate(lines):
+    if line.startswith(f"{key}="):
+        lines[index] = rendered
+        updated = True
+        break
+
+if not updated:
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.append(rendered)
+
+env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}
+
 "$python_bin" "$HELPER_SCRIPT" render-seed-sql \
   --template "$SQL_FILE" \
   --output "$rendered_sql_file" \
@@ -344,6 +374,79 @@ PY
 
 if [[ -z "${DATABRICKS_WAREHOUSE_ID:-}" ]] || ! warehouse_exists "$DATABRICKS_WAREHOUSE_ID"; then
   DATABRICKS_WAREHOUSE_ID="$(resolve_warehouse_id)"
+fi
+
+detect_workspace_catalog() {
+  export DBX_WAREHOUSE_ID_CHECK="$DATABRICKS_WAREHOUSE_ID"
+  export DBX_WORKSPACE_NAME_HINT="${DATABRICKS_WORKSPACE_NAME:-}"
+  "$python_bin" - <<'PY'
+import json
+import os
+import time
+import urllib.request
+
+host = os.environ["DATABRICKS_HOST"].rstrip("/")
+token = os.environ["DBX_TOKEN"]
+warehouse_id = os.environ["DBX_WAREHOUSE_ID_CHECK"]
+workspace_name_hint = os.environ.get("DBX_WORKSPACE_NAME_HINT", "").strip().replace("-", "_")
+headers = {
+    "Authorization": f"Bearer {token}",
+    "Content-Type": "application/json",
+}
+
+
+def request(method: str, path: str, payload: dict | None = None) -> dict:
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{host}{path}",
+        data=body,
+        method=method,
+        headers=headers,
+    )
+    with urllib.request.urlopen(req, timeout=120) as response:
+        return json.load(response)
+
+
+payload = request(
+    "POST",
+    "/api/2.0/sql/statements",
+    {
+        "statement": "SHOW CATALOGS",
+        "warehouse_id": warehouse_id,
+        "wait_timeout": "0s",
+        "disposition": "INLINE",
+    },
+)
+status = payload.get("status", {}).get("state", "")
+statement_id = payload.get("statement_id")
+while status in {"PENDING", "RUNNING", "QUEUED"} and statement_id:
+    time.sleep(1)
+    payload = request("GET", f"/api/2.0/sql/statements/{statement_id}")
+    status = payload.get("status", {}).get("state", "")
+
+if status not in {"SUCCEEDED", "FINISHED"}:
+    raise SystemExit("")
+
+catalog_rows = payload.get("result", {}).get("data_array") or []
+catalogs = [str(row[0]).strip() for row in catalog_rows if row and str(row[0]).strip()]
+preferred = {"samples", "system", "hive_metastore"}
+workspace_catalogs = [item for item in catalogs if item not in preferred]
+if workspace_name_hint and workspace_name_hint in workspace_catalogs:
+    print(workspace_name_hint)
+elif len(workspace_catalogs) == 1:
+    print(workspace_catalogs[0])
+PY
+}
+
+if [[ "$SECURE_MODE" != "true" && "${DATABRICKS_CATALOG:-veeam_demo}" == "veeam_demo" ]]; then
+  detected_catalog="$(detect_workspace_catalog 2>/dev/null || true)"
+  if [[ -n "$detected_catalog" ]]; then
+    DATABRICKS_CATALOG="$detected_catalog"
+    DATABRICKS_SKIP_CATALOG_CREATE="true"
+    upsert_env_value "DATABRICKS_CATALOG" "$DATABRICKS_CATALOG"
+    upsert_env_value "DATABRICKS_SKIP_CATALOG_CREATE" "$DATABRICKS_SKIP_CATALOG_CREATE"
+    echo "Open Databricks seed detected workspace catalog '$DATABRICKS_CATALOG'; skipping catalog creation."
+  fi
 fi
 
 export DBX_TOKEN DATABRICKS_WAREHOUSE_ID SQL_FILE DATABRICKS_CATALOG DATABRICKS_SKIP_CATALOG_CREATE

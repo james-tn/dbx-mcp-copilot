@@ -60,6 +60,30 @@ def test_build_runtime_env_secure_derives_names_and_demo_users(tmp_path: Path) -
     assert runtime["M365_APP_PACKAGE_ID"]
 
 
+def test_build_runtime_env_open_derives_environment_specific_app_prefix(tmp_path: Path) -> None:
+    runtime_example = tmp_path / ".env.example"
+    runtime_file = tmp_path / ".env"
+    input_file = tmp_path / ".env.inputs"
+
+    write_env(runtime_example, "AZURE_OPENAI_DEPLOYMENT=gpt-5.2-chat")
+    write_env(
+        input_file,
+        """
+        AZURE_TENANT_ID=tenant-id
+        AZURE_SUBSCRIPTION_ID=sub-id
+        AZURE_RESOURCE_GROUP=rg-daily-account-planner
+        AZURE_LOCATION=eastus
+        INFRA_NAME_PREFIX=veempoc
+        SELLER_A_UPN=seller-a@example.com
+        SELLER_B_UPN=seller-b@example.com
+        """,
+    )
+
+    runtime = build_runtime_env("open", runtime_example, input_file, runtime_file)
+
+    assert runtime["APP_NAME_PREFIX"] == "daily-account-planner-veempoc"
+
+
 def test_build_runtime_env_preserves_existing_generated_values_for_same_inputs(tmp_path: Path) -> None:
     runtime_example = tmp_path / ".env.example"
     runtime_file = tmp_path / ".env"

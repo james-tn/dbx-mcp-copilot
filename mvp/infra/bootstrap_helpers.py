@@ -42,7 +42,7 @@ MODE_DEFAULTS = {
         "SECURE_DEPLOYMENT": "false",
         "INFRA_NAME_PREFIX": "dailyacctplanneropen",
         "WRAPPER_ENABLE_DEBUG_CHAT": "false",
-        "APP_NAME_PREFIX": "daily-account-planner",
+        "APP_NAME_PREFIX": "",
         "M365_APP_SHORT_NAME": "Daily Planner",
         "M365_APP_FULL_NAME": "Daily Account Planner",
     },
@@ -239,7 +239,14 @@ def build_runtime_env(
 
     runtime["DEPLOYMENT_MODE"] = mode
     runtime["SECURE_DEPLOYMENT"] = "true" if mode == "secure" else "false"
-    runtime["APP_NAME_PREFIX"] = runtime.get("APP_NAME_PREFIX", "").strip() or defaults["APP_NAME_PREFIX"]
+    app_name_prefix = runtime.get("APP_NAME_PREFIX", "").strip()
+    if mode == "open":
+        legacy_open_prefix = "daily-account-planner"
+        if not app_name_prefix or app_name_prefix == legacy_open_prefix:
+            app_name_prefix = f"{legacy_open_prefix}-{prefix}"
+    else:
+        app_name_prefix = app_name_prefix or defaults["APP_NAME_PREFIX"]
+    runtime["APP_NAME_PREFIX"] = app_name_prefix
     runtime["AZURE_OPENAI_ACCOUNT_NAME"] = (
         runtime.get("AZURE_OPENAI_ACCOUNT_NAME", "").strip()
         or _sanitize_compact(f"{prefix}openai", 64)

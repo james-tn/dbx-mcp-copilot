@@ -54,6 +54,9 @@ Optional operator overrides:
   `AZURE_OPENAI_MODEL_NAME`, `AZURE_OPENAI_MODEL_VERSION`, and
   `AZURE_OPENAI_DEPLOYMENT_CAPACITY` in the operator-owned `*.inputs` file
   before you run the Azure bootstrap
+- open mode now also derives an environment-specific Entra app-registration
+  prefix from `INFRA_NAME_PREFIX`, which avoids collisions with older
+  `daily-account-planner-*` apps in the same tenant during reruns
 
 Secure-mode ACR note:
 
@@ -131,6 +134,9 @@ Databricks warehouse bootstrap details:
 
 - open mode and local seed flows can auto-create a starter SQL warehouse when
   the workspace does not already have one
+- open mode also auto-detects the workspace catalog exposed by the Databricks
+  SQL warehouse and reuses it when the fresh workspace does not support the old
+  `veeam_demo` catalog bootstrap path
 - secure mode uses the same warehouse bootstrap behavior from inside the private
   ACA seed job
 - set `DATABRICKS_WAREHOUSE_ID` to pin a specific warehouse, or

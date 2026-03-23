@@ -772,6 +772,9 @@ fi
 fqdn="$(get_resource_field "$AZURE_RESOURCE_GROUP" "$PLANNER_ACA_APP_NAME" "Microsoft.App/containerApps" "properties.configuration.ingress.fqdn")"
 base_url="https://$fqdn"
 upsert_env_value "PLANNER_API_BASE_URL" "$base_url"
+if [[ "$SECURE_MODE" != "true" ]]; then
+  upsert_env_value "PLANNER_SERVICE_BASE_URL" "$base_url"
+fi
 echo "Daily Account Planner planner service deployed to: $base_url"
 echo "Set PLANNER_API_BASE_URL=$base_url in $ENV_FILE for validation."
 

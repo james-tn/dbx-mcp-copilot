@@ -180,6 +180,10 @@ if [[ -z "${PLANNER_SERVICE_BASE_URL:-}" && "$SECURE_MODE" == "true" ]]; then
   fi
 fi
 
+if [[ -z "${PLANNER_SERVICE_BASE_URL:-}" && "$SECURE_MODE" != "true" && -n "${PLANNER_API_BASE_URL:-}" ]]; then
+  PLANNER_SERVICE_BASE_URL="$PLANNER_API_BASE_URL"
+fi
+
 if [[ -n "${PLANNER_SERVICE_BASE_URL:-}" ]]; then
   upsert_env_value "PLANNER_SERVICE_BASE_URL" "$PLANNER_SERVICE_BASE_URL"
 fi

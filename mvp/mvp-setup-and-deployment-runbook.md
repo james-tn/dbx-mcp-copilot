@@ -129,6 +129,13 @@ Starter Azure OpenAI default:
 - if your tenant uses a different quota profile, set the optional
   `AZURE_OPENAI_*` overrides in the operator input env before bootstrap
 
+Open-mode app registration naming:
+
+- open mode now derives its Entra app-registration display-name prefix from
+  `INFRA_NAME_PREFIX`
+- that prevents ambiguous reuse when the same tenant already contains older
+  generic `daily-account-planner-*` app registrations from previous demos
+
 ## What The Azure Script Creates
 
 `bootstrap-azure-demo.sh` renders the runtime env, runs preflight checks,
@@ -172,6 +179,12 @@ Secure Databricks catalog note:
   instead of trying to create a fresh managed catalog like `veeam_demo`
 - this avoids metastore failures on tenants where Databricks catalog creation
   requires an explicit storage root
+
+Open Databricks catalog note:
+
+- open mode now auto-detects the workspace catalog available in the fresh
+  Databricks SQL warehouse and reuses it when the legacy `veeam_demo` catalog
+  path is not available
 
 ## What The M365 Script Creates
 
