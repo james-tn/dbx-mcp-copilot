@@ -11,12 +11,22 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
+import sys
 from typing import Any
 
 import httpx
 from azure.identity import AzureCliCredential, DefaultAzureCredential
 
 from databricks_network import enable_private_databricks_resolution
+
+try:
+    from ..shared.identity import is_hosted_environment
+except ImportError:
+    _MVP_ROOT = Path(__file__).resolve().parent.parent
+    if str(_MVP_ROOT) not in sys.path:
+        sys.path.insert(0, str(_MVP_ROOT))
+    from shared.identity import is_hosted_environment
 
 _DATABRICKS_AUDIENCE = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default"
 _DEFAULT_HOST = "https://adb-7405610222366876.16.azuredatabricks.net"
@@ -47,12 +57,6 @@ class DatabricksSqlSettings:
     poll_attempts: int
     poll_interval_seconds: float
     pat: str | None
-
-
-def _is_hosted() -> bool:
-    identity_markers = ("IDENTITY_ENDPOINT", "MSI_ENDPOINT", "AZURE_CLIENT_ID", "CONTAINER_APP_NAME")
-    return any(os.environ.get(marker) for marker in identity_markers)
-
 
 def load_settings() -> DatabricksSqlSettings:
     host = os.environ.get("DATABRICKS_HOST", "").strip().rstrip("/") or _DEFAULT_HOST
@@ -94,7 +98,7 @@ def load_settings() -> DatabricksSqlSettings:
 
 
 def _build_credential():
-    return DefaultAzureCredential() if _is_hosted() else AzureCliCredential()
+    return DefaultAzureCredential() if is_hosted_environment() else AzureCliCredential()
 
 
 def _coerce_typed_scalar(value: Any, type_name: str) -> Any:
@@ -318,60 +322,41 @@ class DatabricksSqlClient:
         return await self.resolve_warehouse_id()
 
     async def execute(self, statement: str) -> list[dict[str, Any]]:
-        payload = await self._execute_statement(
+        return await self._run_statement(
             statement,
             wait_timeout=f"{max(5, int(self.settings.timeout_seconds))}s",
         )
 
-        if _is_pending(payload):
-            statement_id = str(payload.get("statement_id", "")).strip()
-            if not statement_id:
-                raise DatabricksSqlError(
-                    "Databricks SQL returned a pending result without a statement id."
-                )
-            for _ in range(self.settings.poll_attempts):
-                await asyncio.sleep(self.settings.poll_interval_seconds)
-                payload = await self._request(
-                    "GET",
-                    f"/api/2.0/sql/statements/{statement_id}",
-                )
-                if not _is_pending(payload):
-                    break
-
-        rows = _extract_rows(payload)
-        if rows:
-            return rows
-        if payload.get("status", {}).get("state") == "SUCCEEDED":
-            return []
-        raise DatabricksSqlError("Databricks SQL statement did not return rows.")
-
     async def query_sql(self, statement: str) -> list[dict[str, Any]]:
-        payload = await self._execute_statement(
-            statement,
-            wait_timeout="0s",
-        )
+        return await self._run_statement(statement, wait_timeout="0s")
 
-        if _is_pending(payload):
-            statement_id = str(payload.get("statement_id", "")).strip()
-            if not statement_id:
-                raise DatabricksSqlError(
-                    "Databricks SQL returned a pending result without a statement id."
-                )
-            for _ in range(self.settings.poll_attempts):
-                await asyncio.sleep(self.settings.poll_interval_seconds)
-                payload = await self._request(
-                    "GET",
-                    f"/api/2.0/sql/statements/{statement_id}",
-                )
-                if not _is_pending(payload):
-                    break
-
+    async def _run_statement(self, statement: str, *, wait_timeout: str) -> list[dict[str, Any]]:
+        payload = await self._execute_statement(statement, wait_timeout=wait_timeout)
+        payload = await self._wait_for_statement_completion(payload)
         rows = _extract_rows(payload)
         if rows:
             return rows
         if payload.get("status", {}).get("state") == "SUCCEEDED":
             return []
         raise DatabricksSqlError("Databricks SQL statement did not return rows.")
+
+    async def _wait_for_statement_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not _is_pending(payload):
+            return payload
+
+        statement_id = str(payload.get("statement_id", "")).strip()
+        if not statement_id:
+            raise DatabricksSqlError("Databricks SQL returned a pending result without a statement id.")
+
+        for _ in range(self.settings.poll_attempts):
+            await asyncio.sleep(self.settings.poll_interval_seconds)
+            payload = await self._request(
+                "GET",
+                f"/api/2.0/sql/statements/{statement_id}",
+            )
+            if not _is_pending(payload):
+                break
+        return payload
 
     async def _execute_statement(self, statement: str, *, wait_timeout: str) -> dict[str, Any]:
         warehouse_id = await self.resolve_warehouse_id()

@@ -73,3 +73,43 @@ def test_acquire_databricks_access_token_raises_on_obo_failure(monkeypatch) -> N
 
     with pytest.raises(DatabricksOboError, match="consent required"):
         auth_context.acquire_databricks_access_token("user-token")
+
+
+def test_acquire_databricks_access_token_caches_request_scoped_token(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class _FakeApp:
+        def acquire_token_on_behalf_of(self, *, user_assertion, scopes):
+            calls.append(user_assertion)
+            return {"access_token": "dbx-token"}
+
+    monkeypatch.setattr(
+        auth_context,
+        "load_auth_settings",
+        lambda: AuthSettings(
+            azure_tenant_id="tenant",
+            planner_api_client_id="client",
+            planner_api_client_secret="secret",
+            planner_api_expected_audience="api://planner-api",
+            databricks_obo_scope="scope",
+        ),
+    )
+    monkeypatch.setattr(auth_context, "get_confidential_app", lambda: _FakeApp())
+
+    reset_tokens = auth_context.bind_request_identity(
+        "user-token",
+        TokenClaims(
+            oid="user-123",
+            tid="tenant",
+            upn="seller@example.com",
+            aud="api://planner-api",
+            scp="access_as_user",
+        ),
+    )
+    try:
+        assert auth_context.acquire_databricks_access_token() == "dbx-token"
+        assert auth_context.acquire_databricks_access_token() == "dbx-token"
+    finally:
+        auth_context.reset_request_identity(*reset_tokens)
+
+    assert calls == ["user-token"]

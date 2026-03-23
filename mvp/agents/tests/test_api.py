@@ -73,7 +73,9 @@ def test_create_session_requires_auth(monkeypatch) -> None:
 
 def test_create_session_uses_authenticated_owner(monkeypatch) -> None:
     fake_runtime = _FakeRuntime()
+    closed: list[str] = []
     monkeypatch.setattr(api, "runtime", fake_runtime)
+    monkeypatch.setattr(api, "close_request_databricks_client", lambda: asyncio.sleep(0, result=closed.append("closed")))
     monkeypatch.setattr(
         api,
         "validate_bearer_token",
@@ -98,6 +100,7 @@ def test_create_session_uses_authenticated_owner(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["session_id"] == "session-1"
     assert fake_runtime.calls == [("create_session", "user-123", None)]
+    assert closed == ["closed"]
 
 
 def test_planner_bot_ingress_is_not_exposed() -> None:

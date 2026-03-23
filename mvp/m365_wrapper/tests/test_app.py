@@ -12,6 +12,10 @@ import httpx
 from httpx import ASGITransport, AsyncClient
 from microsoft_agents.hosting.core import ApplicationOptions, MemoryStorage
 
+os.environ.setdefault("AZURE_TENANT_ID", "test-tenant")
+os.environ.setdefault("BOT_APP_ID", "test-bot-app")
+os.environ.setdefault("BOT_APP_PASSWORD", "test-bot-secret")
+os.environ.setdefault("PLANNER_API_SCOPE", "api://planner/access_as_user")
 os.environ.setdefault("PLANNER_SERVICE_BASE_URL", "http://planner.example.com")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 

@@ -362,3 +362,69 @@ def test_get_scoped_accounts_summarizes_user_scope(monkeypatch) -> None:
     assert payload["territory"] is None
     assert payload["territories"] == ["Germany-ENT-Named-5", "GreatLakes-ENT-Named-1"]
     assert payload["segment"] == "MIXED"
+
+
+def test_run_query_reuses_request_scoped_databricks_client(monkeypatch) -> None:
+    created_clients = []
+
+    class _FakeClient:
+        def __init__(self, access_token=None):
+            self.access_token = access_token
+            self.queries: list[str] = []
+            self.closed = 0
+            created_clients.append(self)
+
+        async def query_sql(self, statement: str):
+            self.queries.append(statement)
+            return [{"statement": statement}]
+
+        async def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(databricks_tools, "get_request_user_assertion", lambda: "user-token")
+    monkeypatch.setattr(databricks_tools, "acquire_databricks_access_token", lambda: "dbx-token")
+    monkeypatch.setattr(databricks_tools, "_build_databricks_client", lambda access_token=None: _FakeClient(access_token))
+
+    async def _run():
+        first = await databricks_tools._run_query("SELECT 1")
+        second = await databricks_tools._run_query("SELECT 2")
+        await databricks_tools.close_request_databricks_client()
+        return first, second
+
+    first, second = asyncio.run(_run())
+
+    assert first == [{"statement": "SELECT 1"}]
+    assert second == [{"statement": "SELECT 2"}]
+    assert len(created_clients) == 1
+    assert created_clients[0].queries == ["SELECT 1", "SELECT 2"]
+    assert created_clients[0].access_token == "dbx-token"
+    assert created_clients[0].closed == 1
+
+
+def test_run_query_closes_ephemeral_client_outside_request_scope(monkeypatch) -> None:
+    created_clients = []
+
+    class _FakeClient:
+        def __init__(self, access_token=None):
+            self.access_token = access_token
+            self.closed = 0
+            created_clients.append(self)
+
+        async def query_sql(self, statement: str):
+            return [{"statement": statement}]
+
+        async def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(databricks_tools, "get_request_user_assertion", lambda: None)
+    monkeypatch.setattr(databricks_tools, "acquire_databricks_access_token", lambda: None)
+    monkeypatch.setattr(databricks_tools, "_build_databricks_client", lambda access_token=None: _FakeClient(access_token))
+
+    async def _run():
+        await databricks_tools._run_query("SELECT 1")
+        await databricks_tools._run_query("SELECT 2")
+
+    asyncio.run(_run())
+
+    assert len(created_clients) == 2
+    assert [client.closed for client in created_clients] == [1, 1]

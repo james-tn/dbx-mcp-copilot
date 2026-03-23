@@ -6,6 +6,8 @@ accounts, then delivers a prioritized morning briefing.
 """
 
 import json
+import logging
+import time
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -14,9 +16,11 @@ from agent_framework import Agent, tool
 from agent_framework.azure import AzureOpenAIResponsesClient
 
 try:
+    from .config import get_account_pulse_execution_mode
     from .databricks_tools import get_scoped_accounts, get_top_opportunities
     from .parallel_scan import ScanBundle, build_scan_parents_parallel_tool
 except ImportError:
+    from config import get_account_pulse_execution_mode
     from databricks_tools import get_scoped_accounts, get_top_opportunities
     from parallel_scan import ScanBundle, build_scan_parents_parallel_tool
 
@@ -145,11 +149,15 @@ _THREAT_KEYWORDS = ("ransomware", "breach", "cyber", "malware", "outage", "extor
 _CHANGE_KEYWORDS = ("appointed", "migration", "expansion", "pilot", "acquisition", "merger", "restructuring")
 _REGULATORY_KEYWORDS = ("gdpr", "hipaa", "dora", "nis2", "regulatory", "compliance", "audit", "8-k", "10-q", "10-k")
 _TIER_LABELS = {1: "Tier 1", 2: "Tier 2", 3: "Tier 3", 4: "Tier 4"}
+logger = logging.getLogger(__name__)
 
 
 def _format_generated_timestamp() -> tuple[str, str]:
     now = datetime.now(_PACIFIC_TZ)
-    return now.strftime("%B %-d, %Y"), now.strftime("%-I:%M %p").lower()
+    full_date = f"{now.strftime('%B')} {now.day}, {now.year}"
+    hour = now.strftime("%I").lstrip("0") or "0"
+    minute_suffix = now.strftime("%M %p").lower()
+    return full_date, f"{hour}:{minute_suffix}"
 
 
 def _format_source_link(signal: dict[str, Any]) -> str:
@@ -231,8 +239,6 @@ def render_account_pulse_briefing_markdown(
         bucket_counts[_classify_bucket(signal)] += 1
 
     lines = [
-        f"*Scanning your {total_accounts} accounts for news, SEC filings, and cybersecurity events. This will take about a minute.*",
-        "",
         "## Account Pulse",
         f"{full_date}  ·  generated at {generated_at}  ·  live",
         "",
@@ -411,9 +417,12 @@ def create_account_pulse_agent(
         ),
     )
     async def generate_account_pulse_briefing(request: str) -> str:
+        started = time.perf_counter()
+        logger.info("Account Pulse briefing started.", extra={"request_text": request[:120]})
         scoped_accounts_payload = json.loads(await scoped_accounts_func())
         accounts = list(scoped_accounts_payload.get("accounts", []) or [])
         if not accounts:
+            logger.warning("Account Pulse briefing aborted because no scoped accounts were returned.")
             return "The data source is temporarily unavailable. Please try again in a moment."
         narrowed_accounts = [row for row in accounts if _matches_requested_account(request, row)]
 
@@ -429,9 +438,24 @@ def create_account_pulse_agent(
             top_opportunities_payload=top_opportunities_payload,
         )
         if not scan_targets:
+            logger.info("Account Pulse briefing found no matching scan targets.")
             return "I couldn't find a matching account in your current scope. Try the parent or account name shown in your briefing."
 
         scan_bundle = json.loads(await scan_parents_parallel_func(scan_targets=scan_targets))
+        logger.info(
+            "Account Pulse scan completed.",
+            extra={
+                "segment": str(scoped_accounts_payload.get("segment", "UNKNOWN")).upper(),
+                "execution_mode": get_account_pulse_execution_mode(),
+                "scan_target_count": len(scan_targets),
+                "selected_account_count": selected_account_count,
+                "scan_targets_completed": scan_bundle.get("scan_targets_completed", 0),
+                "scan_targets_failed": scan_bundle.get("scan_targets_failed", 0),
+                "signal_count": len(scan_bundle.get("signals", []) or []),
+                "max_observed_concurrency": scan_bundle.get("max_observed_concurrency", 0),
+                "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 1),
+            },
+        )
         if len(narrowed_accounts) == 1:
             requested_account_name = str(narrowed_accounts[0].get("name") or "").strip()
             requested_parent_name = str(

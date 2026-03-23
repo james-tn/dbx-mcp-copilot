@@ -10,27 +10,43 @@ from __future__ import annotations
 
 import json
 import os
+from contextvars import ContextVar
 from typing import Annotated, Any
 
 from agent_framework import tool
 from pydantic import Field
 
 try:
+    from .config import get_effective_ri_scope_mode, get_secure_deployment_enabled
     from .auth_context import acquire_databricks_access_token, get_request_user_assertion
     from .databricks_sql import DatabricksSqlAuthError, DatabricksSqlClient, DatabricksSqlError
 except ImportError:
+    from config import get_effective_ri_scope_mode, get_secure_deployment_enabled
     from auth_context import acquire_databricks_access_token, get_request_user_assertion
     from databricks_sql import DatabricksSqlAuthError, DatabricksSqlClient, DatabricksSqlError
 
 _DEFAULT_DEMO_TERRITORY = "GreatLakes-ENT-Named-1"
+_DEFAULT_DATABRICKS_CATALOG = "veeam_demo"
+_REQUEST_DATABRICKS_CLIENT: ContextVar[DatabricksSqlClient | None] = ContextVar(
+    "request_databricks_client",
+    default=None,
+)
+_REQUEST_DATABRICKS_CLIENT_TOKEN: ContextVar[str | None] = ContextVar(
+    "request_databricks_client_token",
+    default=None,
+)
 
 
 def _scope_mode() -> str:
-    return (os.environ.get("RI_SCOPE_MODE", "user").strip().lower() or "user")
+    return get_effective_ri_scope_mode()
 
 
 def _demo_territory() -> str:
     return os.environ.get("RI_DEMO_TERRITORY", _DEFAULT_DEMO_TERRITORY).strip() or _DEFAULT_DEMO_TERRITORY
+
+
+def _catalog_name() -> str:
+    return os.environ.get("DATABRICKS_CATALOG", _DEFAULT_DATABRICKS_CATALOG).strip() or _DEFAULT_DATABRICKS_CATALOG
 
 
 def _escape_sql(value: str) -> str:
@@ -54,6 +70,11 @@ def _request_is_user_scoped() -> bool:
 
 def _resolve_territory(territory_override: str | None = None, *, allow_override: bool = False) -> str:
     override = (territory_override or "").strip()
+    if get_secure_deployment_enabled():
+        raise ValueError(
+            "Territory override is disabled in secure deployment mode. "
+            "The planner always uses the signed-in user's Databricks access."
+        )
     if override:
         if _request_is_user_scoped():
             raise ValueError(
@@ -65,13 +86,42 @@ def _resolve_territory(territory_override: str | None = None, *, allow_override:
     return _demo_territory()
 
 
-def _build_databricks_client() -> DatabricksSqlClient:
-    access_token = acquire_databricks_access_token()
+def _build_databricks_client(access_token: str | None = None) -> DatabricksSqlClient:
     return DatabricksSqlClient(access_token=access_token)
 
 
+async def _get_request_databricks_client(access_token: str | None) -> DatabricksSqlClient:
+    client = _REQUEST_DATABRICKS_CLIENT.get()
+    cached_token = _REQUEST_DATABRICKS_CLIENT_TOKEN.get()
+    normalized_token = access_token or ""
+    if client is not None and cached_token == normalized_token:
+        return client
+
+    if client is not None:
+        await client.close()
+
+    client = _build_databricks_client(access_token)
+    _REQUEST_DATABRICKS_CLIENT.set(client)
+    _REQUEST_DATABRICKS_CLIENT_TOKEN.set(normalized_token)
+    return client
+
+
+async def close_request_databricks_client() -> None:
+    client = _REQUEST_DATABRICKS_CLIENT.get()
+    _REQUEST_DATABRICKS_CLIENT.set(None)
+    _REQUEST_DATABRICKS_CLIENT_TOKEN.set(None)
+    if client is not None:
+        await client.close()
+
+
 async def _run_query(statement: str) -> list[dict[str, Any]]:
-    client = _build_databricks_client()
+    access_token = acquire_databricks_access_token()
+    use_request_client = _request_is_user_scoped()
+    client = (
+        await _get_request_databricks_client(access_token)
+        if use_request_client
+        else _build_databricks_client(access_token)
+    )
     try:
         return await client.query_sql(statement)
     except DatabricksSqlAuthError as exc:
@@ -81,7 +131,8 @@ async def _run_query(statement: str) -> list[dict[str, Any]]:
     except DatabricksSqlError as exc:
         raise RuntimeError("The Databricks data source is temporarily unavailable.") from exc
     finally:
-        await client.close()
+        if not use_request_client:
+            await client.close()
 
 
 def _json_payload(payload: dict[str, Any]) -> str:
@@ -119,7 +170,8 @@ def _summarize_scope(rows: list[dict[str, Any]]) -> tuple[str | None, list[str],
     ),
 )
 async def get_scoped_accounts() -> str:
-    statement = """
+    catalog = _catalog_name()
+    statement = f"""
 SELECT
   account_id,
   name,
@@ -136,7 +188,7 @@ SELECT
   renewal_date,
   opportunity_stage,
   last_seller_touch_date
-FROM veeam_demo.ri_secure.accounts
+FROM {catalog}.ri_secure.accounts
 """.strip()
     if _scope_mode() == "demo":
         territory = _resolve_territory()
@@ -181,7 +233,7 @@ async def lookup_rep(
 
     statement = f"""
 SELECT rep_key, rep_name, territory
-FROM veeam_demo.ri_secure.reps
+FROM {_catalog_name()}.ri_secure.reps
 WHERE LOWER(rep_name) LIKE '%{_escape_sql(name.lower())}%'
 ORDER BY rep_name
 """.strip()
@@ -196,6 +248,7 @@ def _top_opportunities_statement(
     offset: int,
     filter_mode: str | None,
 ) -> str:
+    catalog = _catalog_name()
     filters: list[str] = []
     if territory:
         filters.append(f"o.sales_team = '{_escape_sql(territory)}'")
@@ -261,8 +314,8 @@ SELECT
   a.sic_or_naics,
   a.hq_country,
   a.hq_region
-FROM veeam_demo.ri_secure.opportunities o
-LEFT JOIN veeam_demo.ri_secure.accounts a
+FROM {catalog}.ri_secure.opportunities o
+LEFT JOIN {catalog}.ri_secure.accounts a
   ON a.account_id = o.account_id
 WHERE {where_clause}
 ORDER BY {order_by}
@@ -348,7 +401,7 @@ SELECT
   contact_stage,
   last_activity_date,
   do_not_call
-FROM veeam_demo.ri_secure.contacts
+FROM {_catalog_name()}.ri_secure.contacts
 WHERE account_id = '{_escape_sql(value)}'
 ORDER BY name
 """.strip()

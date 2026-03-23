@@ -10,6 +10,8 @@ Exposes:
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
@@ -27,8 +29,15 @@ try:
         reset_request_identity,
         validate_bearer_token,
     )
-    from .config import get_client, get_session_max_turns, get_session_store_mode
-    from .planner import create_runtime_planner_agent
+    from .config import (
+        get_client,
+        get_session_idle_ttl_seconds,
+        get_session_max_sessions,
+        get_session_max_turns,
+        get_session_store_mode,
+    )
+    from .databricks_tools import close_request_databricks_client
+    from .planner import create_runtime_planner_agent, extract_routed_agent_from_workflow_result
     from .session_store import InMemorySessionStore
 except ImportError:
     from auth_context import (
@@ -40,9 +49,19 @@ except ImportError:
         reset_request_identity,
         validate_bearer_token,
     )
-    from config import get_client, get_session_max_turns, get_session_store_mode
-    from planner import create_runtime_planner_agent
+    from config import (
+        get_client,
+        get_session_idle_ttl_seconds,
+        get_session_max_sessions,
+        get_session_max_turns,
+        get_session_store_mode,
+    )
+    from databricks_tools import close_request_databricks_client
+    from planner import create_runtime_planner_agent, extract_routed_agent_from_workflow_result
     from session_store import InMemorySessionStore
+
+
+logger = logging.getLogger(__name__)
 
 
 class CreateSessionRequest(BaseModel):
@@ -73,7 +92,11 @@ class PlannerRuntime:
     def __init__(self) -> None:
         if get_session_store_mode() != "memory":
             raise ValueError("Only SESSION_STORE_MODE=memory is implemented in this MVP.")
-        self.session_store = InMemorySessionStore(max_turns=get_session_max_turns())
+        self.session_store = InMemorySessionStore(
+            max_turns=get_session_max_turns(),
+            max_sessions=get_session_max_sessions(),
+            idle_ttl_seconds=get_session_idle_ttl_seconds(),
+        )
         self.agent = create_runtime_planner_agent(get_client())
 
     async def create_session(self, *, owner_id: str, session_id: str | None = None) -> dict[str, Any]:
@@ -102,12 +125,44 @@ class PlannerRuntime:
         return await self._run_turn(state=state, text=text)
 
     async def _run_turn(self, *, state, text: str) -> dict[str, Any]:
+        started = time.perf_counter()
+        routed_agent = None
         async with state.lock:
+            logger.info(
+                "Planner turn started.",
+                extra={
+                    "session_id": state.session_id,
+                    "owner_id": state.owner_id,
+                    "channel": state.channel,
+                },
+            )
             self.session_store.append_turn(state, "user", text)
-            result = await self.agent.run(_message_history_for_state(state))
-            reply = result.text
-            self.session_store.append_turn(state, "assistant", reply)
+            try:
+                result = await self.agent.run(_message_history_for_state(state))
+                routed_agent = extract_routed_agent_from_workflow_result(result.raw_result)
+                reply = result.text
+                self.session_store.append_turn(state, "assistant", reply)
+            except Exception:
+                logger.exception(
+                    "Planner turn failed.",
+                    extra={
+                        "session_id": state.session_id,
+                        "owner_id": state.owner_id,
+                        "channel": state.channel,
+                    },
+                )
+                raise
         view = self.session_store.public_view(state)
+        logger.info(
+            "Planner turn completed.",
+            extra={
+                "session_id": state.session_id,
+                "owner_id": state.owner_id,
+                "channel": state.channel,
+                "routed_agent": routed_agent or "unknown",
+                "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 1),
+            },
+        )
         return {
             "session_id": state.session_id,
             "reply": reply,
@@ -153,11 +208,12 @@ async def attach_request_identity(request: Request, call_next):
             content={"detail": str(exc)},
         )
 
-    token_ref, claims_ref = bind_request_identity(user_assertion, claims)
+    token_ref, claims_ref, databricks_token_ref = bind_request_identity(user_assertion, claims)
     try:
         return await call_next(request)
     finally:
-        reset_request_identity(token_ref, claims_ref)
+        await close_request_databricks_client()
+        reset_request_identity(token_ref, claims_ref, databricks_token_ref)
 
 
 def _require_user_id() -> str:

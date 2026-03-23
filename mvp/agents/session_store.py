@@ -38,10 +38,47 @@ class PlannerSessionState:
 
 
 class InMemorySessionStore:
-    def __init__(self, *, max_turns: int = 20) -> None:
+    def __init__(
+        self,
+        *,
+        max_turns: int = 20,
+        max_sessions: int = 500,
+        idle_ttl_seconds: float = 28800.0,
+    ) -> None:
         self.max_turns = max(1, max_turns)
+        self.max_sessions = max(1, max_sessions)
+        self.idle_ttl_seconds = max(60.0, idle_ttl_seconds)
         self._sessions: dict[str, PlannerSessionState] = {}
         self._conversation_index: dict[str, str] = {}
+
+    def _delete_session(self, session_id: str) -> None:
+        state = self._sessions.pop(session_id, None)
+        if state and state.conversation_id:
+            self._conversation_index.pop(state.conversation_id, None)
+
+    def _is_expired(self, state: PlannerSessionState, *, now: float) -> bool:
+        return (now - state.last_accessed_at) > self.idle_ttl_seconds
+
+    def _prune(self) -> None:
+        now = time.time()
+        expired_ids = [
+            session_id
+            for session_id, state in self._sessions.items()
+            if self._is_expired(state, now=now)
+        ]
+        for session_id in expired_ids:
+            self._delete_session(session_id)
+
+        overflow = len(self._sessions) - self.max_sessions
+        if overflow <= 0:
+            return
+
+        oldest_sessions = sorted(
+            self._sessions.values(),
+            key=lambda state: (state.last_accessed_at, state.created_at, state.session_id),
+        )[:overflow]
+        for state in oldest_sessions:
+            self._delete_session(state.session_id)
 
     def create(
         self,
@@ -55,6 +92,7 @@ class InMemorySessionStore:
         resolved_session_id = (session_id or str(uuid.uuid4())).strip()
         if not resolved_session_id:
             resolved_session_id = str(uuid.uuid4())
+        self._prune()
         state = PlannerSessionState(
             session_id=resolved_session_id,
             owner_id=owner_id,
@@ -65,9 +103,11 @@ class InMemorySessionStore:
         self._sessions[state.session_id] = state
         if conversation_id:
             self._conversation_index[conversation_id] = state.session_id
+        self._prune()
         return state
 
     def get(self, session_id: str) -> PlannerSessionState | None:
+        self._prune()
         state = self._sessions.get(session_id)
         if state:
             state.touch()

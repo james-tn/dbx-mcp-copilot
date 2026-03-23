@@ -5,6 +5,7 @@ Thin Microsoft 365 custom-engine wrapper for the Daily Account Planner.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from copy import copy
 import functools
 import inspect
@@ -81,6 +82,10 @@ AUTH_RETRY_MESSAGE = (
 UNAVAILABLE_MESSAGE = "Daily Account Planner is temporarily unavailable. Please try again in a moment."
 WORKING_MESSAGE = "I'm still working on this request. It may take some time."
 BUSY_MESSAGE = "I'm still working on your previous request. I'll send the result here when it's ready."
+
+
+class SessionBusyError(RuntimeError):
+    """Raised when a wrapper session already has an active planner turn."""
 
 
 class DebugChatRequest(BaseModel):
@@ -263,6 +268,16 @@ class WrapperRuntime:
             self._busy_sessions.discard(session_id)
 
 
+@asynccontextmanager
+async def _reserve_turn_slot(runtime: WrapperRuntime, session_id: str):
+    if not await runtime.try_begin_turn(session_id):
+        raise SessionBusyError(session_id)
+    try:
+        yield
+    finally:
+        await runtime.finish_turn(session_id)
+
+
 async def _run_direct_wrapper_turn(
     *,
     runtime: WrapperRuntime,
@@ -270,16 +285,15 @@ async def _run_direct_wrapper_turn(
     text: str,
     planner_access_token: str,
 ) -> str:
-    if not await runtime.try_begin_turn(session_id):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=BUSY_MESSAGE)
     try:
-        return await runtime.forward_message(
-            session_id=session_id,
-            text=text,
-            planner_access_token=planner_access_token,
-        )
-    finally:
-        await runtime.finish_turn(session_id)
+        async with _reserve_turn_slot(runtime, session_id):
+            return await runtime.forward_message(
+                session_id=session_id,
+                text=text,
+                planner_access_token=planner_access_token,
+            )
+    except SessionBusyError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=BUSY_MESSAGE) from exc
 
 
 class _AgentAuth(Protocol):
@@ -293,20 +307,6 @@ def _map_planner_exception(exc: Exception) -> str:
     if isinstance(exc, (PlannerServiceError, httpx.TimeoutException)):
         return UNAVAILABLE_MESSAGE
     return UNAVAILABLE_MESSAGE
-
-
-async def _resolve_planner_reply(
-    *,
-    runtime: WrapperRuntime,
-    session_id: str,
-    text: str,
-    planner_access_token: str,
-) -> str:
-    return await runtime.forward_message(
-        session_id=session_id,
-        text=text,
-        planner_access_token=planner_access_token,
-    )
 
 
 async def handle_wrapper_message(
@@ -353,14 +353,6 @@ async def handle_wrapper_message(
         await context.send_activity(SIGN_IN_MESSAGE)
         return
 
-    if not await runtime.try_begin_turn(session_id):
-        logger.info(
-            "Wrapper rejected message while session was busy.",
-            extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
-        )
-        await context.send_activity(BUSY_MESSAGE)
-        return
-
     started = time.perf_counter()
     ack_sent = False
     failure_reason = "none"
@@ -374,63 +366,70 @@ async def handle_wrapper_message(
         },
     )
     try:
-        planner_task = asyncio.create_task(
-            _resolve_planner_reply(
-                runtime=runtime,
-                session_id=session_id,
-                text=text,
-                planner_access_token=planner_access_token,
-            )
-        )
-
-        try:
-            if runtime.long_running_messages_enabled:
-                reply = await asyncio.wait_for(
-                    asyncio.shield(planner_task),
-                    timeout=runtime.ack_threshold_seconds,
+        async with _reserve_turn_slot(runtime, session_id):
+            planner_task = asyncio.create_task(
+                runtime.forward_message(
+                    session_id=session_id,
+                    text=text,
+                    planner_access_token=planner_access_token,
                 )
-            else:
-                reply = await planner_task
-        except asyncio.TimeoutError:
-            ack_sent = True
-            logger.warning(
-                "Wrapper crossed long-running acknowledgement threshold.",
-                extra={
-                    "session_id": session_id,
-                    "auth_handler_id": auth_handler_id,
-                    "ack_threshold_seconds": runtime.ack_threshold_seconds,
-                },
             )
-            await context.send_activity(WORKING_MESSAGE)
+
             try:
-                reply = await planner_task
+                if runtime.long_running_messages_enabled:
+                    reply = await asyncio.wait_for(
+                        asyncio.shield(planner_task),
+                        timeout=runtime.ack_threshold_seconds,
+                    )
+                else:
+                    reply = await planner_task
+            except asyncio.TimeoutError:
+                ack_sent = True
+                logger.warning(
+                    "Wrapper crossed long-running acknowledgement threshold.",
+                    extra={
+                        "session_id": session_id,
+                        "auth_handler_id": auth_handler_id,
+                        "ack_threshold_seconds": runtime.ack_threshold_seconds,
+                    },
+                )
+                await context.send_activity(WORKING_MESSAGE)
+                try:
+                    reply = await planner_task
+                except Exception as exc:
+                    failure_reason = exc.__class__.__name__
+                    logger.exception(
+                        "Wrapper planner call failed after delayed acknowledgement.",
+                        extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+                    )
+                    reply = _map_planner_exception(exc)
             except Exception as exc:
                 failure_reason = exc.__class__.__name__
-                logger.exception(
-                    "Wrapper planner call failed after delayed acknowledgement.",
-                    extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
-                )
+                if isinstance(exc, PlannerServiceAuthError):
+                    logger.warning(
+                        "Wrapper planner call hit auth error.",
+                        extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+                    )
+                elif isinstance(exc, httpx.TimeoutException):
+                    logger.warning(
+                        "Wrapper planner call timed out.",
+                        extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+                    )
+                else:
+                    logger.exception(
+                        "Wrapper planner call failed before acknowledgement threshold.",
+                        extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+                    )
                 reply = _map_planner_exception(exc)
-        except Exception as exc:
-            failure_reason = exc.__class__.__name__
-            if isinstance(exc, PlannerServiceAuthError):
-                logger.warning(
-                    "Wrapper planner call hit auth error.",
-                    extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
-                )
-            elif isinstance(exc, httpx.TimeoutException):
-                logger.warning(
-                    "Wrapper planner call timed out.",
-                    extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
-                )
-            else:
-                logger.exception(
-                    "Wrapper planner call failed before acknowledgement threshold.",
-                    extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
-                )
-            reply = _map_planner_exception(exc)
 
-        await context.send_activity(reply or UNAVAILABLE_MESSAGE)
+            await context.send_activity(reply or UNAVAILABLE_MESSAGE)
+    except SessionBusyError:
+        logger.info(
+            "Wrapper rejected message while session was busy.",
+            extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+        )
+        await context.send_activity(BUSY_MESSAGE)
+        return
     except Exception:
         failure_reason = "unexpected_wrapper_error"
         logger.exception(
@@ -439,7 +438,6 @@ async def handle_wrapper_message(
         )
         await context.send_activity(UNAVAILABLE_MESSAGE)
     finally:
-        await runtime.finish_turn(session_id)
         logger.info(
             "Wrapper turn completed.",
             extra={
