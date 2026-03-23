@@ -22,9 +22,12 @@ try:
     )
     from ..shared.runtime_env import ensure_runtime_env_loaded
 except ImportError:
-    _MVP_ROOT = Path(__file__).resolve().parent.parent
-    if str(_MVP_ROOT) not in sys.path:
-        sys.path.insert(0, str(_MVP_ROOT))
+    _MODULE_PATH = Path(__file__).resolve()
+    for _candidate_root in (_MODULE_PATH.parent.parent, _MODULE_PATH.parent):
+        if (_candidate_root / "shared").exists():
+            if str(_candidate_root) not in sys.path:
+                sys.path.insert(0, str(_candidate_root))
+            break
     from shared.entra_auth import (
         EntraTokenValidator,
         TokenClaims as DebugTokenClaims,

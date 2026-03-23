@@ -362,8 +362,13 @@ preflight_azure() {
 build_and_publish_images() {
   local planner_repository="daily-account-planner/planner"
   local wrapper_repository="daily-account-planner/wrapper"
-  local planner_tag="${MODE}-latest"
-  local wrapper_tag="${MODE}-latest"
+  local git_short_sha
+  local build_suffix
+  git_short_sha="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+  git_short_sha="${git_short_sha:-manual}"
+  build_suffix="$(date -u +%Y%m%d%H%M%S)-${git_short_sha}"
+  local planner_tag="${MODE}-${build_suffix}"
+  local wrapper_tag="${MODE}-${build_suffix}"
   local planner_image_ref="${ACR_NAME}.azurecr.io/${planner_repository}:${planner_tag}"
   local wrapper_image_ref="${ACR_NAME}.azurecr.io/${wrapper_repository}:${wrapper_tag}"
 

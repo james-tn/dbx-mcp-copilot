@@ -44,18 +44,47 @@ fi
 
 if az bot authsetting show -g "$AZURE_RESOURCE_GROUP" -n "$BOT_RESOURCE_NAME" -c "$BOT_OAUTH_CONNECTION_NAME" >/dev/null 2>&1; then
   az bot authsetting delete -g "$AZURE_RESOURCE_GROUP" -n "$BOT_RESOURCE_NAME" -c "$BOT_OAUTH_CONNECTION_NAME" >/dev/null
+  for _attempt in 1 2 3 4 5; do
+    if ! az bot authsetting show -g "$AZURE_RESOURCE_GROUP" -n "$BOT_RESOURCE_NAME" -c "$BOT_OAUTH_CONNECTION_NAME" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 5
+  done
 fi
 
-az bot authsetting create \
-  -g "$AZURE_RESOURCE_GROUP" \
-  -n "$BOT_RESOURCE_NAME" \
-  -c "$BOT_OAUTH_CONNECTION_NAME" \
-  --service Aadv2 \
-  --client-id "$BOT_APP_ID" \
-  --client-secret "$BOT_APP_PASSWORD" \
-  --provider-scope-string "$PLANNER_API_SCOPE offline_access openid profile" \
-  --parameters TenantId="$AZURE_TENANT_ID" TokenExchangeUrl="$BOT_SSO_RESOURCE" \
-  >/dev/null
+create_oauth_setting() {
+  az bot authsetting create \
+    -g "$AZURE_RESOURCE_GROUP" \
+    -n "$BOT_RESOURCE_NAME" \
+    -c "$BOT_OAUTH_CONNECTION_NAME" \
+    --service Aadv2 \
+    --client-id "$BOT_APP_ID" \
+    --client-secret "$BOT_APP_PASSWORD" \
+    --provider-scope-string "$PLANNER_API_SCOPE offline_access openid profile" \
+    --parameters TenantId="$AZURE_TENANT_ID" TokenExchangeUrl="$BOT_SSO_RESOURCE" \
+    >/dev/null
+}
+
+oauth_error_file="$(mktemp)"
+cleanup_oauth_error_file() {
+  rm -f "$oauth_error_file"
+}
+trap cleanup_oauth_error_file EXIT
+
+oauth_created="false"
+for _attempt in 1 2 3 4 5; do
+  if create_oauth_setting 2>"$oauth_error_file"; then
+    oauth_created="true"
+    break
+  fi
+  sleep 5
+done
+
+if [[ "$oauth_created" != "true" ]]; then
+  cat "$oauth_error_file" >&2 || true
+  echo "Unable to recreate Bot OAuth connection '$BOT_OAUTH_CONNECTION_NAME' after retries." >&2
+  exit 1
+fi
 
 cat <<EOF
 Azure Bot OAuth connection created or updated.

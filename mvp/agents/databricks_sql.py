@@ -23,9 +23,12 @@ from databricks_network import enable_private_databricks_resolution
 try:
     from ..shared.identity import is_hosted_environment
 except ImportError:
-    _MVP_ROOT = Path(__file__).resolve().parent.parent
-    if str(_MVP_ROOT) not in sys.path:
-        sys.path.insert(0, str(_MVP_ROOT))
+    _MODULE_PATH = Path(__file__).resolve()
+    for _candidate_root in (_MODULE_PATH.parent.parent, _MODULE_PATH.parent):
+        if (_candidate_root / "shared").exists():
+            if str(_candidate_root) not in sys.path:
+                sys.path.insert(0, str(_candidate_root))
+            break
     from shared.identity import is_hosted_environment
 
 _DATABRICKS_AUDIENCE = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default"
