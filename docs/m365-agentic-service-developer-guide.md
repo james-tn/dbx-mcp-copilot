@@ -244,6 +244,11 @@ Service app      → Downstream user_impersonation    ← admin consent
 Without admin consent, OBO calls return `AADSTS65001: The user or administrator
 has not consented to use the application`.
 
+**Operational guidance:** if you package this into an operator bootstrap, treat
+missing admin consent as a **blocking failure**. Do not continue with service
+deployment and hope sign-in will work later. Failing fast here produces a much
+more repeatable operator experience.
+
 #### 4. Azure Bot OAuth connection
 
 Create an OAuth connection on the Azure Bot resource so the Microsoft Agents SDK
@@ -691,6 +696,37 @@ flowchart TD
 | 11 | Set Azure Bot messaging endpoint to `https://<gateway>/api/messages` | Steps 3, 7 |
 | 12 | Open M365 Copilot, send a message, verify end-to-end flow | Steps 10-11 |
 
+### Operatorized bootstrap variant
+
+For a reusable customer/operator flow, this pattern works better when it is
+packaged into **two main scripts** plus **two-layer env files**:
+
+1. **Operator input env**
+   - small, human-edited
+   - contains only the initial tenant/subscription/resource naming values and
+     any demo-user identities
+2. **Generated runtime env**
+   - script-owned
+   - stores discovered URLs, app IDs, secrets, package IDs, and image refs
+
+Recommended split:
+
+1. `bootstrap-azure-demo.sh`
+   - preflight Azure login and permissions
+   - create or reuse infra
+   - create/reuse app registrations
+   - enforce admin-consent success
+   - build and publish images
+   - deploy the service and the gateway
+   - wire Azure Bot and OAuth connection
+2. `bootstrap-m365-demo.sh`
+   - build the Teams/M365 app package
+   - publish to the tenant catalog
+   - self-install for the signed-in operator
+
+This keeps the operator surface area small while preserving advanced lower-level
+scripts for recovery or debugging.
+
 ### Environment variables reference
 
 #### Agentic Service
@@ -703,6 +739,8 @@ flowchart TD
 | `DOWNSTREAM_OBO_SCOPE` | `<resource-id>/.default` | Downstream resource scope for OBO #2 |
 | `AZURE_OPENAI_ENDPOINT` | `https://....cognitiveservices.azure.com` | LLM endpoint |
 | `AZURE_OPENAI_DEPLOYMENT` | `gpt-4o` | Model deployment name |
+| `DATABRICKS_WAREHOUSE_ID` | `warehouse-123` | Optional fixed warehouse id if already known |
+| `DATABRICKS_AUTO_CREATE_WAREHOUSE` | `true` | Allow bootstrap to create a warehouse when none exists |
 
 #### M365 Gateway
 
@@ -714,6 +752,17 @@ flowchart TD
 | `SERVICE_BASE_URL` | `https://my-service.azurecontainerapps.io` | Service endpoint |
 | `SERVICE_API_SCOPE` | `api://<service-app-id>/access_as_user` | OBO #1 target scope |
 | `SERVICE_EXPECTED_AUDIENCE` | `api://<service-app-id>` | JWT audience validation |
+
+### Repeatability guidance
+
+If you expect operators to rerun the deployment in the same working copy:
+
+- keep operator-owned inputs separate from generated runtime values
+- persist app IDs/object IDs after first create and prefer those on reruns
+- avoid re-identifying Entra apps by display name alone
+- bind the generated runtime env to a signature of the operator inputs so a new
+  tenant, subscription, or prefix does not inherit stale values from an old run
+- prefer early preflight failures over deep runtime failures
 
 ---
 
@@ -757,9 +806,11 @@ flowchart LR
 | OBO #2 returns `invalid_grant` | User assertion expired or audience mismatch in service app | Ensure `requestedAccessTokenVersion: 2` and correct audience |
 | Gateway returns 401 to Copilot | Gateway channel auth or wrapper token acquisition fails | Verify Bot/channel auth config and gateway auth handler wiring |
 | Service returns 401/403 to gateway | Service bearer validation rejects the forwarded token | Verify `SERVICE_EXPECTED_AUDIENCE`, issuer, tenant, and signing key refresh logic |
+| Deployment succeeds partway but M365 sign-in still fails | App registration permissions were created but admin consent was not actually granted | Treat consent as blocking, rerun only after consent succeeds |
 | Session 403 on second turn | Session `owner_id` doesn't match the validated token `oid` on the follow-up turn | Verify the same signed-in user is present and the service derives ownership from the validated bearer, not mutable forwarded headers |
 | `/healthz` returns 401 | Health endpoint not excluded from auth middleware | Add path exclusion for `/healthz` |
 | Invoke activities show error to user | Missing invoke handler in gateway | Add a no-op route for `activity.type == "invoke"` with `is_invoke=True` |
+| Fresh workspace fails during first query or seed | No SQL warehouse exists yet | Auto-create a starter warehouse during bootstrap or require an explicit warehouse id in preflight |
 
 ---
 

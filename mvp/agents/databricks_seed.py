@@ -167,6 +167,77 @@ def _as_bool(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+async def _resolve_bootstrap_warehouse_id(
+    client: DatabricksSqlClient,
+    configured_warehouse_id: str | None,
+) -> str:
+    if configured_warehouse_id:
+        client._resolved_warehouse_id = configured_warehouse_id
+        return configured_warehouse_id
+
+    payload = await client._request("GET", "/api/2.0/sql/warehouses")
+    warehouses = payload.get("warehouses", [])
+    if isinstance(warehouses, list):
+        for warehouse in warehouses:
+            if not isinstance(warehouse, dict):
+                continue
+            state = str(warehouse.get("state", "")).upper()
+            if state in {"RUNNING", "STARTING", "STARTED"}:
+                warehouse_id = str(warehouse.get("id", "")).strip()
+                if warehouse_id:
+                    client._resolved_warehouse_id = warehouse_id
+                    return warehouse_id
+        for warehouse in warehouses:
+            if not isinstance(warehouse, dict):
+                continue
+            warehouse_id = str(warehouse.get("id", "")).strip()
+            if warehouse_id:
+                client._resolved_warehouse_id = warehouse_id
+                return warehouse_id
+
+    if not _as_bool(os.environ.get("DATABRICKS_AUTO_CREATE_WAREHOUSE", "true")):
+        raise DatabricksSeedError(
+            "No Databricks SQL warehouse was found. Set DATABRICKS_WAREHOUSE_ID, create a SQL warehouse in the workspace, "
+            "or enable DATABRICKS_AUTO_CREATE_WAREHOUSE=true before rerunning secure seeding."
+        )
+
+    create_payload = {
+        "name": (
+            os.environ.get("DATABRICKS_WAREHOUSE_NAME", "").strip()
+            or f"{os.environ.get('INFRA_NAME_PREFIX', 'dailyacctplanner')}-sql"
+        ),
+        "cluster_size": os.environ.get("DATABRICKS_WAREHOUSE_CLUSTER_SIZE", "Small").strip() or "Small",
+        "min_num_clusters": int(os.environ.get("DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS", "1")),
+        "max_num_clusters": int(os.environ.get("DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS", "1")),
+        "auto_stop_mins": int(os.environ.get("DATABRICKS_WAREHOUSE_AUTO_STOP_MINS", "10")),
+        "warehouse_type": os.environ.get("DATABRICKS_WAREHOUSE_TYPE", "PRO").strip() or "PRO",
+    }
+    if _as_bool(os.environ.get("DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS")):
+        create_payload["enable_serverless_compute"] = True
+
+    try:
+        created = await client._request(
+            "POST",
+            "/api/2.0/sql/warehouses",
+            json_payload=create_payload,
+        )
+    except DatabricksSqlError as exc:
+        raise DatabricksSeedError(
+            "No Databricks SQL warehouse was found, and automatic warehouse creation failed. "
+            "Ensure the bootstrap identity can create SQL warehouses in Databricks, or set DATABRICKS_WAREHOUSE_ID to an existing warehouse."
+        ) from exc
+
+    warehouse_id = str(created.get("id") or created.get("warehouse_id") or "").strip()
+    if not warehouse_id:
+        raise DatabricksSeedError(
+            "Databricks returned a successful warehouse-create response without a warehouse id. "
+            "Create a warehouse manually and set DATABRICKS_WAREHOUSE_ID before rerunning secure seeding."
+        )
+
+    client._resolved_warehouse_id = warehouse_id
+    return warehouse_id
+
+
 def _split_statements(script: str) -> list[str]:
     statements: list[str] = []
     current: list[str] = []
@@ -492,7 +563,7 @@ async def run_secure_seed() -> dict[str, Any]:
                 config,
             )
         )
-        resolved_warehouse_id = config.warehouse_id or await client.resolve_warehouse_id()
+        resolved_warehouse_id = await _resolve_bootstrap_warehouse_id(client, config.warehouse_id)
         warehouse_permission_result = await _ensure_sql_warehouse_access(
             admin_client,
             config,

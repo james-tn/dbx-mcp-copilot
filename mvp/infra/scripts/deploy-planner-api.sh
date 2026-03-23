@@ -80,6 +80,14 @@ resolve_valid_warehouse_id() {
   export DBX_HOST="$DATABRICKS_HOST"
   export DBX_TOKEN="$dbx_token"
   export DBX_CURRENT_WAREHOUSE_ID="$current_warehouse_id"
+  export DBX_AUTO_CREATE_WAREHOUSE="${DATABRICKS_AUTO_CREATE_WAREHOUSE:-true}"
+  export DBX_WAREHOUSE_NAME="${DATABRICKS_WAREHOUSE_NAME:-${INFRA_NAME_PREFIX:-dailyacctplanner}-sql}"
+  export DBX_WAREHOUSE_CLUSTER_SIZE="${DATABRICKS_WAREHOUSE_CLUSTER_SIZE:-Small}"
+  export DBX_WAREHOUSE_MIN_CLUSTERS="${DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS:-1}"
+  export DBX_WAREHOUSE_MAX_CLUSTERS="${DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS:-1}"
+  export DBX_WAREHOUSE_AUTO_STOP_MINS="${DATABRICKS_WAREHOUSE_AUTO_STOP_MINS:-10}"
+  export DBX_WAREHOUSE_TYPE="${DATABRICKS_WAREHOUSE_TYPE:-PRO}"
+  export DBX_WAREHOUSE_ENABLE_SERVERLESS="${DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS:-false}"
 
   python - <<'PY'
 import json
@@ -90,16 +98,29 @@ import urllib.request
 host = os.environ["DBX_HOST"].rstrip("/")
 token = os.environ["DBX_TOKEN"]
 current = os.environ.get("DBX_CURRENT_WAREHOUSE_ID", "").strip()
+auto_create = os.environ.get("DBX_AUTO_CREATE_WAREHOUSE", "").strip().lower() in {"1", "true", "yes", "on"}
 
-request = urllib.request.Request(
-    f"{host}/api/2.0/sql/warehouses",
-    headers={
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    },
-)
-with urllib.request.urlopen(request, timeout=30) as response:
-    payload = json.load(response)
+
+def request(method: str, path: str, payload: dict | None = None) -> dict:
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{host}{path}",
+        data=body,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+        message = detail or exc.reason or "request failed"
+        raise SystemExit(f"Databricks SQL warehouse request failed ({exc.code}): {message}") from exc
+
+payload = request("GET", "/api/2.0/sql/warehouses")
 
 warehouses = payload.get("warehouses", [])
 preferred = None
@@ -120,8 +141,42 @@ if preferred is None and warehouses:
     preferred = warehouses[0]
 
 warehouse_id = str((preferred or {}).get("id", "")).strip()
+if warehouse_id:
+    print(warehouse_id)
+    raise SystemExit(0)
+
+if not auto_create:
+    raise SystemExit(
+        "No Databricks SQL warehouse was found. Set DATABRICKS_WAREHOUSE_ID, create a SQL warehouse in the workspace, "
+        "or enable DATABRICKS_AUTO_CREATE_WAREHOUSE=true."
+    )
+
+create_payload = {
+    "name": os.environ.get("DBX_WAREHOUSE_NAME", "dailyacctplanner-sql").strip() or "dailyacctplanner-sql",
+    "cluster_size": os.environ.get("DBX_WAREHOUSE_CLUSTER_SIZE", "Small").strip() or "Small",
+    "min_num_clusters": int(os.environ.get("DBX_WAREHOUSE_MIN_CLUSTERS", "1")),
+    "max_num_clusters": int(os.environ.get("DBX_WAREHOUSE_MAX_CLUSTERS", "1")),
+    "auto_stop_mins": int(os.environ.get("DBX_WAREHOUSE_AUTO_STOP_MINS", "10")),
+    "warehouse_type": os.environ.get("DBX_WAREHOUSE_TYPE", "PRO").strip() or "PRO",
+}
+if os.environ.get("DBX_WAREHOUSE_ENABLE_SERVERLESS", "").strip().lower() in {"1", "true", "yes", "on"}:
+    create_payload["enable_serverless_compute"] = True
+
+try:
+    created = request("POST", "/api/2.0/sql/warehouses", create_payload)
+except SystemExit as exc:
+    raise SystemExit(
+        "No Databricks SQL warehouse was found, and automatic warehouse creation failed. "
+        "Ensure the operator can create SQL warehouses in Databricks, or set DATABRICKS_WAREHOUSE_ID to an existing warehouse.\n"
+        f"{exc}"
+    ) from exc
+
+warehouse_id = str(created.get("id") or created.get("warehouse_id") or "").strip()
 if not warehouse_id:
-    raise SystemExit("No Databricks SQL warehouse was found.")
+    raise SystemExit(
+        "Databricks returned a successful warehouse-create response without a warehouse id. "
+        "Create a warehouse manually and set DATABRICKS_WAREHOUSE_ID before rerunning."
+    )
 
 print(warehouse_id)
 PY
@@ -434,6 +489,23 @@ done
 az account set --subscription "$AZURE_SUBSCRIPTION_ID"
 az group create --name "$AZURE_RESOURCE_GROUP" --location "$AZURE_LOCATION" >/dev/null
 
+DATABRICKS_AUTO_CREATE_WAREHOUSE="${DATABRICKS_AUTO_CREATE_WAREHOUSE:-true}"
+DATABRICKS_WAREHOUSE_NAME="${DATABRICKS_WAREHOUSE_NAME:-${INFRA_NAME_PREFIX:-$PLANNER_ACA_APP_NAME}-sql}"
+DATABRICKS_WAREHOUSE_CLUSTER_SIZE="${DATABRICKS_WAREHOUSE_CLUSTER_SIZE:-Small}"
+DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS="${DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS:-1}"
+DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS="${DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS:-1}"
+DATABRICKS_WAREHOUSE_AUTO_STOP_MINS="${DATABRICKS_WAREHOUSE_AUTO_STOP_MINS:-10}"
+DATABRICKS_WAREHOUSE_TYPE="${DATABRICKS_WAREHOUSE_TYPE:-PRO}"
+DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS="${DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS:-false}"
+upsert_env_value "DATABRICKS_AUTO_CREATE_WAREHOUSE" "$DATABRICKS_AUTO_CREATE_WAREHOUSE"
+upsert_env_value "DATABRICKS_WAREHOUSE_NAME" "$DATABRICKS_WAREHOUSE_NAME"
+upsert_env_value "DATABRICKS_WAREHOUSE_CLUSTER_SIZE" "$DATABRICKS_WAREHOUSE_CLUSTER_SIZE"
+upsert_env_value "DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS" "$DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS"
+upsert_env_value "DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS" "$DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS"
+upsert_env_value "DATABRICKS_WAREHOUSE_AUTO_STOP_MINS" "$DATABRICKS_WAREHOUSE_AUTO_STOP_MINS"
+upsert_env_value "DATABRICKS_WAREHOUSE_TYPE" "$DATABRICKS_WAREHOUSE_TYPE"
+upsert_env_value "DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS" "$DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS"
+
 effective_databricks_catalog="${DATABRICKS_CATALOG:-veeam_demo}"
 effective_skip_catalog_create="${DATABRICKS_SKIP_CATALOG_CREATE:-}"
 if [[ -z "$effective_skip_catalog_create" && "$SECURE_MODE" == "true" ]]; then
@@ -516,6 +588,14 @@ common_env_vars=(
   "DATABRICKS_SKIP_CATALOG_CREATE=${effective_skip_catalog_create}"
   "DATABRICKS_OBO_SCOPE=${DATABRICKS_OBO_SCOPE:-2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default}"
   "DATABRICKS_WAREHOUSE_ID=${DATABRICKS_WAREHOUSE_ID:-}"
+  "DATABRICKS_AUTO_CREATE_WAREHOUSE=${DATABRICKS_AUTO_CREATE_WAREHOUSE}"
+  "DATABRICKS_WAREHOUSE_NAME=${DATABRICKS_WAREHOUSE_NAME}"
+  "DATABRICKS_WAREHOUSE_CLUSTER_SIZE=${DATABRICKS_WAREHOUSE_CLUSTER_SIZE}"
+  "DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS=${DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS}"
+  "DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS=${DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS}"
+  "DATABRICKS_WAREHOUSE_AUTO_STOP_MINS=${DATABRICKS_WAREHOUSE_AUTO_STOP_MINS}"
+  "DATABRICKS_WAREHOUSE_TYPE=${DATABRICKS_WAREHOUSE_TYPE}"
+  "DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS=${DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS}"
   "DATABRICKS_SQL_TIMEOUT_SECONDS=${DATABRICKS_SQL_TIMEOUT_SECONDS:-30}"
   "DATABRICKS_SQL_RETRY_COUNT=${DATABRICKS_SQL_RETRY_COUNT:-1}"
   "DATABRICKS_SQL_POLL_ATTEMPTS=${DATABRICKS_SQL_POLL_ATTEMPTS:-6}"

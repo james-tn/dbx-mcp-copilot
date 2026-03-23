@@ -56,6 +56,45 @@ def test_load_seed_config_includes_managed_identity_principal_candidates(
     assert config.bootstrap_principal_names == ("mi-client", "mi-principal")
 
 
+def test_resolve_bootstrap_warehouse_id_creates_when_missing(monkeypatch) -> None:
+    monkeypatch.setenv("INFRA_NAME_PREFIX", "dailyacctplannersec")
+    monkeypatch.setenv("DATABRICKS_AUTO_CREATE_WAREHOUSE", "true")
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_CLUSTER_SIZE", "Small")
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, dict | None]] = []
+            self._resolved_warehouse_id: str | None = None
+
+        async def _request(self, method: str, path: str, json_payload=None):
+            self.calls.append((method, path, json_payload))
+            if method == "GET":
+                return {"warehouses": []}
+            return {"id": "warehouse-created"}
+
+    client = FakeClient()
+
+    warehouse_id = asyncio.run(databricks_seed._resolve_bootstrap_warehouse_id(client, None))
+
+    assert warehouse_id == "warehouse-created"
+    assert client._resolved_warehouse_id == "warehouse-created"
+    assert client.calls == [
+        ("GET", "/api/2.0/sql/warehouses", None),
+        (
+            "POST",
+            "/api/2.0/sql/warehouses",
+            {
+                "name": "dailyacctplannersec-sql",
+                "cluster_size": "Small",
+                "min_num_clusters": 1,
+                "max_num_clusters": 1,
+                "auto_stop_mins": 10,
+                "warehouse_type": "PRO",
+            },
+        ),
+    ]
+
+
 def test_split_statements_skips_comments_and_keeps_tail() -> None:
     statements = databricks_seed._split_statements(
         """

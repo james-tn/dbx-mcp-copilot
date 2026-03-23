@@ -6,6 +6,7 @@ ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
 APP_NAME_PREFIX="${APP_NAME_PREFIX:-daily-account-planner}"
 BOT_RESOURCE_NAME="${BOT_RESOURCE_NAME:-dailyplannerbot2026}"
 BOT_OAUTH_CONNECTION_NAME="${BOT_OAUTH_CONNECTION_NAME:-${AZUREBOTOAUTHCONNECTIONNAME:-SERVICE_CONNECTION}}"
+FAIL_ON_MISSING_ADMIN_CONSENT="${FAIL_ON_MISSING_ADMIN_CONSENT:-false}"
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a
@@ -70,3 +71,8 @@ BOT_APP_ID=$BOT_APP_ID
 Admin consent status:
 $admin_consent_status
 EOF
+
+if [[ "$FAIL_ON_MISSING_ADMIN_CONSENT" == "true" && "$admin_consent_status" != "granted" ]]; then
+  echo "Required Entra admin consent is still pending for BOT_APP_ID=$BOT_APP_ID. Complete 'az ad app permission admin-consent --id $BOT_APP_ID' and rerun." >&2
+  exit 1
+fi

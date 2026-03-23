@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HELPER_SCRIPT="$ROOT_DIR/infra/bootstrap_helpers.py"
 MODE="${1:-secure}"
+REQUIRE_ADMIN_CONSENT="${REQUIRE_ADMIN_CONSENT:-true}"
 
 if [[ "$MODE" != "open" && "$MODE" != "secure" ]]; then
   echo "Usage: bash mvp/infra/scripts/bootstrap-azure-demo.sh <open|secure>" >&2
@@ -332,6 +333,15 @@ PY
     echo "Warning: the bootstrap could not conclusively verify app-registration create rights." >&2
     echo "If setup-custom-engine-app-registrations.sh fails, grant Application Administrator, Cloud Application Administrator, or Global Administrator and rerun." >&2
   fi
+
+  if [[ "$REQUIRE_ADMIN_CONSENT" == "true" && "$CAN_GRANT_ADMIN_CONSENT" != "true" ]]; then
+    echo "The signed-in operator does not appear able to grant tenant-wide admin consent for the generated Entra applications." >&2
+    echo "Grant Application Administrator, Cloud Application Administrator, Global Administrator, or Privileged Role Administrator before running the operator bootstrap." >&2
+    if [[ -n "$OPERATOR_DIRECTORY_ROLES" ]]; then
+      echo "Signed-in directory roles: $OPERATOR_DIRECTORY_ROLES" >&2
+    fi
+    exit 1
+  fi
 }
 
 preflight_azure() {
@@ -437,7 +447,7 @@ source_env
 
 build_and_publish_images
 
-ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \
+ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" FAIL_ON_MISSING_ADMIN_CONSENT="$REQUIRE_ADMIN_CONSENT" \
   bash "$ROOT_DIR/infra/scripts/setup-custom-engine-app-registrations.sh"
 source_env
 
@@ -464,7 +474,7 @@ ENV_FILE="$RUNTIME_FILE" \
   bash "$ROOT_DIR/infra/scripts/create-azure-bot-resource.sh"
 source_env
 
-ENV_FILE="$RUNTIME_FILE" \
+ENV_FILE="$RUNTIME_FILE" FAIL_ON_MISSING_ADMIN_CONSENT="$REQUIRE_ADMIN_CONSENT" \
   bash "$ROOT_DIR/infra/scripts/setup-bot-oauth-connection.sh"
 source_env
 

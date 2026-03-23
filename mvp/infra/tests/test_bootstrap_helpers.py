@@ -11,6 +11,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from infra.bootstrap_helpers import (  # noqa: E402
     build_runtime_env,
+    compute_input_signature,
     derive_demo_users,
     missing_required_inputs,
     render_seed_sql_template,
@@ -59,17 +60,32 @@ def test_build_runtime_env_secure_derives_names_and_demo_users(tmp_path: Path) -
     assert runtime["M365_APP_PACKAGE_ID"]
 
 
-def test_build_runtime_env_preserves_existing_generated_values(tmp_path: Path) -> None:
+def test_build_runtime_env_preserves_existing_generated_values_for_same_inputs(tmp_path: Path) -> None:
     runtime_example = tmp_path / ".env.example"
     runtime_file = tmp_path / ".env"
     input_file = tmp_path / ".env.inputs"
 
     write_env(runtime_example, "AZURE_OPENAI_DEPLOYMENT=gpt-5.3-chat")
+    signature = compute_input_signature(
+        {
+            "AZURE_TENANT_ID": "tenant-id",
+            "AZURE_SUBSCRIPTION_ID": "sub-id",
+            "AZURE_RESOURCE_GROUP": "rg-daily-account-planner",
+            "AZURE_LOCATION": "eastus",
+            "INFRA_NAME_PREFIX": "dailyacctplanneropen",
+            "SELLER_A_UPN": "seller-a@example.com",
+            "SELLER_B_UPN": "seller-b@example.com",
+        },
+        "open",
+    )
     write_env(
         runtime_file,
         """
         PLANNER_API_CLIENT_ID=existing-client-id
         BOT_APP_ID=existing-bot-id
+        BOOTSTRAP_INPUT_SIGNATURE="""
+        + signature
+        + """
         """,
     )
     write_env(
@@ -90,6 +106,55 @@ def test_build_runtime_env_preserves_existing_generated_values(tmp_path: Path) -
     assert runtime["PLANNER_API_CLIENT_ID"] == "existing-client-id"
     assert runtime["BOT_APP_ID"] == "existing-bot-id"
     assert runtime["DEPLOYMENT_MODE"] == "open"
+
+
+def test_build_runtime_env_drops_stale_generated_values_when_inputs_change(tmp_path: Path) -> None:
+    runtime_example = tmp_path / ".env.example"
+    runtime_file = tmp_path / ".env"
+    input_file = tmp_path / ".env.inputs"
+
+    write_env(runtime_example, "AZURE_OPENAI_DEPLOYMENT=gpt-5.3-chat")
+    stale_signature = compute_input_signature(
+        {
+            "AZURE_TENANT_ID": "old-tenant",
+            "AZURE_SUBSCRIPTION_ID": "old-sub-id",
+            "AZURE_RESOURCE_GROUP": "rg-old",
+            "AZURE_LOCATION": "eastus",
+            "INFRA_NAME_PREFIX": "oldprefix",
+            "SELLER_A_UPN": "seller-a@example.com",
+            "SELLER_B_UPN": "seller-b@example.com",
+        },
+        "open",
+    )
+    write_env(
+        runtime_file,
+        """
+        PLANNER_API_CLIENT_ID=stale-client-id
+        BOT_APP_ID=stale-bot-id
+        WRAPPER_BASE_URL=https://stale.example.com
+        BOOTSTRAP_INPUT_SIGNATURE="""
+        + stale_signature
+        + """
+        """,
+    )
+    write_env(
+        input_file,
+        """
+        AZURE_TENANT_ID=tenant-id
+        AZURE_SUBSCRIPTION_ID=sub-id
+        AZURE_RESOURCE_GROUP=rg-daily-account-planner
+        AZURE_LOCATION=eastus
+        INFRA_NAME_PREFIX=dailyacctplanneropen
+        SELLER_A_UPN=seller-a@example.com
+        SELLER_B_UPN=seller-b@example.com
+        """,
+    )
+
+    runtime = build_runtime_env("open", runtime_example, input_file, runtime_file)
+
+    assert "PLANNER_API_CLIENT_ID" not in runtime
+    assert "BOT_APP_ID" not in runtime
+    assert "WRAPPER_BASE_URL" not in runtime
 
 
 def test_missing_required_inputs_detects_blank_values() -> None:

@@ -41,6 +41,14 @@ DATABRICKS_SKIP_CATALOG_CREATE="${DATABRICKS_SKIP_CATALOG_CREATE:-false}"
 DATABRICKS_WORKSPACE_USER_UPNS="${DATABRICKS_WORKSPACE_USER_UPNS:-}"
 SELLER_A_UPN="${SELLER_A_UPN:-}"
 SELLER_B_UPN="${SELLER_B_UPN:-}"
+DATABRICKS_AUTO_CREATE_WAREHOUSE="${DATABRICKS_AUTO_CREATE_WAREHOUSE:-true}"
+DATABRICKS_WAREHOUSE_NAME="${DATABRICKS_WAREHOUSE_NAME:-${INFRA_NAME_PREFIX:-dailyacctplanner}-sql}"
+DATABRICKS_WAREHOUSE_CLUSTER_SIZE="${DATABRICKS_WAREHOUSE_CLUSTER_SIZE:-Small}"
+DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS="${DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS:-1}"
+DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS="${DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS:-1}"
+DATABRICKS_WAREHOUSE_AUTO_STOP_MINS="${DATABRICKS_WAREHOUSE_AUTO_STOP_MINS:-10}"
+DATABRICKS_WAREHOUSE_TYPE="${DATABRICKS_WAREHOUSE_TYPE:-PRO}"
+DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS="${DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS:-false}"
 
 if [[ -z "$SELLER_A_UPN" || -z "$SELLER_B_UPN" ]]; then
   IFS=',' read -r derived_seller_a derived_seller_b _ <<<"$DATABRICKS_WORKSPACE_USER_UPNS"
@@ -216,19 +224,46 @@ PY
 fi
 
 resolve_warehouse_id() {
+  export DBX_AUTO_CREATE_WAREHOUSE="$DATABRICKS_AUTO_CREATE_WAREHOUSE"
+  export DBX_WAREHOUSE_NAME="$DATABRICKS_WAREHOUSE_NAME"
+  export DBX_WAREHOUSE_CLUSTER_SIZE="$DATABRICKS_WAREHOUSE_CLUSTER_SIZE"
+  export DBX_WAREHOUSE_MIN_CLUSTERS="$DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS"
+  export DBX_WAREHOUSE_MAX_CLUSTERS="$DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS"
+  export DBX_WAREHOUSE_AUTO_STOP_MINS="$DATABRICKS_WAREHOUSE_AUTO_STOP_MINS"
+  export DBX_WAREHOUSE_TYPE="$DATABRICKS_WAREHOUSE_TYPE"
+  export DBX_WAREHOUSE_ENABLE_SERVERLESS="$DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS"
   python - <<'PY'
 import json
 import os
+import urllib.error
 import urllib.request
 
 host = os.environ["DATABRICKS_HOST"].rstrip("/")
 token = os.environ["DBX_TOKEN"]
-request = urllib.request.Request(
-    f"{host}/api/2.0/sql/warehouses",
-    headers={"Authorization": f"Bearer {token}"},
-)
-with urllib.request.urlopen(request, timeout=30) as response:
-    payload = json.load(response)
+auto_create = os.environ.get("DBX_AUTO_CREATE_WAREHOUSE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def request(method: str, path: str, payload: dict | None = None) -> dict:
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{host}{path}",
+        data=body,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+        message = detail or exc.reason or "request failed"
+        raise SystemExit(f"Databricks SQL warehouse request failed ({exc.code}): {message}") from exc
+
+
+payload = request("GET", "/api/2.0/sql/warehouses")
 
 warehouses = payload.get("warehouses", [])
 preferred = None
@@ -239,9 +274,43 @@ for warehouse in warehouses:
         break
 if preferred is None and warehouses:
     preferred = warehouses[0]
-if preferred is None:
-    raise SystemExit("No Databricks SQL warehouse was found.")
-print(preferred["id"])
+if preferred is not None:
+    print(preferred["id"])
+    raise SystemExit(0)
+
+if not auto_create:
+    raise SystemExit(
+        "No Databricks SQL warehouse was found. Set DATABRICKS_WAREHOUSE_ID, create a SQL warehouse in the workspace, "
+        "or enable DATABRICKS_AUTO_CREATE_WAREHOUSE=true."
+    )
+
+create_payload = {
+    "name": os.environ.get("DBX_WAREHOUSE_NAME", "dailyacctplanner-sql").strip() or "dailyacctplanner-sql",
+    "cluster_size": os.environ.get("DBX_WAREHOUSE_CLUSTER_SIZE", "Small").strip() or "Small",
+    "min_num_clusters": int(os.environ.get("DBX_WAREHOUSE_MIN_CLUSTERS", "1")),
+    "max_num_clusters": int(os.environ.get("DBX_WAREHOUSE_MAX_CLUSTERS", "1")),
+    "auto_stop_mins": int(os.environ.get("DBX_WAREHOUSE_AUTO_STOP_MINS", "10")),
+    "warehouse_type": os.environ.get("DBX_WAREHOUSE_TYPE", "PRO").strip() or "PRO",
+}
+if os.environ.get("DBX_WAREHOUSE_ENABLE_SERVERLESS", "").strip().lower() in {"1", "true", "yes", "on"}:
+    create_payload["enable_serverless_compute"] = True
+
+try:
+    created = request("POST", "/api/2.0/sql/warehouses", create_payload)
+except SystemExit as exc:
+    raise SystemExit(
+        "No Databricks SQL warehouse was found, and automatic warehouse creation failed. "
+        "Ensure the current identity can create SQL warehouses in Databricks, or set DATABRICKS_WAREHOUSE_ID to an existing warehouse.\n"
+        f"{exc}"
+    ) from exc
+
+warehouse_id = str(created.get("id") or created.get("warehouse_id") or "").strip()
+if not warehouse_id:
+    raise SystemExit(
+        "Databricks returned a successful warehouse-create response without a warehouse id. "
+        "Create a warehouse manually and set DATABRICKS_WAREHOUSE_ID before rerunning."
+    )
+print(warehouse_id)
 PY
 }
 

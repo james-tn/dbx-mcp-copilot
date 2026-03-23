@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import shlex
 import sys
@@ -57,6 +58,20 @@ MODE_DEFAULTS = {
         "M365_APP_SHORT_NAME": "Daily Secured Planner",
         "M365_APP_FULL_NAME": "Daily Secured Account Planner",
     },
+}
+
+SIGNATURE_KEYS = (
+    "AZURE_TENANT_ID",
+    "AZURE_SUBSCRIPTION_ID",
+    "AZURE_RESOURCE_GROUP",
+    "AZURE_LOCATION",
+    "INFRA_NAME_PREFIX",
+    "SELLER_A_UPN",
+    "SELLER_B_UPN",
+)
+
+RUNTIME_META_KEYS = {
+    "BOOTSTRAP_INPUT_SIGNATURE",
 }
 
 
@@ -137,6 +152,62 @@ def _deterministic_package_id(mode: str, prefix: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"https://veeam.invalid/daily-account-planner/{mode}/{prefix}"))
 
 
+def _signature_seed(values: dict[str, str], mode: str) -> str:
+    parts = [f"mode={mode}"]
+    for key in SIGNATURE_KEYS:
+        parts.append(f"{key}={values.get(key, '').strip()}")
+    return "\n".join(parts)
+
+
+def compute_input_signature(values: dict[str, str], mode: str) -> str:
+    return hashlib.sha256(_signature_seed(values, mode).encode("utf-8")).hexdigest()
+
+
+def _apply_defaults(values: OrderedDict[str, str], mode: str) -> OrderedDict[str, str]:
+    rendered = OrderedDict(values)
+    defaults = MODE_DEFAULTS[mode]
+    for key, value in defaults.items():
+        rendered[key] = rendered.get(key, "").strip() or value
+    return rendered
+
+
+def _operator_owned_keys(input_values: OrderedDict[str, str], mode: str) -> set[str]:
+    owned = set(input_values)
+    owned.update(REQUIRED_INPUTS[mode])
+    return owned
+
+
+def _preserved_runtime_values(
+    mode: str,
+    runtime_path: str | Path,
+    input_values: OrderedDict[str, str],
+) -> OrderedDict[str, str]:
+    existing_runtime = load_env_file(runtime_path)
+    if not existing_runtime:
+        return OrderedDict()
+
+    signature_values = _apply_defaults(OrderedDict(input_values), mode)
+    current_signature = compute_input_signature(signature_values, mode)
+    existing_signature = existing_runtime.get("BOOTSTRAP_INPUT_SIGNATURE", "").strip()
+    if not existing_signature:
+        legacy_signature_values = OrderedDict(existing_runtime)
+        for key, value in input_values.items():
+            legacy_signature_values[key] = value
+        legacy_signature_values = _apply_defaults(legacy_signature_values, mode)
+        existing_signature = compute_input_signature(legacy_signature_values, mode)
+
+    if existing_signature != current_signature:
+        return OrderedDict()
+
+    operator_owned = _operator_owned_keys(input_values, mode)
+    preserved = OrderedDict()
+    for key, value in existing_runtime.items():
+        if key in operator_owned or key in RUNTIME_META_KEYS:
+            continue
+        preserved[key] = value
+    return preserved
+
+
 def build_runtime_env(
     mode: str,
     runtime_example_path: str | Path,
@@ -146,10 +217,11 @@ def build_runtime_env(
     if mode not in MODE_DEFAULTS:
         raise ValueError(f"Unsupported mode: {mode}")
 
+    input_values = load_env_file(input_path)
     runtime = load_env_file(runtime_example_path)
-    for key, value in load_env_file(runtime_path).items():
+    for key, value in _preserved_runtime_values(mode, runtime_path, input_values).items():
         runtime[key] = value
-    for key, value in load_env_file(input_path).items():
+    for key, value in input_values.items():
         runtime[key] = value
 
     defaults = MODE_DEFAULTS[mode]
@@ -209,6 +281,7 @@ def build_runtime_env(
     runtime["DATABRICKS_SEED_JOB_NAME"] = (
         runtime.get("DATABRICKS_SEED_JOB_NAME", "").strip() or _sanitize_name(prefix, "-dbx-seed", 60)
     )
+    runtime["BOOTSTRAP_INPUT_SIGNATURE"] = compute_input_signature(runtime, mode)
 
     return runtime
 

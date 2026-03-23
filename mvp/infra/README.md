@@ -31,11 +31,15 @@ The new bootstrap scripts:
 
 - read the small operator-owned `*.inputs` env files
 - generate and maintain `.env` / `.env.secure`
+- fail early when the operator cannot grant required Entra admin consent
 - build and publish the planner and wrapper images automatically
 - reuse an existing foundation on reruns instead of replaying the secure
   foundation deployment across a live Databricks workspace
 - drive the existing lower-level scripts in the supported order
 - keep the lower-level scripts compatible for manual recovery
+- preserve generated runtime values only when the same bootstrap input
+  signature still matches the current tenant / subscription / prefix / demo-user
+  set
 
 Secure-mode ACR note:
 
@@ -102,8 +106,21 @@ Secure app registration details:
   and defaults to `.env.secure` when `ENV_FILE` is not overridden
 - secure mode uses the `daily-account-planner-secure` app name prefix unless an
   explicit `APP_NAME_PREFIX` is provided
+- the operator bootstrap now treats missing admin consent as a blocking failure
 - generated planner and bot IDs, secrets, scopes, and expected audiences are
   written back into `ENV_FILE`; do not commit `.env.secure`
+- generated app IDs / object IDs are persisted in the runtime env and preferred
+  on reruns so the bootstrap does not accidentally bind to a different same-name
+  app in a customer tenant
+
+Databricks warehouse bootstrap details:
+
+- open mode and local seed flows can auto-create a starter SQL warehouse when
+  the workspace does not already have one
+- secure mode uses the same warehouse bootstrap behavior from inside the private
+  ACA seed job
+- set `DATABRICKS_WAREHOUSE_ID` to pin a specific warehouse, or
+  `DATABRICKS_AUTO_CREATE_WAREHOUSE=false` to force the operator to provide one
 
 Canonical secure repeatability flow:
 

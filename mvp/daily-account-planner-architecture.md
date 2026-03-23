@@ -12,7 +12,15 @@ seller experience with:
   - `AccountPulse`
   - `NextMove`
 - delegated **user-scoped Databricks access** using OAuth On-Behalf-Of
-- planner-owned **canned SQL queries** against `veeam_demo.ri_secure.*`
+- planner-owned **canned SQL queries** against `${DATABRICKS_CATALOG}.ri_secure.*`
+
+The current operator deployment supports both:
+
+- **open mode**: planner ingress is external and local direct-query validation is
+  expected to work from the operator machine
+- **secure mode**: planner ingress is internal, Databricks seed runs inside the
+  private ACA environment, and local direct-query validation from the operator
+  machine is intentionally skipped
 
 The planner owns conversation state, orchestration, business data access, and
 seller-facing behavior. The wrapper is intentionally thin and only forwards
@@ -64,9 +72,9 @@ The MVP uses two Python services:
 
 ### 2.2 Direct-query data path
 
-The planner executes a fixed set of app-authored SQL statements against secure
-views and normalizes the results into seller-facing semantic tool payloads.
-Agents stay SQL-free.
+The planner executes a fixed set of app-authored SQL statements against the
+configured secure catalog and normalizes the results into seller-facing semantic
+tool payloads. Agents stay SQL-free.
 
 ### 2.3 Planner-owned business tools
 
@@ -94,7 +102,7 @@ code rather than by generic query generation.
    service.
 5. The planner validates the inbound bearer token for the planner API audience.
 6. The planner performs OBO to Databricks using its confidential client.
-7. The planner runs fixed SQL against `veeam_demo.ri_secure.*`.
+7. The planner runs fixed SQL against `${DATABRICKS_CATALOG}.ri_secure.*`.
 8. The planner uses Microsoft Agent Framework handoff to route the request to
    `AccountPulse` or `NextMove`.
 9. `AccountPulse` or `NextMove` executes planner-owned semantic business logic,
@@ -299,18 +307,18 @@ flowchart LR
     Validate --> OBO[OBO to Databricks scope]
     OBO --> DBToken[Delegated Databricks token]
     DBToken --> SQL[Fixed SQL statements]
-    SQL --> SecureViews[veeam_demo.ri_secure.*]
+    SQL --> SecureViews[DATABRICKS_CATALOG.ri_secure.*]
 ```
 
 ### 7.2 Query execution
 
 The planner uses the Databricks SQL Statements API with fixed application-owned
-queries against:
+queries against the configured secure catalog:
 
-- `veeam_demo.ri_secure.accounts`
-- `veeam_demo.ri_secure.reps`
-- `veeam_demo.ri_secure.opportunities`
-- `veeam_demo.ri_secure.contacts`
+- `${DATABRICKS_CATALOG}.ri_secure.accounts`
+- `${DATABRICKS_CATALOG}.ri_secure.reps`
+- `${DATABRICKS_CATALOG}.ri_secure.opportunities`
+- `${DATABRICKS_CATALOG}.ri_secure.contacts`
 
 The planner normalizes result sets into the typed tool payloads expected by the
 agents.
@@ -327,6 +335,12 @@ the behavior is realistic enough to validate:
 - no-play and no-contact cases
 - stale-contact cases
 - ENT / COM / VEL differences
+
+The access-control demo is intentionally a **two-user** model. The seeded
+entitlements and grants are rendered for the operator-supplied:
+
+- `SELLER_A_UPN`
+- `SELLER_B_UPN`
 
 ## 8. M365 Wrapper
 
@@ -408,10 +422,20 @@ Required runtime variables:
 - `PLANNER_API_CLIENT_SECRET`
 - `PLANNER_API_EXPECTED_AUDIENCE`
 - `DATABRICKS_HOST`
-- `DATABRICKS_WAREHOUSE_ID`
 - `DATABRICKS_OBO_SCOPE`
 - `SESSION_STORE_MODE=memory`
 - `SESSION_MAX_TURNS`
+
+Runtime variables commonly generated or backfilled by the bootstrap:
+
+- `DATABRICKS_WAREHOUSE_ID`
+- `DATABRICKS_AUTO_CREATE_WAREHOUSE`
+- `DATABRICKS_WAREHOUSE_NAME`
+- `DATABRICKS_WAREHOUSE_CLUSTER_SIZE`
+- `DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS`
+- `DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS`
+- `DATABRICKS_WAREHOUSE_AUTO_STOP_MINS`
+- `DATABRICKS_WAREHOUSE_TYPE`
 
 Optional development-only variables:
 
@@ -463,23 +487,45 @@ Optional CLI publish variables:
 
 ## 10. Deployment Sequence
 
-1. Run the app-registration setup script to create or reuse:
-   - planner API app registration
-   - wrapper / bot app registration
-2. Grant admin consent for:
-   - planner API -> Databricks delegated access
-   - wrapper / channel -> planner API `access_as_user`
-   - bot app -> planner API `access_as_user`
-3. Seed Databricks RI data and secure views
-4. Validate direct Databricks query access
-5. Deploy planner ACA
-6. Validate planner direct API
-7. Deploy wrapper ACA
-8. Create or update Azure Bot `SERVICE_CONNECTION`
-   - use the bot app itself as the OAuth client for the connection
-9. Point Azure Bot to wrapper `/api/messages`
-10. Publish the Custom Engine Agent into Microsoft 365 Copilot
-11. Optionally self-install the app for the current test user through Graph
+The recommended operator flow is now a **two-step bootstrap**, not a manual
+script-by-script sequence:
+
+1. Fill the small operator-owned input env:
+   - `mvp/.env.inputs` for open mode
+   - `mvp/.env.secure.inputs` for secure mode
+2. Run Azure bootstrap:
+   - `bash mvp/infra/scripts/bootstrap-azure-demo.sh open|secure`
+3. Run M365 bootstrap:
+   - `bash mvp/infra/scripts/bootstrap-m365-demo.sh open|secure`
+
+What the Azure bootstrap now owns:
+
+- runtime env generation from the operator input env
+- foundation reuse or deployment
+- planner and wrapper image build/publish
+- app registration create/reuse with persisted app IDs/object IDs
+- mandatory admin-consent gating for the operator path
+- planner deployment
+- secure or open Databricks seeding
+- secure seed-job execution for private mode
+- wrapper deployment
+- Azure Bot resource and OAuth connection updates
+
+What the M365 bootstrap now owns:
+
+- Teams/M365 package build
+- catalog publish through Graph
+- self-install for the signed-in operator
+
+Operational behavior that now matters for repeatability:
+
+- the operator edits only `*.inputs`
+- `.env` and `.env.secure` are script-owned generated runtime files
+- runtime files preserve generated values only when the bootstrap input
+  signature still matches the same tenant/subscription/prefix/user set
+- missing admin consent is a blocking failure for the operator bootstrap
+- when no Databricks SQL warehouse exists, the bootstrap can create one
+  automatically instead of failing late
 
 ## 11. Test Strategy
 
