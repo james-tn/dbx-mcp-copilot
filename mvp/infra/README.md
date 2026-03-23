@@ -13,29 +13,46 @@ environment validation assets.
 
 ## Main entrypoints
 
-Open or secure foundation:
+Recommended operator flow:
+
+```bash
+bash mvp/infra/scripts/bootstrap-azure-demo.sh secure
+bash mvp/infra/scripts/bootstrap-m365-demo.sh secure
+```
+
+Open mode uses the same two-step flow:
+
+```bash
+bash mvp/infra/scripts/bootstrap-azure-demo.sh open
+bash mvp/infra/scripts/bootstrap-m365-demo.sh open
+```
+
+The new bootstrap scripts:
+
+- read the small operator-owned `*.inputs` env files
+- generate and maintain `.env` / `.env.secure`
+- build and publish the planner and wrapper images automatically
+- reuse an existing foundation on reruns instead of replaying the secure
+  foundation deployment across a live Databricks workspace
+- drive the existing lower-level scripts in the supported order
+- keep the lower-level scripts compatible for manual recovery
+
+Secure-mode ACR note:
+
+- the secure operator path intentionally leaves Azure Container Registry public
+  network access enabled so `az acr build` can run from Microsoft-managed build
+  agents
+- Databricks, Container Apps, private endpoints, and DNS remain on the secure
+  network path; the public ACR exception exists only for the image-build step
+
+Legacy entrypoints remain available for debugging:
 
 ```bash
 bash mvp/infra/scripts/deploy-foundation.sh open
 bash mvp/infra/scripts/deploy-foundation.sh secure
-```
-
-End-to-end stack:
-
-```bash
 bash mvp/infra/scripts/deploy-stack.sh open
 bash mvp/infra/scripts/deploy-stack.sh secure
 ```
-
-`deploy-stack.sh` now propagates both `ENV_FILE` and `DEPLOYMENT_MODE` to each
-child script. For the secure path, prefer:
-
-```bash
-ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/deploy-stack.sh secure
-```
-
-This keeps the secure deployment bound to `.env.secure` across foundation,
-registration, planner, seed, wrapper, and bot steps.
 
 Databricks seed:
 
@@ -50,21 +67,21 @@ from inside the secure Container Apps environment. Set
 `DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID`, and
 `DATABRICKS_AZURE_RESOURCE_ID` in `.env.secure`.
 
-The canonical secure path is:
+The canonical secure path is now:
 
-1. deploy the secure foundation
-2. create app registrations
-3. provision and attach the Databricks bootstrap user-assigned managed identity
-4. deploy the planner app and secure ACA seed job
-5. run the private seed job
-6. validate delegated Databricks access and seller separation
-7. deploy the wrapper, bot resource, and bot OAuth connection
-8. publish and install the secure M365 package
+1. fill [`mvp/.env.secure.inputs`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure.inputs)
+2. run `bootstrap-azure-demo.sh secure`
+3. run `bootstrap-m365-demo.sh secure`
 
 Secure seeding details:
 
 - the secure seed job uses a non-human Azure managed identity, not a Databricks
   PAT
+- secure mode defaults `DATABRICKS_SKIP_CATALOG_CREATE=true` and reuses the
+  Databricks workspace catalog instead of trying to create a new managed catalog
+  such as `veeam_demo`
+- that default avoids secure-workspace failures where the metastore has no
+  catalog storage root configured for `CREATE CATALOG`
 - workspace principals are bootstrapped through Databricks SCIM/admin APIs
   before SQL grants are applied
 - the bootstrap service principal is also ensured to have
@@ -91,11 +108,10 @@ Secure app registration details:
 Canonical secure repeatability flow:
 
 ```bash
-ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/destroy-stack.sh secure
-ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/deploy-stack.sh secure
-ENV_FILE=mvp/.env.secure bash mvp/scripts/publish-m365-app-package-graph.sh
-ENV_FILE=mvp/.env.secure bash mvp/scripts/install-m365-app-for-self-graph.sh
+bash mvp/infra/scripts/destroy-stack.sh secure
+bash mvp/infra/scripts/bootstrap-azure-demo.sh secure
+bash mvp/infra/scripts/bootstrap-m365-demo.sh secure
 ```
 
-Wait for the `veeam_poc_secured` resource group to be fully deleted before
-running the secure redeploy command.
+Wait for the target resource group to be fully deleted before rerunning the
+secure bootstrap.

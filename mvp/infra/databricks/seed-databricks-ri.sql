@@ -145,10 +145,10 @@ CREATE OR REPLACE TABLE veeam_demo.ri_security.user_territory_entitlements (
 );
 
 INSERT OVERWRITE veeam_demo.ri_security.user_territory_entitlements VALUES
-  ('ri-test-na@m365cpi89838450.onmicrosoft.com', 'GreatLakes-ENT-Named-1'),
-  ('ri-test-na@m365cpi89838450.onmicrosoft.com', 'SoCal-VEL-Named-2'),
-  ('DaichiM@M365CPI89838450.OnMicrosoft.com', 'Germany-ENT-Named-5'),
-  ('DaichiM@M365CPI89838450.OnMicrosoft.com', 'UK-COM-Named-3');
+  ('__SELLER_A_UPN__', 'GreatLakes-ENT-Named-1'),
+  ('__SELLER_A_UPN__', 'SoCal-VEL-Named-2'),
+  ('__SELLER_B_UPN__', 'Germany-ENT-Named-5'),
+  ('__SELLER_B_UPN__', 'UK-COM-Named-3');
 
 CREATE OR REPLACE VIEW veeam_demo.ri_secure.accounts AS
 SELECT a.*
@@ -185,19 +185,19 @@ WHERE EXISTS (
     AND ent.territory = a.sales_team
 );
 
-GRANT USE CATALOG ON CATALOG veeam_demo TO `ri-test-na@m365cpi89838450.onmicrosoft.com`;
-GRANT USE CATALOG ON CATALOG veeam_demo TO `DaichiM@M365CPI89838450.OnMicrosoft.com`;
+GRANT USE CATALOG ON CATALOG veeam_demo TO `__SELLER_A_UPN__`;
+GRANT USE CATALOG ON CATALOG veeam_demo TO `__SELLER_B_UPN__`;
 
-GRANT USE SCHEMA ON SCHEMA veeam_demo.ri_secure TO `ri-test-na@m365cpi89838450.onmicrosoft.com`;
-GRANT USE SCHEMA ON SCHEMA veeam_demo.ri_secure TO `DaichiM@M365CPI89838450.OnMicrosoft.com`;
+GRANT USE SCHEMA ON SCHEMA veeam_demo.ri_secure TO `__SELLER_A_UPN__`;
+GRANT USE SCHEMA ON SCHEMA veeam_demo.ri_secure TO `__SELLER_B_UPN__`;
 
-GRANT SELECT ON TABLE veeam_demo.ri_secure.accounts TO `ri-test-na@m365cpi89838450.onmicrosoft.com`;
-GRANT SELECT ON TABLE veeam_demo.ri_secure.opportunities TO `ri-test-na@m365cpi89838450.onmicrosoft.com`;
-GRANT SELECT ON TABLE veeam_demo.ri_secure.contacts TO `ri-test-na@m365cpi89838450.onmicrosoft.com`;
+GRANT SELECT ON TABLE veeam_demo.ri_secure.accounts TO `__SELLER_A_UPN__`;
+GRANT SELECT ON TABLE veeam_demo.ri_secure.opportunities TO `__SELLER_A_UPN__`;
+GRANT SELECT ON TABLE veeam_demo.ri_secure.contacts TO `__SELLER_A_UPN__`;
 
-GRANT SELECT ON TABLE veeam_demo.ri_secure.accounts TO `DaichiM@M365CPI89838450.OnMicrosoft.com`;
-GRANT SELECT ON TABLE veeam_demo.ri_secure.opportunities TO `DaichiM@M365CPI89838450.OnMicrosoft.com`;
-GRANT SELECT ON TABLE veeam_demo.ri_secure.contacts TO `DaichiM@M365CPI89838450.OnMicrosoft.com`;
+GRANT SELECT ON TABLE veeam_demo.ri_secure.accounts TO `__SELLER_B_UPN__`;
+GRANT SELECT ON TABLE veeam_demo.ri_secure.opportunities TO `__SELLER_B_UPN__`;
+GRANT SELECT ON TABLE veeam_demo.ri_secure.contacts TO `__SELLER_B_UPN__`;
 
 SELECT 'accounts' AS object_name, COUNT(*) AS row_count FROM veeam_demo.ri.accounts
 UNION ALL SELECT 'reps', COUNT(*) FROM veeam_demo.ri.reps

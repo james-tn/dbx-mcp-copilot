@@ -388,6 +388,18 @@ resolve_registry_settings() {
   echo "$server"$'\n'"$username"$'\n'"$password"
 }
 
+derive_demo_user_csv() {
+  if [[ -n "${DATABRICKS_WORKSPACE_USER_UPNS:-}" ]]; then
+    printf '%s\n' "$DATABRICKS_WORKSPACE_USER_UPNS"
+    return 0
+  fi
+  if [[ -n "${SELLER_A_UPN:-}" && -n "${SELLER_B_UPN:-}" ]]; then
+    printf '%s,%s\n' "$SELLER_A_UPN" "$SELLER_B_UPN"
+    return 0
+  fi
+  printf '\n'
+}
+
 PLANNER_ACA_APP_NAME="${PLANNER_ACA_APP_NAME:-${ACA_APP_NAME:-daily-account-planner-service}}"
 PLANNER_SEED_COMMAND="${PLANNER_SEED_COMMAND:-python seed_entrypoint.py}"
 AZURE_OPENAI_DEPLOYMENT="${AZURE_OPENAI_DEPLOYMENT:-${AZURE_OPENAI_MODEL:-}}"
@@ -423,7 +435,13 @@ az account set --subscription "$AZURE_SUBSCRIPTION_ID"
 az group create --name "$AZURE_RESOURCE_GROUP" --location "$AZURE_LOCATION" >/dev/null
 
 effective_databricks_catalog="${DATABRICKS_CATALOG:-veeam_demo}"
-if [[ "$SECURE_MODE" == "true" && -n "${DATABRICKS_RESOURCE_GROUP:-}" && -n "${DATABRICKS_WORKSPACE_NAME:-}" && "${DATABRICKS_SKIP_CATALOG_CREATE:-false}" == "true" ]]; then
+effective_skip_catalog_create="${DATABRICKS_SKIP_CATALOG_CREATE:-}"
+if [[ -z "$effective_skip_catalog_create" && "$SECURE_MODE" == "true" ]]; then
+  effective_skip_catalog_create="true"
+fi
+effective_skip_catalog_create="${effective_skip_catalog_create:-false}"
+upsert_env_value "DATABRICKS_SKIP_CATALOG_CREATE" "$effective_skip_catalog_create"
+if [[ "$SECURE_MODE" == "true" && -n "${DATABRICKS_RESOURCE_GROUP:-}" && -n "${DATABRICKS_WORKSPACE_NAME:-}" && "$effective_skip_catalog_create" == "true" ]]; then
   databricks_workspace_id="$(
     az databricks workspace show \
     --resource-group "$DATABRICKS_RESOURCE_GROUP" \
@@ -495,7 +513,7 @@ common_env_vars=(
   "PLANNER_API_EXPECTED_AUDIENCE=$PLANNER_API_EXPECTED_AUDIENCE"
   "DATABRICKS_HOST=$DATABRICKS_HOST"
   "DATABRICKS_CATALOG=${effective_databricks_catalog}"
-  "DATABRICKS_SKIP_CATALOG_CREATE=${DATABRICKS_SKIP_CATALOG_CREATE:-false}"
+  "DATABRICKS_SKIP_CATALOG_CREATE=${effective_skip_catalog_create}"
   "DATABRICKS_OBO_SCOPE=${DATABRICKS_OBO_SCOPE:-2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default}"
   "DATABRICKS_WAREHOUSE_ID=${DATABRICKS_WAREHOUSE_ID:-}"
   "DATABRICKS_SQL_TIMEOUT_SECONDS=${DATABRICKS_SQL_TIMEOUT_SECONDS:-30}"
@@ -537,6 +555,7 @@ seed_job_env_vars=()
 bootstrap_identity_resource_id=""
 bootstrap_identity_client_id=""
 bootstrap_identity_principal_id=""
+demo_workspace_user_upns="$(derive_demo_user_csv)"
 if [[ "$SECURE_MODE" == "true" ]]; then
   if [[ -z "${DATABRICKS_RESOURCE_GROUP:-}" || -z "${DATABRICKS_WORKSPACE_NAME:-}" ]]; then
     echo "DATABRICKS_RESOURCE_GROUP and DATABRICKS_WORKSPACE_NAME are required when DEPLOYMENT_MODE=secure." >&2
@@ -594,7 +613,9 @@ PY
     "DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_PRINCIPAL_ID=${DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_PRINCIPAL_ID:-$bootstrap_identity_principal_id}"
     "DATABRICKS_SEED_VERSION=${DATABRICKS_SEED_VERSION:-2026-03-secure-bootstrap-v2}"
     "DATABRICKS_AZURE_RESOURCE_ID=$databricks_workspace_resource_id"
-    "DATABRICKS_WORKSPACE_USER_UPNS=${DATABRICKS_WORKSPACE_USER_UPNS:-ri-test-na@m365cpi89838450.onmicrosoft.com,DaichiM@M365CPI89838450.OnMicrosoft.com}"
+    "DATABRICKS_WORKSPACE_USER_UPNS=$demo_workspace_user_upns"
+    "SELLER_A_UPN=${SELLER_A_UPN:-}"
+    "SELLER_B_UPN=${SELLER_B_UPN:-}"
   )
   if [[ -n "${DATABRICKS_BOOTSTRAP_PRINCIPAL_NAME:-}" ]]; then
     seed_job_env_vars+=(

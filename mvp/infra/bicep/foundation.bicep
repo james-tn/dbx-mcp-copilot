@@ -65,7 +65,9 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = if (createAcr
   }
   properties: {
     adminUserEnabled: true
-    publicNetworkAccess: secureDeployment ? 'Disabled' : 'Enabled'
+    // The operator bootstrap uses az acr build, which runs from Microsoft-managed
+    // infrastructure and needs public reachability to log in to the registry.
+    publicNetworkAccess: 'Enabled'
   }
 }
 

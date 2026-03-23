@@ -517,6 +517,23 @@ if [[ -z "$VNET_NAME" && "$SECURE_MODE" == "true" ]]; then
   VNET_NAME="${NAME_PREFIX}-vnet"
 fi
 
+upsert_env_value "SECURE_DEPLOYMENT" "$SECURE_MODE"
+upsert_env_value "ACA_ENVIRONMENT_NAME" "$ACA_ENVIRONMENT_NAME"
+upsert_env_value "SECURE_ACA_SUBNET_ID" "$SECURE_ACA_SUBNET_ID"
+upsert_env_value "SECURE_PRIVATE_ENDPOINT_SUBNET_ID" "$SECURE_PRIVATE_ENDPOINT_SUBNET_ID"
+upsert_env_value "DATABRICKS_VNET_PUBLIC_SUBNET_ID" "$DATABRICKS_VNET_PUBLIC_SUBNET_ID"
+upsert_env_value "DATABRICKS_VNET_PRIVATE_SUBNET_ID" "$DATABRICKS_VNET_PRIVATE_SUBNET_ID"
+upsert_env_value "AZURE_OPENAI_ACCOUNT_NAME" "$OPENAI_ACCOUNT_NAME"
+upsert_env_value "AZURE_OPENAI_DEPLOYMENT" "$AZURE_OPENAI_DEPLOYMENT"
+upsert_env_value "AZURE_AI_FOUNDRY_ACCOUNT_NAME" "$FOUNDRY_ACCOUNT_NAME"
+upsert_env_value "AZURE_AI_FOUNDRY_PROJECT_NAME" "$FOUNDRY_PROJECT_NAME"
+upsert_env_value "DATABRICKS_WORKSPACE_NAME" "$DATABRICKS_WORKSPACE_NAME"
+upsert_env_value "DATABRICKS_RESOURCE_GROUP" "$AZURE_RESOURCE_GROUP"
+upsert_env_value "KEYVAULT_NAME" "$KEYVAULT_NAME"
+upsert_env_value "ACR_NAME" "$ACR_NAME"
+upsert_env_value "LOG_ANALYTICS_NAME" "$LOG_ANALYTICS_NAME"
+upsert_env_value "SECURE_VNET_NAME" "$VNET_NAME"
+
 if ! resource_exists "$AZURE_RESOURCE_GROUP" "$ACA_ENVIRONMENT_NAME" "Microsoft.App/managedEnvironments"; then
   if [[ "$SECURE_MODE" == "true" ]]; then
     az containerapp env create \
@@ -545,6 +562,14 @@ if ! az cognitiveservices account show -g "$AZURE_RESOURCE_GROUP" -n "$OPENAI_AC
     --custom-domain "$OPENAI_ACCOUNT_NAME" \
     --yes \
     >/dev/null
+fi
+
+if [[ -n "$ACR_NAME" ]]; then
+  az acr update \
+    --name "$ACR_NAME" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --public-network-enabled true \
+    >/dev/null 2>&1 || true
 fi
 
 if ! az cognitiveservices account deployment show \
@@ -686,6 +711,15 @@ resolved_workspace_url="$(az databricks workspace show \
   -o tsv 2>/dev/null || true)"
 if [[ -n "$resolved_workspace_url" ]]; then
   upsert_env_value "DATABRICKS_HOST" "https://${resolved_workspace_url}"
+fi
+
+openai_endpoint="$(az cognitiveservices account show \
+  -g "$AZURE_RESOURCE_GROUP" \
+  -n "$OPENAI_ACCOUNT_NAME" \
+  --query properties.endpoint \
+  -o tsv 2>/dev/null || true)"
+if [[ -n "$openai_endpoint" ]]; then
+  upsert_env_value "AZURE_OPENAI_ENDPOINT" "$openai_endpoint"
 fi
 
 cat <<EOF

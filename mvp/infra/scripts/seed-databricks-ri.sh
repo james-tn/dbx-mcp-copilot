@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
 SQL_FILE="${SQL_FILE:-$ROOT_DIR/infra/databricks/seed-databricks-ri.sql}"
+HELPER_SCRIPT="$ROOT_DIR/infra/bootstrap_helpers.py"
 DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-${SECURE_DEPLOYMENT:-false}}"
 CONTAINERAPPS_JOB_API_VERSION="${CONTAINERAPPS_JOB_API_VERSION:-2025-07-01}"
 
@@ -38,6 +39,41 @@ fi
 DATABRICKS_CATALOG="${DATABRICKS_CATALOG:-veeam_demo}"
 DATABRICKS_SKIP_CATALOG_CREATE="${DATABRICKS_SKIP_CATALOG_CREATE:-false}"
 DATABRICKS_WORKSPACE_USER_UPNS="${DATABRICKS_WORKSPACE_USER_UPNS:-}"
+SELLER_A_UPN="${SELLER_A_UPN:-}"
+SELLER_B_UPN="${SELLER_B_UPN:-}"
+
+if [[ -z "$SELLER_A_UPN" || -z "$SELLER_B_UPN" ]]; then
+  IFS=',' read -r derived_seller_a derived_seller_b _ <<<"$DATABRICKS_WORKSPACE_USER_UPNS"
+  SELLER_A_UPN="${SELLER_A_UPN:-${derived_seller_a:-}}"
+  SELLER_B_UPN="${SELLER_B_UPN:-${derived_seller_b:-}}"
+fi
+
+if [[ -z "$DATABRICKS_WORKSPACE_USER_UPNS" && -n "$SELLER_A_UPN" && -n "$SELLER_B_UPN" ]]; then
+  DATABRICKS_WORKSPACE_USER_UPNS="${SELLER_A_UPN},${SELLER_B_UPN}"
+fi
+
+if [[ -z "$SELLER_A_UPN" || -z "$SELLER_B_UPN" ]]; then
+  echo "SELLER_A_UPN and SELLER_B_UPN are required for the seed entitlements and grants." >&2
+  exit 1
+fi
+
+rendered_sql_file="$(mktemp)"
+cleanup_rendered_sql_file() {
+  rm -f "$rendered_sql_file"
+}
+trap cleanup_rendered_sql_file EXIT
+
+python_bin="python"
+if command -v python3 >/dev/null 2>&1; then
+  python_bin="python3"
+fi
+
+"$python_bin" "$HELPER_SCRIPT" render-seed-sql \
+  --template "$SQL_FILE" \
+  --output "$rendered_sql_file" \
+  --seller-a-upn "$SELLER_A_UPN" \
+  --seller-b-upn "$SELLER_B_UPN"
+SQL_FILE="$rendered_sql_file"
 
 SECURE_MODE="false"
 if [[ "${DEPLOYMENT_MODE,,}" == "secure" || "${DEPLOYMENT_MODE,,}" == "true" ]]; then

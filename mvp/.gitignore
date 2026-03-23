@@ -1,4 +1,7 @@
 .env
+.env.secure
+.env.inputs
+.env.secure.inputs
 appPackage/build/
 .claude/
 **/.claude/

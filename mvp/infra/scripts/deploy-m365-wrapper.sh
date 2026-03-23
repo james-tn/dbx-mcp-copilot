@@ -98,6 +98,18 @@ resolve_registry_settings() {
   echo "$server"$'\n'"$username"$'\n'"$password"
 }
 
+derive_demo_user_csv() {
+  if [[ -n "${WRAPPER_DEBUG_ALLOWED_UPNS:-}" ]]; then
+    printf '%s\n' "$WRAPPER_DEBUG_ALLOWED_UPNS"
+    return 0
+  fi
+  if [[ -n "${SELLER_A_UPN:-}" && -n "${SELLER_B_UPN:-}" ]]; then
+    printf '%s,%s\n' "$SELLER_A_UPN" "$SELLER_B_UPN"
+    return 0
+  fi
+  printf '\n'
+}
+
 WRAPPER_ACA_APP_NAME="${WRAPPER_ACA_APP_NAME:-daily-planner-m365}"
 SECURE_MODE="false"
 if [[ "${DEPLOYMENT_MODE,,}" == "secure" || "${DEPLOYMENT_MODE,,}" == "true" ]]; then
@@ -177,6 +189,7 @@ if [[ -z "${PLANNER_SERVICE_BASE_URL:-}" ]]; then
   exit 1
 fi
 
+demo_debug_allowed_upns="$(derive_demo_user_csv)"
 common_env_vars=(
   "AZURE_TENANT_ID=$AZURE_TENANT_ID"
   "BOT_APP_ID=$BOT_APP_ID"
@@ -191,7 +204,7 @@ common_env_vars=(
   "WRAPPER_LONG_RUNNING_ACK_THRESHOLD_SECONDS=${WRAPPER_LONG_RUNNING_ACK_THRESHOLD_SECONDS:-10}"
   "WRAPPER_ENABLE_LONG_RUNNING_MESSAGES=${WRAPPER_ENABLE_LONG_RUNNING_MESSAGES:-true}"
   "WRAPPER_ENABLE_DEBUG_CHAT=${WRAPPER_ENABLE_DEBUG_CHAT:-$SECURE_MODE}"
-  "WRAPPER_DEBUG_ALLOWED_UPNS=${WRAPPER_DEBUG_ALLOWED_UPNS:-ri-test-na@m365cpi89838450.onmicrosoft.com,DaichiM@M365CPI89838450.OnMicrosoft.com}"
+  "WRAPPER_DEBUG_ALLOWED_UPNS=${demo_debug_allowed_upns}"
   "WRAPPER_DEBUG_EXPECTED_AUDIENCE=${WRAPPER_DEBUG_EXPECTED_AUDIENCE:-${BOT_SSO_RESOURCE:-api://botid-${BOT_APP_ID}}}"
 )
 

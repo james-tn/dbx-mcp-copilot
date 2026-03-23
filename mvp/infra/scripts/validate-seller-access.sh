@@ -22,8 +22,16 @@ if [[ -z "${SELLER_A_TOKEN:-}" || -z "${SELLER_B_TOKEN:-}" ]]; then
   exit 1
 fi
 
-SELLER_A_UPN="${SELLER_A_UPN:-ri-test-na@m365cpi89838450.onmicrosoft.com}"
-SELLER_B_UPN="${SELLER_B_UPN:-DaichiM@M365CPI89838450.OnMicrosoft.com}"
+if [[ -z "${SELLER_A_UPN:-}" || -z "${SELLER_B_UPN:-}" ]]; then
+  IFS=',' read -r derived_seller_a derived_seller_b _ <<<"${DATABRICKS_WORKSPACE_USER_UPNS:-}"
+  SELLER_A_UPN="${SELLER_A_UPN:-${derived_seller_a:-}}"
+  SELLER_B_UPN="${SELLER_B_UPN:-${derived_seller_b:-}}"
+fi
+
+if [[ -z "${SELLER_A_UPN:-}" || -z "${SELLER_B_UPN:-}" ]]; then
+  echo "SELLER_A_UPN and SELLER_B_UPN are required in $ENV_FILE or the environment." >&2
+  exit 1
+fi
 
 call_debug_chat() {
   local bearer_token="$1"
