@@ -8,6 +8,8 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import sentinel
 
+from agent_framework.exceptions import ChatClientException
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from planner import (
@@ -18,6 +20,7 @@ from planner import (
     _apply_handoff_store_workaround,
     create_runtime_planner_agent,
     extract_reply_from_workflow_result,
+    extract_routed_agent_from_workflow_result,
 )
 
 
@@ -132,6 +135,15 @@ def test_extract_reply_from_workflow_result_uses_request_info_response() -> None
     assert extract_reply_from_workflow_result(result) == "Briefing reply"
 
 
+def test_extract_routed_agent_from_workflow_result_uses_last_output_executor() -> None:
+    result = [
+        SimpleNamespace(type="output", executor_id="daily_account_planner", data="router"),
+        SimpleNamespace(type="output", executor_id="AccountPulse", data="briefing"),
+    ]
+
+    assert extract_routed_agent_from_workflow_result(result) == "AccountPulse"
+
+
 def test_runtime_workflow_wrapper_returns_extracted_reply(monkeypatch) -> None:
     client = _FakeResponsesClient()
     fake_workflow = _FakeWorkflow(
@@ -150,6 +162,33 @@ def test_runtime_workflow_wrapper_returns_extracted_reply(monkeypatch) -> None:
 
     assert result.text == "Next Move reply"
     assert fake_workflow.calls == [{"message": "Where should I focus?"}]
+
+
+def test_runtime_workflow_wrapper_retries_rate_limited_runs(monkeypatch) -> None:
+    class _RetryWorkflow:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, *, message=None, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise ChatClientException("Error code: 429 - {'error': {'code': 'too_many_requests'}}")
+            return SimpleNamespace(
+                get_request_info_events=lambda: [
+                    SimpleNamespace(data=SimpleNamespace(agent_response=SimpleNamespace(text="Recovered reply", messages=[])))
+                ],
+                get_outputs=lambda: [],
+            )
+
+    workflow = _RetryWorkflow()
+    monkeypatch.setattr("planner.create_runtime_planner_workflow", lambda _: workflow)
+
+    agent = create_runtime_planner_agent(_FakeResponsesClient())
+    session = agent.create_session()
+    result = asyncio.run(agent.run("Give me my morning briefing", session=session))
+
+    assert result.text == "Recovered reply"
+    assert workflow.calls == 2
 
 
 def test_handoff_store_workaround_enables_store_for_responses_clients(monkeypatch) -> None:

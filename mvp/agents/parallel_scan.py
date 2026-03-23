@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -25,23 +26,28 @@ try:
         get_account_pulse_execution_mode,
         get_account_pulse_internal_aggregator_enabled,
         get_account_pulse_max_concurrency,
+        get_account_pulse_model_concurrency,
         get_account_pulse_replay_fixture_set,
         get_account_pulse_source_mode,
     )
+    from .resilience import run_with_rate_limit_retry
 except ImportError:
     from config import (
         get_account_pulse_execution_mode,
         get_account_pulse_internal_aggregator_enabled,
         get_account_pulse_max_concurrency,
+        get_account_pulse_model_concurrency,
         get_account_pulse_replay_fixture_set,
         get_account_pulse_source_mode,
     )
+    from resilience import run_with_rate_limit_retry
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "tools"))
 
 from edgar_lookup import edgar_lookup as _edgar_lookup
 
 _FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "account_pulse_replay.json"
+logger = logging.getLogger(__name__)
 
 _TIER1_KEYWORDS = (
     "ransomware",
@@ -398,7 +404,10 @@ async def _run_worker_agent(
         tools=tools,
     )
     started_at = time.perf_counter()
-    response = await worker.run(f"Scan the assigned parent now: {target.parent_name}")
+    response = await run_with_rate_limit_retry(
+        f"account-pulse-worker:{target.parent_name}",
+        lambda: worker.run(f"Scan the assigned parent now: {target.parent_name}"),
+    )
     timing_ms = (time.perf_counter() - started_at) * 1000.0
     payload = _loads_json(response.text)
     model = WorkerScanResult.model_validate(payload)
@@ -426,7 +435,10 @@ async def _aggregate_signals_with_agent(
         tools=[],
     )
     payload = {"signals": [signal.model_dump(mode="json") for signal in signals]}
-    response = await aggregator.run(_json_dumps(payload))
+    response = await run_with_rate_limit_retry(
+        "account-pulse-aggregator",
+        lambda: aggregator.run(_json_dumps(payload)),
+    )
     parsed = _loads_json(response.text)
     signal_rows = parsed.get("signals", []) if isinstance(parsed, dict) else []
     return [AggregatedSignal.model_validate(row) for row in signal_rows]
@@ -464,6 +476,7 @@ async def run_scan_targets(
     worker_runner: Callable[[ScanTarget], Any] | None = None,
     aggregator_runner: Callable[[Sequence[CandidateSignal]], Any] | None = None,
 ) -> ScanBundle:
+    started = time.perf_counter()
     validated_targets = [
         target if isinstance(target, ScanTarget) else ScanTarget.model_validate(target)
         for target in scan_targets
@@ -475,10 +488,16 @@ async def run_scan_targets(
     active_source_mode = source_mode or get_account_pulse_source_mode()
     active_max_concurrency = max_concurrency or get_account_pulse_max_concurrency()
     effective_concurrency = 1 if active_execution_mode == "legacy_sequential" else max(1, active_max_concurrency)
+    active_model_concurrency = min(
+        effective_concurrency,
+        get_account_pulse_model_concurrency(),
+    )
+    active_model_concurrency = max(1, min(effective_concurrency, active_model_concurrency))
     fixture_name = replay_fixture_set_name or get_account_pulse_replay_fixture_set()
     replay_fixture_set = load_replay_fixture_set(fixture_name) if active_source_mode == "replay" else None
 
     semaphore = asyncio.Semaphore(effective_concurrency)
+    model_semaphore = asyncio.Semaphore(active_model_concurrency)
     state = _ParallelRuntimeState()
     state_lock = asyncio.Lock()
     worker_results: list[WorkerScanResult] = []
@@ -496,12 +515,13 @@ async def run_scan_targets(
                     maybe_result = worker_runner(target)
                     result = await maybe_result if asyncio.iscoroutine(maybe_result) else maybe_result
                 else:
-                    result = await _run_worker_agent(
-                        client,
-                        target,
-                        source_mode=active_source_mode,
-                        replay_fixture_set=replay_fixture_set,
-                    )
+                    async with model_semaphore:
+                        result = await _run_worker_agent(
+                            client,
+                            target,
+                            source_mode=active_source_mode,
+                            replay_fixture_set=replay_fixture_set,
+                        )
                 model = result if isinstance(result, WorkerScanResult) else WorkerScanResult.model_validate(result)
                 worker_results.append(model)
                 diagnostics.append(
@@ -587,7 +607,7 @@ async def run_scan_targets(
         )
     )
 
-    return ScanBundle(
+    bundle = ScanBundle(
         scan_targets_total=len(validated_targets),
         scan_targets_completed=len(completed_parents),
         scan_targets_failed=len(validated_targets) - len(completed_parents),
@@ -598,6 +618,24 @@ async def run_scan_targets(
         duplicate_signal_count=duplicate_signal_count,
         malformed_worker_count=malformed_worker_count,
     )
+    logger.info(
+        "Account Pulse parallel scan bundle created.",
+        extra={
+            "execution_mode": active_execution_mode,
+            "source_mode": active_source_mode,
+            "scan_targets_total": bundle.scan_targets_total,
+            "scan_targets_completed": bundle.scan_targets_completed,
+            "scan_targets_failed": bundle.scan_targets_failed,
+            "signal_count": len(bundle.signals),
+            "quiet_account_count": len(bundle.quiet_accounts),
+            "max_observed_concurrency": bundle.max_observed_concurrency,
+            "model_concurrency_limit": active_model_concurrency,
+            "duplicate_signal_count": bundle.duplicate_signal_count,
+            "malformed_worker_count": bundle.malformed_worker_count,
+            "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 1),
+        },
+    )
+    return bundle
 
 
 def build_scan_parents_parallel_tool(

@@ -19,9 +19,11 @@ import agent_framework_orchestrations._handoff as _handoff_module
 try:
     from .account_pulse import create_account_pulse_agent
     from .next_move import create_next_move_agent
+    from .resilience import run_with_rate_limit_retry
 except ImportError:
     from account_pulse import create_account_pulse_agent
     from next_move import create_next_move_agent
+    from resilience import run_with_rate_limit_retry
 
 PLANNER_INSTRUCTIONS = """You are the Daily Account Planner for Veeam field sellers.
 
@@ -163,6 +165,15 @@ def extract_reply_from_workflow_result(result: Any) -> str:
     return ""
 
 
+def extract_routed_agent_from_workflow_result(result: Any) -> str | None:
+    """Best-effort extraction of the workflow executor that produced the final output."""
+    last_executor_id: str | None = None
+    for event in result or []:
+        if getattr(event, "type", None) == "output" and getattr(event, "executor_id", None):
+            last_executor_id = str(event.executor_id)
+    return last_executor_id
+
+
 class PlannerWorkflowAgent:
     """Session-scoped handoff workflow wrapper with the familiar agent API."""
 
@@ -180,7 +191,10 @@ class PlannerWorkflowAgent:
         **kwargs: Any,
     ) -> PlannerWorkflowResponse:
         active_session = session or self.create_session()
-        result = await active_session.workflow.run(message=messages, **kwargs)
+        result = await run_with_rate_limit_retry(
+            "planner-workflow",
+            lambda: active_session.workflow.run(message=messages, **kwargs),
+        )
         reply = extract_reply_from_workflow_result(result)
         return PlannerWorkflowResponse(text=reply, raw_result=result)
 

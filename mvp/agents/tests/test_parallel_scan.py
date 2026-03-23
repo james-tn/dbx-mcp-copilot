@@ -130,6 +130,43 @@ def test_run_scan_targets_dynamic_parallel_respects_cap() -> None:
     assert bundle.max_observed_concurrency <= 3
 
 
+def test_run_scan_targets_respects_model_concurrency_cap(monkeypatch) -> None:
+    state = {"active": 0, "max": 0}
+
+    async def fake_run_worker_agent(client, target, *, source_mode, replay_fixture_set):
+        state["active"] += 1
+        state["max"] = max(state["max"], state["active"])
+        await asyncio.sleep(0.01)
+        state["active"] -= 1
+        return WorkerScanResult(
+            parent_name=target.parent_name,
+            child_accounts=list(target.child_accounts),
+            candidate_signals=[],
+            source_errors=[],
+            timing_ms=10.0,
+            raw_sources_summary={},
+        )
+
+    monkeypatch.setattr("parallel_scan._run_worker_agent", fake_run_worker_agent)
+    monkeypatch.setattr("parallel_scan.get_account_pulse_model_concurrency", lambda: 2)
+
+    bundle = asyncio.run(
+        run_scan_targets(
+            client=object(),
+            scan_targets=[
+                {"parent_name": f"Parent {i}", "child_accounts": [f"Account {i}"], "segment": "ENT", "relationship_context": {}, "scan_mode": "full"}
+                for i in range(6)
+            ],
+            execution_mode="dynamic_parallel",
+            max_concurrency=6,
+            aggregator_runner=_aggregator_runner,
+        )
+    )
+
+    assert state["max"] <= 2
+    assert bundle.max_observed_concurrency <= 6
+
+
 def test_run_scan_targets_dedupes_and_tracks_quiet_accounts() -> None:
     async def worker_runner(target):
         if target.parent_name == "Quiet Parent":
