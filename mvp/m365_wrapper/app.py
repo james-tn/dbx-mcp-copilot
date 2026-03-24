@@ -82,6 +82,8 @@ AUTH_RETRY_MESSAGE = (
 UNAVAILABLE_MESSAGE = "Daily Account Planner is temporarily unavailable. Please try again in a moment."
 WORKING_MESSAGE = "I'm still working on this request. It may take some time."
 BUSY_MESSAGE = "I'm still working on your previous request. I'll send the result here when it's ready."
+CHANNEL_SEND_RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+CHANNEL_SEND_MAX_ATTEMPTS = 3
 
 
 class SessionBusyError(RuntimeError):
@@ -98,6 +100,58 @@ class DebugChatResponse(BaseModel):
     reply: str
     user_id: str
     upn: str | None = None
+
+
+def _channel_send_status_code(exc: Exception) -> int | None:
+    for attribute_name in ("status", "status_code"):
+        value = getattr(exc, attribute_name, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def _is_retryable_channel_send_error(exc: Exception) -> bool:
+    status_code = _channel_send_status_code(exc)
+    return status_code in CHANNEL_SEND_RETRYABLE_STATUS_CODES
+
+
+async def _send_activity_with_retry(
+    context: Any,
+    activity_or_text: Any,
+    *,
+    session_id: str,
+    auth_handler_id: str,
+    purpose: str,
+) -> bool:
+    for attempt in range(1, CHANNEL_SEND_MAX_ATTEMPTS + 1):
+        try:
+            await context.send_activity(activity_or_text)
+            return True
+        except Exception as exc:
+            if attempt >= CHANNEL_SEND_MAX_ATTEMPTS or not _is_retryable_channel_send_error(exc):
+                logger.exception(
+                    "Wrapper failed to send channel activity.",
+                    extra={
+                        "session_id": session_id,
+                        "auth_handler_id": auth_handler_id,
+                        "purpose": purpose,
+                        "attempt": attempt,
+                        "status_code": _channel_send_status_code(exc),
+                    },
+                )
+                return False
+            logger.warning(
+                "Wrapper send_activity hit transient channel failure; retrying.",
+                extra={
+                    "session_id": session_id,
+                    "auth_handler_id": auth_handler_id,
+                    "purpose": purpose,
+                    "attempt": attempt,
+                    "status_code": _channel_send_status_code(exc),
+                },
+            )
+            await asyncio.sleep(0.5 * attempt)
+    return False
 
 
 def _get_agents_sdk_versions() -> dict[str, str]:
@@ -160,6 +214,22 @@ def _validate_long_running_adapter(adapter: Any, bot_app_id: str) -> inspect.Sig
     return signature
 
 
+def _build_resumed_message_activity(original_activity: Any, proactive_activity: Any) -> Any:
+    """Restore the original inbound message shape without preserving a stale reply target."""
+
+    resumed_activity = copy(original_activity)
+    resumed_activity.relates_to = getattr(
+        proactive_activity,
+        "relates_to",
+        getattr(resumed_activity, "relates_to", None),
+    )
+    # Keep routing/auth inputs from the original message, but force outbound sends to
+    # use the proactive conversation context instead of replying to an old activity id.
+    resumed_activity.id = None
+    resumed_activity.reply_to_id = None
+    return resumed_activity
+
+
 class CompatAgentApplication(AgentApplication):
     """Local compatibility wrapper for the broken SDK proactive long-running bridge."""
 
@@ -211,13 +281,10 @@ class CompatAgentApplication(AgentApplication):
 
             async def _resume_with_original_activity(proactive_context: TurnContext) -> Any:
                 resumed_context = copy(proactive_context)
-                resumed_activity = copy(original_activity)
-                resumed_activity.relates_to = getattr(
+                resumed_context.activity = _build_resumed_message_activity(
+                    original_activity,
                     proactive_context.activity,
-                    "relates_to",
-                    getattr(resumed_activity, "relates_to", None),
                 )
-                resumed_context.activity = resumed_activity
                 return await func(resumed_context)
 
             return await self._adapter.continue_conversation(
@@ -242,6 +309,7 @@ class WrapperRuntime:
         self.ack_threshold_seconds = ack_threshold_seconds
         self._busy_sessions: set[str] = set()
         self._busy_lock = asyncio.Lock()
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     async def forward_message(
         self,
@@ -266,6 +334,15 @@ class WrapperRuntime:
     async def finish_turn(self, session_id: str) -> None:
         async with self._busy_lock:
             self._busy_sessions.discard(session_id)
+
+    def track_background_task(self, task: asyncio.Task[Any]) -> None:
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def wait_for_background_tasks(self) -> None:
+        if not self._background_tasks:
+            return
+        await asyncio.gather(*tuple(self._background_tasks), return_exceptions=True)
 
 
 @asynccontextmanager
@@ -309,12 +386,153 @@ def _map_planner_exception(exc: Exception) -> str:
     return UNAVAILABLE_MESSAGE
 
 
+async def _await_planner_reply(
+    planner_task: asyncio.Task[str],
+    *,
+    session_id: str,
+    auth_handler_id: str,
+    after_ack: bool,
+) -> tuple[str, str]:
+    try:
+        return await planner_task, "none"
+    except Exception as exc:
+        failure_reason = exc.__class__.__name__
+        if after_ack:
+            logger.exception(
+                "Wrapper planner call failed after delayed acknowledgement.",
+                extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+            )
+        elif isinstance(exc, PlannerServiceAuthError):
+            logger.warning(
+                "Wrapper planner call hit auth error.",
+                extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+            )
+        elif isinstance(exc, httpx.TimeoutException):
+            logger.warning(
+                "Wrapper planner call timed out.",
+                extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+            )
+        else:
+            logger.exception(
+                "Wrapper planner call failed before acknowledgement threshold.",
+                extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+            )
+        return _map_planner_exception(exc), failure_reason
+
+
+def _build_continuation_activity(context: Any, *, session_id: str, auth_handler_id: str) -> Any | None:
+    activity = getattr(context, "activity", None)
+    if activity is None:
+        return None
+    try:
+        reference = activity.get_conversation_reference()
+        return reference.get_continuation_activity()
+    except Exception:
+        logger.exception(
+            "Wrapper could not create a continuation activity for deferred delivery.",
+            extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+        )
+        return None
+
+
+async def _send_proactive_activity(
+    *,
+    adapter: Any,
+    bot_app_id: str,
+    continuation_activity: Any,
+    activity_or_text: Any,
+    session_id: str,
+    auth_handler_id: str,
+    purpose: str,
+) -> bool:
+    delivered = False
+
+    async def _callback(proactive_context: TurnContext) -> bool:
+        nonlocal delivered
+        delivered = await _send_activity_with_retry(
+            proactive_context,
+            activity_or_text,
+            session_id=session_id,
+            auth_handler_id=auth_handler_id,
+            purpose=purpose,
+        )
+        return delivered
+
+    try:
+        await adapter.continue_conversation(
+            bot_app_id,
+            continuation_activity,
+            _callback,
+        )
+    except Exception:
+        logger.exception(
+            "Wrapper failed to resume the conversation for deferred delivery.",
+            extra={"session_id": session_id, "auth_handler_id": auth_handler_id, "purpose": purpose},
+        )
+        return False
+
+    return delivered
+
+
+async def _complete_deferred_turn(
+    *,
+    runtime: WrapperRuntime,
+    planner_task: asyncio.Task[str],
+    adapter: Any,
+    bot_app_id: str,
+    continuation_activity: Any,
+    session_id: str,
+    auth_handler_id: str,
+    started: float,
+) -> None:
+    failure_reason = "none"
+    try:
+        reply, failure_reason = await _await_planner_reply(
+            planner_task,
+            session_id=session_id,
+            auth_handler_id=auth_handler_id,
+            after_ack=True,
+        )
+        delivered = await _send_proactive_activity(
+            adapter=adapter,
+            bot_app_id=bot_app_id,
+            continuation_activity=continuation_activity,
+            activity_or_text=reply or UNAVAILABLE_MESSAGE,
+            session_id=session_id,
+            auth_handler_id=auth_handler_id,
+            purpose="planner_reply",
+        )
+        if not delivered:
+            failure_reason = "channel_delivery_failed"
+    except Exception:
+        failure_reason = "unexpected_background_error"
+        logger.exception(
+            "Wrapper deferred delivery failed unexpectedly.",
+            extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+        )
+    finally:
+        await runtime.finish_turn(session_id)
+        logger.info(
+            "Wrapper turn completed.",
+            extra={
+                "session_id": session_id,
+                "auth_handler_id": auth_handler_id,
+                "long_running_enabled": runtime.long_running_messages_enabled,
+                "ack_sent": True,
+                "failure_reason": failure_reason,
+                "planner_elapsed_ms": round((time.perf_counter() - started) * 1000.0, 1),
+            },
+        )
+
+
 async def handle_wrapper_message(
     *,
     context: Any,
     agent_auth: _AgentAuth,
     runtime: WrapperRuntime,
     auth_handler_id: str,
+    delivery_adapter: Any | None = None,
+    delivery_bot_app_id: str = "",
 ) -> None:
     text = (context.activity.text or "").strip()
     if not text:
@@ -330,12 +548,26 @@ async def handle_wrapper_message(
                 ).strip(),
             },
         )
-        await context.send_activity(READY_MESSAGE)
+        await _send_activity_with_retry(
+            context,
+            READY_MESSAGE,
+            session_id=str(
+                getattr(getattr(context.activity, "conversation", None), "id", "") or ""
+            ).strip(),
+            auth_handler_id="none",
+            purpose="ready_message",
+        )
         return
 
     session_id = str(getattr(getattr(context.activity, "conversation", None), "id", "") or "").strip()
     if not session_id:
-        await context.send_activity(UNAVAILABLE_MESSAGE)
+        await _send_activity_with_retry(
+            context,
+            UNAVAILABLE_MESSAGE,
+            session_id="",
+            auth_handler_id=auth_handler_id,
+            purpose="missing_session_unavailable_message",
+        )
         return
 
     try:
@@ -346,16 +578,30 @@ async def handle_wrapper_message(
             "Wrapper token acquisition failed.",
             extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
         )
-        await context.send_activity(UNAVAILABLE_MESSAGE)
+        await _send_activity_with_retry(
+            context,
+            UNAVAILABLE_MESSAGE,
+            session_id=session_id,
+            auth_handler_id=auth_handler_id,
+            purpose="token_failure_unavailable_message",
+        )
         return
 
     if not planner_access_token:
-        await context.send_activity(SIGN_IN_MESSAGE)
+        await _send_activity_with_retry(
+            context,
+            SIGN_IN_MESSAGE,
+            session_id=session_id,
+            auth_handler_id=auth_handler_id,
+            purpose="sign_in_message",
+        )
         return
 
     started = time.perf_counter()
     ack_sent = False
     failure_reason = "none"
+    completion_deferred = False
+    response_already_delivered = False
     logger.info(
         "Wrapper turn started.",
         extra={
@@ -366,89 +612,162 @@ async def handle_wrapper_message(
         },
     )
     try:
-        async with _reserve_turn_slot(runtime, session_id):
-            planner_task = asyncio.create_task(
-                runtime.forward_message(
-                    session_id=session_id,
-                    text=text,
-                    planner_access_token=planner_access_token,
+        if not await runtime.try_begin_turn(session_id):
+            logger.info(
+                "Wrapper rejected message while session was busy.",
+                extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+            )
+            await _send_activity_with_retry(
+                context,
+                BUSY_MESSAGE,
+                session_id=session_id,
+                auth_handler_id=auth_handler_id,
+                purpose="busy_message",
+            )
+            return
+
+        planner_task = asyncio.create_task(
+            runtime.forward_message(
+                session_id=session_id,
+                text=text,
+                planner_access_token=planner_access_token,
+            )
+        )
+
+        try:
+            if runtime.long_running_messages_enabled:
+                reply = await asyncio.wait_for(
+                    asyncio.shield(planner_task),
+                    timeout=runtime.ack_threshold_seconds,
                 )
+            else:
+                reply = await planner_task
+        except asyncio.TimeoutError:
+            ack_sent = True
+            logger.warning(
+                "Wrapper crossed long-running acknowledgement threshold.",
+                extra={
+                    "session_id": session_id,
+                    "auth_handler_id": auth_handler_id,
+                    "ack_threshold_seconds": runtime.ack_threshold_seconds,
+                },
+            )
+            continuation_activity = _build_continuation_activity(
+                context,
+                session_id=session_id,
+                auth_handler_id=auth_handler_id,
+            )
+            await _send_activity_with_retry(
+                context,
+                WORKING_MESSAGE,
+                session_id=session_id,
+                auth_handler_id=auth_handler_id,
+                purpose="working_message",
             )
 
-            try:
-                if runtime.long_running_messages_enabled:
-                    reply = await asyncio.wait_for(
-                        asyncio.shield(planner_task),
-                        timeout=runtime.ack_threshold_seconds,
+            if continuation_activity is None or delivery_adapter is None or not delivery_bot_app_id:
+                reply, failure_reason = await _await_planner_reply(
+                    planner_task,
+                    session_id=session_id,
+                    auth_handler_id=auth_handler_id,
+                    after_ack=True,
+                )
+                delivered = await _send_activity_with_retry(
+                    context,
+                    reply or UNAVAILABLE_MESSAGE,
+                    session_id=session_id,
+                    auth_handler_id=auth_handler_id,
+                    purpose="planner_reply",
+                )
+                if not delivered:
+                    failure_reason = "channel_delivery_failed"
+                response_already_delivered = True
+            else:
+                completion_deferred = True
+                logger.info(
+                    "Wrapper deferred the final reply to background proactive delivery.",
+                    extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+                )
+                runtime.track_background_task(
+                    asyncio.create_task(
+                        _complete_deferred_turn(
+                            runtime=runtime,
+                            planner_task=planner_task,
+                            adapter=delivery_adapter,
+                            bot_app_id=delivery_bot_app_id,
+                            continuation_activity=continuation_activity,
+                            session_id=session_id,
+                            auth_handler_id=auth_handler_id,
+                            started=started,
+                        )
                     )
-                else:
-                    reply = await planner_task
-            except asyncio.TimeoutError:
-                ack_sent = True
-                logger.warning(
-                    "Wrapper crossed long-running acknowledgement threshold.",
+                )
+                logger.info(
+                    "Wrapper turn handed off for deferred completion.",
                     extra={
                         "session_id": session_id,
                         "auth_handler_id": auth_handler_id,
-                        "ack_threshold_seconds": runtime.ack_threshold_seconds,
+                        "long_running_enabled": runtime.long_running_messages_enabled,
+                        "ack_sent": ack_sent,
                     },
                 )
-                await context.send_activity(WORKING_MESSAGE)
-                try:
-                    reply = await planner_task
-                except Exception as exc:
-                    failure_reason = exc.__class__.__name__
-                    logger.exception(
-                        "Wrapper planner call failed after delayed acknowledgement.",
-                        extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
-                    )
-                    reply = _map_planner_exception(exc)
-            except Exception as exc:
-                failure_reason = exc.__class__.__name__
-                if isinstance(exc, PlannerServiceAuthError):
-                    logger.warning(
-                        "Wrapper planner call hit auth error.",
-                        extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
-                    )
-                elif isinstance(exc, httpx.TimeoutException):
-                    logger.warning(
-                        "Wrapper planner call timed out.",
-                        extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
-                    )
-                else:
-                    logger.exception(
-                        "Wrapper planner call failed before acknowledgement threshold.",
-                        extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
-                    )
-                reply = _map_planner_exception(exc)
+                return
+        except Exception as exc:
+            failure_reason = exc.__class__.__name__
+            if isinstance(exc, PlannerServiceAuthError):
+                logger.warning(
+                    "Wrapper planner call hit auth error.",
+                    extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+                )
+            elif isinstance(exc, httpx.TimeoutException):
+                logger.warning(
+                    "Wrapper planner call timed out.",
+                    extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+                )
+            else:
+                logger.exception(
+                    "Wrapper planner call failed before acknowledgement threshold.",
+                    extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
+            )
+            reply = _map_planner_exception(exc)
 
-            await context.send_activity(reply or UNAVAILABLE_MESSAGE)
-    except SessionBusyError:
-        logger.info(
-            "Wrapper rejected message while session was busy.",
-            extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
-        )
-        await context.send_activity(BUSY_MESSAGE)
-        return
+        if not response_already_delivered:
+            delivered = await _send_activity_with_retry(
+                context,
+                reply or UNAVAILABLE_MESSAGE,
+                session_id=session_id,
+                auth_handler_id=auth_handler_id,
+                purpose="planner_reply",
+            )
+            if not delivered:
+                failure_reason = "channel_delivery_failed"
     except Exception:
         failure_reason = "unexpected_wrapper_error"
         logger.exception(
             "Wrapper turn failed unexpectedly.",
             extra={"session_id": session_id, "auth_handler_id": auth_handler_id},
         )
-        await context.send_activity(UNAVAILABLE_MESSAGE)
-    finally:
-        logger.info(
-            "Wrapper turn completed.",
-            extra={
-                "session_id": session_id,
-                "auth_handler_id": auth_handler_id,
-                "long_running_enabled": runtime.long_running_messages_enabled,
-                "ack_sent": ack_sent,
-                "failure_reason": failure_reason,
-                "planner_elapsed_ms": round((time.perf_counter() - started) * 1000.0, 1),
-            },
+        await _send_activity_with_retry(
+            context,
+            UNAVAILABLE_MESSAGE,
+            session_id=session_id,
+            auth_handler_id=auth_handler_id,
+            purpose="unexpected_wrapper_error_message",
         )
+    finally:
+        if not completion_deferred:
+            await runtime.finish_turn(session_id)
+            logger.info(
+                "Wrapper turn completed.",
+                extra={
+                    "session_id": session_id,
+                    "auth_handler_id": auth_handler_id,
+                    "long_running_enabled": runtime.long_running_messages_enabled,
+                    "ack_sent": ack_sent,
+                    "failure_reason": failure_reason,
+                    "planner_elapsed_ms": round((time.perf_counter() - started) * 1000.0, 1),
+                },
+            )
 
 
 async def acknowledge_invoke_activity(context: Any) -> None:
@@ -485,13 +804,14 @@ def create_app() -> FastAPI:
         auth_handlers=auth_handlers,
     )
     adapter = CloudAdapter(connection_manager=connection_manager)
+    bot_app_id = get_bot_app_id()
     long_running_messages_enabled = get_wrapper_long_running_messages_enabled()
     agent_app = CompatAgentApplication(
         options=ApplicationOptions(
             adapter=adapter,
             storage=storage,
-            bot_app_id=get_bot_app_id(),
-            long_running_messages=long_running_messages_enabled,
+            bot_app_id=bot_app_id,
+            long_running_messages=False,
         ),
         connection_manager=connection_manager,
         authorization=authorization,
@@ -515,10 +835,19 @@ def create_app() -> FastAPI:
             agent_auth=agent_app.auth,
             runtime=runtime,
             auth_handler_id=auth_handler_id,
+            delivery_adapter=adapter,
+            delivery_bot_app_id=bot_app_id,
         )
 
     async def _handle_non_message(context, state):
-        await context.send_activity(READY_MESSAGE)
+        session_id = str(getattr(getattr(context.activity, "conversation", None), "id", "") or "").strip()
+        await _send_activity_with_retry(
+            context,
+            READY_MESSAGE,
+            session_id=session_id,
+            auth_handler_id="none",
+            purpose="non_message_ready_message",
+        )
 
     async def _handle_invoke(context, state):
         await acknowledge_invoke_activity(context)
@@ -532,7 +861,13 @@ def create_app() -> FastAPI:
             exc_info=(type(err), err, err.__traceback__),
         )
         try:
-            await context.send_activity(UNAVAILABLE_MESSAGE)
+            await _send_activity_with_retry(
+                context,
+                UNAVAILABLE_MESSAGE,
+                session_id=session_id,
+                auth_handler_id="none",
+                purpose="sdk_error_unavailable_message",
+            )
         except Exception:
             logger.exception(
                 "Wrapper failed to send fallback error message.",

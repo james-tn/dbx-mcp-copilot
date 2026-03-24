@@ -36,15 +36,33 @@ from m365_wrapper.planner_client import PlannerServiceAuthError, PlannerServiceE
 
 
 class FakeContext:
-    def __init__(self, *, text: str, session_id: str = "conversation-1", activity_type: str = "message") -> None:
+    def __init__(
+        self,
+        *,
+        text: str,
+        session_id: str = "conversation-1",
+        activity_type: str = "message",
+        send_errors: list[Exception] | None = None,
+    ) -> None:
+        continuation_activity = SimpleNamespace(
+            type="event",
+            id=f"continuation-{session_id}",
+            conversation=SimpleNamespace(id=session_id),
+            relates_to=f"conversation-ref-{session_id}",
+        )
+        reference = SimpleNamespace(get_continuation_activity=lambda: continuation_activity)
         self.activity = SimpleNamespace(
             type=activity_type,
             text=text,
             conversation=SimpleNamespace(id=session_id),
+            get_conversation_reference=lambda: reference,
         )
         self.sent_messages: list[str] = []
+        self.send_errors = list(send_errors or [])
 
     async def send_activity(self, message: str) -> None:
+        if self.send_errors:
+            raise self.send_errors.pop(0)
         self.sent_messages.append(message)
 
 
@@ -59,6 +77,12 @@ class FakeInvokeContext:
 
     async def send_activity(self, message: object) -> None:
         self.sent_messages.append(message)
+
+
+class RetryableChannelError(RuntimeError):
+    def __init__(self, status: int) -> None:
+        super().__init__(f"status={status}")
+        self.status = status
 
 
 class FakeAgentAuth:
@@ -130,6 +154,21 @@ class ContinueConversationSpy:
 class FakeAdapter:
     def __init__(self, callback_context) -> None:
         self.continue_conversation = ContinueConversationSpy(callback_context)
+
+
+class DeferredDeliveryAdapter:
+    def __init__(self, *, session_id: str) -> None:
+        self.context = FakeContext(text="", session_id=session_id, activity_type="event")
+        self.calls: list[dict[str, object]] = []
+
+    async def continue_conversation(self, bot_app_id, continuation_activity, callback):
+        self.calls.append(
+            {
+                "bot_app_id": bot_app_id,
+                "continuation_activity": continuation_activity,
+            }
+        )
+        return await callback(self.context)
 
 
 def test_compat_agent_application_uses_activity_reference_and_positional_adapter_call() -> None:
@@ -219,6 +258,7 @@ def test_compat_agent_application_restores_original_message_activity_for_callbac
     assert result == "ok"
     assert seen["context"] is not callback_context
     assert seen["activity"] is not original_activity
+    assert seen["activity"].id is None
     assert seen["activity"].type == "message"
     assert seen["activity"].text == "morning briefing please"
     assert seen["activity"].relates_to == "continuation-ref"
@@ -380,6 +420,38 @@ def test_handle_wrapper_message_sends_delayed_ack_for_long_running_requests() ->
     assert context.sent_messages == [WORKING_MESSAGE, "full briefing"]
 
 
+def test_handle_wrapper_message_defers_final_reply_to_background_delivery_when_adapter_is_available() -> None:
+    runtime = WrapperRuntime(
+        FakeClient(reply="full briefing", delay_seconds=0.05),
+        long_running_messages_enabled=True,
+        ack_threshold_seconds=0.01,
+    )
+    context = FakeContext(text="Give me my morning briefing")
+    auth = FakeAgentAuth()
+    adapter = DeferredDeliveryAdapter(session_id="conversation-1")
+
+    async def _run() -> None:
+        await handle_wrapper_message(
+            context=context,
+            agent_auth=auth,
+            runtime=runtime,
+            auth_handler_id="planner_api_connector",
+            delivery_adapter=adapter,
+            delivery_bot_app_id="bot-app-id",
+        )
+
+        assert context.sent_messages == [WORKING_MESSAGE]
+        assert "conversation-1" in runtime._busy_sessions
+
+        await runtime.wait_for_background_tasks()
+
+    asyncio.run(_run())
+
+    assert adapter.context.sent_messages == ["full briefing"]
+    assert adapter.calls[0]["bot_app_id"] == "bot-app-id"
+    assert "conversation-1" not in runtime._busy_sessions
+
+
 def test_handle_wrapper_message_does_not_send_ack_before_threshold() -> None:
     runtime = WrapperRuntime(
         FakeClient(reply="quick reply", delay_seconds=0.005),
@@ -424,6 +496,34 @@ def test_handle_wrapper_message_rejects_new_turn_when_session_is_busy() -> None:
     asyncio.run(runtime.finish_turn("conversation-1"))
 
 
+def test_handle_wrapper_message_retries_transient_channel_send_failure(monkeypatch) -> None:
+    async def _noop_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(app_module.asyncio, "sleep", _noop_sleep)
+    runtime = WrapperRuntime(
+        FakeClient(reply="focus on adidas"),
+        long_running_messages_enabled=True,
+        ack_threshold_seconds=0.5,
+    )
+    context = FakeContext(
+        text="Where should I focus?",
+        send_errors=[RetryableChannelError(502)],
+    )
+    auth = FakeAgentAuth()
+
+    asyncio.run(
+        handle_wrapper_message(
+            context=context,
+            agent_auth=auth,
+            runtime=runtime,
+            auth_handler_id="planner_api_connector",
+        )
+    )
+
+    assert context.sent_messages == ["focus on adidas"]
+
+
 def test_handle_wrapper_message_maps_timeout_to_temporary_unavailable() -> None:
     runtime = WrapperRuntime(
         FakeClient(error=httpx.ReadTimeout("timed out")),
@@ -454,6 +554,53 @@ def test_acknowledge_invoke_activity_sends_200_invoke_response() -> None:
     activity = context.sent_messages[0]
     assert activity.type == "invokeResponse"
     assert activity.value.status == 200
+
+
+def test_create_app_disables_sdk_long_running_bridge_even_when_wrapper_threshold_mode_is_enabled(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    class _FakeConnectionManager:
+        def get_default_connection_configuration(self):
+            return {}
+
+    class _FakeAuthorization:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    class _FakeCloudAdapter:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    class _FakeAgentApplication:
+        def __init__(self, *args, **kwargs) -> None:
+            captured["options"] = kwargs["options"]
+            self.auth = SimpleNamespace()
+
+        def add_route(self, *args, **kwargs) -> None:
+            return None
+
+        def error(self, func):
+            return func
+
+    monkeypatch.setattr(app_module, "build_connection_manager", lambda: _FakeConnectionManager())
+    monkeypatch.setattr(app_module, "Authorization", _FakeAuthorization)
+    monkeypatch.setattr(app_module, "CloudAdapter", _FakeCloudAdapter)
+    monkeypatch.setattr(app_module, "CompatAgentApplication", _FakeAgentApplication)
+    monkeypatch.setattr(app_module, "build_auth_handlers", lambda: {})
+    monkeypatch.setattr(app_module, "PlannerServiceClient", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(app_module, "get_planner_service_base_url", lambda: "http://planner.example.com")
+    monkeypatch.setattr(app_module, "get_wrapper_timeout_seconds", lambda: 30.0)
+    monkeypatch.setattr(app_module, "get_wrapper_ack_threshold_seconds", lambda: 10.0)
+    monkeypatch.setattr(app_module, "get_wrapper_long_running_messages_enabled", lambda: True)
+    monkeypatch.setattr(app_module, "get_bot_app_id", lambda: "bot-app-id")
+    monkeypatch.setattr(app_module, "get_handler_ids", lambda: ("planner_api_agentic", "planner_api_connector"))
+    monkeypatch.setattr(app_module, "get_wrapper_debug_chat_enabled", lambda: False)
+
+    app_module.create_app()
+
+    assert captured["options"].long_running_messages is False
 
 
 def test_debug_chat_endpoint_validates_allowlist_and_forwards_to_planner(monkeypatch) -> None:
