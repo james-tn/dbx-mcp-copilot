@@ -13,6 +13,7 @@ BOT_SSO_RESOURCE_PREFIX="${BOT_SSO_RESOURCE_PREFIX:-api://botid-}"
 TEAMS_DESKTOP_MOBILE_CLIENT_ID="${TEAMS_DESKTOP_MOBILE_CLIENT_ID:-1fec8e78-bce4-4aaf-ab1b-5451cc387264}"
 TEAMS_WEB_CLIENT_ID="${TEAMS_WEB_CLIENT_ID:-5e3ce6c0-2b1f-4285-8d4b-75ee78787346}"
 FAIL_ON_MISSING_ADMIN_CONSENT="${FAIL_ON_MISSING_ADMIN_CONSENT:-false}"
+PRESERVE_EXISTING_CREDENTIALS="${PRESERVE_EXISTING_CREDENTIALS:-false}"
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a
@@ -390,14 +391,20 @@ rm -f "$wrapper_access_file"
 planner_admin_consent_status="$(try_admin_consent "$planner_app_id" "Planner API -> Azure Databricks user_impersonation" || true)"
 bot_admin_consent_status="$(try_admin_consent "$bot_app_id" "Wrapper/channel app -> Planner API access_as_user" || true)"
 
-bot_secret_json="$(az ad app credential reset --id "$bot_object_id" --append --display-name "bot-secret" --years 1 -o json)"
-bot_secret="$(python - <<'PY' "$bot_secret_json"
+if [[ "$PRESERVE_EXISTING_CREDENTIALS" == "true" && -n "${BOT_APP_PASSWORD:-}" ]]; then
+  bot_secret="$BOT_APP_PASSWORD"
+else
+  bot_secret_json="$(az ad app credential reset --id "$bot_object_id" --append --display-name "bot-secret" --years 1 -o json)"
+  bot_secret="$(python - <<'PY' "$bot_secret_json"
 import json, sys
 print(json.loads(sys.argv[1])["password"])
 PY
 )"
+fi
 
-if [[ -n "$REUSE_PLANNER_API_APP_ID" ]]; then
+if [[ "$PRESERVE_EXISTING_CREDENTIALS" == "true" && -n "${PLANNER_API_CLIENT_SECRET:-}" ]]; then
+  planner_secret="${PLANNER_API_CLIENT_SECRET:-}"
+elif [[ -n "$REUSE_PLANNER_API_APP_ID" ]]; then
   planner_secret="${PLANNER_API_CLIENT_SECRET:-}"
 else
   planner_secret_json="$(az ad app credential reset --id "$planner_object_id" --append --display-name "planner-api-secret" --years 1 -o json)"
@@ -427,6 +434,8 @@ upsert_env_value "AZUREBOTOAUTHCONNECTIONNAME" "SERVICE_CONNECTION"
 upsert_env_value "OBOCONNECTIONNAME" "PLANNER_API_CONNECTION"
 upsert_env_value "M365_AUTH_HANDLER_ID" "planner_api"
 upsert_env_value "WRAPPER_DEBUG_EXPECTED_AUDIENCE" "$bot_sso_resource"
+upsert_env_value "PLANNER_API_ADMIN_CONSENT_STATUS" "$planner_admin_consent_status"
+upsert_env_value "WRAPPER_API_ADMIN_CONSENT_STATUS" "$bot_admin_consent_status"
 
 cat <<EOF
 Planner API app $planner_status.

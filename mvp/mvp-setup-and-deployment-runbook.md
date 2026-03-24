@@ -14,6 +14,39 @@ The recommended flow is now two steps:
 The operator edits only a small input env. The scripts generate and maintain the
 runtime env used by the lower-level deployment scripts.
 
+## Operator Models
+
+This repo now supports two operator models:
+
+1. Single-operator path
+2. Split-responsibility path
+
+Single-operator path:
+
+- one operator runs the Azure bootstrap and the M365 bootstrap end to end
+- that operator needs both Azure deployment rights and Entra / Graph rights
+
+Split-responsibility path:
+
+- the deployment operator runs the main bootstrap
+- if the bootstrap hits an Entra or Teams catalog privilege boundary, it pauses
+  and prints the next script to run
+- the next admin completes only the missing approval/publish step
+- the deployment operator then resumes from the printed next step
+
+Status files:
+
+- the scripts write their current state to
+  [`mvp/infra/outputs/bootstrap-status-secure.json`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/outputs/bootstrap-status-secure.json)
+  or
+  [`mvp/infra/outputs/bootstrap-status-open.json`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/outputs/bootstrap-status-open.json)
+- to inspect the current status, run:
+
+```bash
+bash mvp/infra/scripts/show-bootstrap-status.sh secure
+bash mvp/infra/scripts/show-bootstrap-status.sh open
+```
+
 ## Quick Start: Azure Bootstrap
 
 1. Copy the right input template:
@@ -67,6 +100,37 @@ Do not treat those files as operator-owned. They are generated runtime state.
 
 On reruns, the Azure bootstrap reuses an existing foundation instead of
 replaying the secure foundation deployment across a live Databricks workspace.
+
+## Quick Start: Split Responsibility
+
+If no single user has all required rights, enable split mode:
+
+```bash
+SPLIT_RESPONSIBILITY_MODE=true bash mvp/infra/scripts/bootstrap-azure-demo.sh secure
+SPLIT_RESPONSIBILITY_MODE=true bash mvp/infra/scripts/bootstrap-azure-demo.sh open
+```
+
+If the Azure bootstrap pauses for Entra admin work, run:
+
+```bash
+bash mvp/infra/scripts/complete-entra-admin-consent.sh secure
+bash mvp/infra/scripts/complete-entra-admin-consent.sh open
+```
+
+If the M365 bootstrap pauses for Teams catalog publish work, run:
+
+```bash
+bash mvp/infra/scripts/complete-m365-catalog-publish.sh secure
+bash mvp/infra/scripts/complete-m365-catalog-publish.sh open
+```
+
+Then resume with the next step printed by the status file or the bootstrap
+message, usually:
+
+```bash
+bash mvp/infra/scripts/bootstrap-azure-demo.sh secure
+bash mvp/infra/scripts/bootstrap-m365-demo.sh secure
+```
 
 ## Quick Start: M365 Bootstrap
 
@@ -196,9 +260,23 @@ Open Databricks catalog note:
 4. writes the published Teams catalog app ID back into the runtime env when
    Graph returns it
 
+## Split-Role Scripts
+
+Use these only when the main bootstrap pauses at a privilege boundary:
+
+- [`mvp/infra/scripts/complete-entra-admin-consent.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/complete-entra-admin-consent.sh)
+  completes Entra app registration and admin consent without rotating already
+  persisted app secrets
+- [`mvp/infra/scripts/complete-m365-catalog-publish.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/complete-m365-catalog-publish.sh)
+  builds and publishes the Teams app package to the catalog, then hands control
+  back to the deployment operator for self-install
+- [`mvp/infra/scripts/show-bootstrap-status.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/show-bootstrap-status.sh)
+  prints the current mode status, the last successful step, and the next role /
+  script required to continue
+
 ## Required Azure Permissions
 
-The Azure bootstrap assumes the signed-in operator can:
+Deployment operator:
 
 - select the target subscription
 - create and update resource-group-scoped Azure resources
@@ -208,32 +286,27 @@ The Azure bootstrap assumes the signed-in operator can:
 - create and update Databricks, networking, private endpoints, and private DNS
 - create and update Azure OpenAI, AI Foundry, and bot resources
 
-For Entra ID, the operator must be able to create app registrations. A practical
-operator role set is one of:
+Entra admin:
 
-- `Application Administrator`
-- `Cloud Application Administrator`
-- `Global Administrator`
+- must be able to create app registrations if the deployment operator cannot
+- must be able to grant tenant-wide admin consent for:
+  - Planner API -> Azure Databricks `user_impersonation`
+  - Wrapper/channel app -> Planner API `access_as_user`
 
-Admin consent may also require:
+A practical Entra admin role set is one of:
 
 - `Application Administrator`
 - `Cloud Application Administrator`
 - `Privileged Role Administrator`
 - `Global Administrator`
 
-The Azure bootstrap now attempts admin consent automatically for:
-
-- Planner API -> Azure Databricks `user_impersonation`
-- Wrapper/channel app -> Planner API `access_as_user`
-
-If the operator cannot grant admin consent, the Azure bootstrap now fails fast.
-That is intentional: the generated planner and wrapper apps are not treated as
-successfully bootstrapped until tenant-wide consent is in place.
+If split mode is enabled and admin consent is missing, the Azure bootstrap now
+pauses and points to the Entra admin completion script instead of forcing a
+single operator to hold every role.
 
 ## Required M365 / Graph Permissions
 
-The M365 bootstrap needs delegated Microsoft Graph permission to:
+M365 catalog admin:
 
 - publish to the Teams app catalog:
   - `AppCatalog.Submit`, or
@@ -241,6 +314,9 @@ The M365 bootstrap needs delegated Microsoft Graph permission to:
   - `Directory.ReadWrite.All`
 - read the catalog entry for the app:
   - `AppCatalog.Read.All`
+
+Deployment operator for self-install:
+
 - install the app for the signed-in operator:
   - `TeamsAppInstallation.ReadWriteForUser`
   - `User.Read`
@@ -248,7 +324,8 @@ The M365 bootstrap needs delegated Microsoft Graph permission to:
 If `az account get-access-token --resource-type ms-graph` does not give a token
 with those scopes, set `M365_GRAPH_PUBLISHER_CLIENT_ID` in the input env so the
 bootstrap can use delegated device-code authentication against your publisher
-app.
+app. In split mode, the Teams catalog publish step can also be run separately by
+the M365 catalog admin.
 
 ## Demo Access-Control Model
 
@@ -290,6 +367,9 @@ Admin consent missing:
   unavailable, check the generated Entra apps and complete admin consent for:
   - Planner API -> Azure Databricks `user_impersonation`
   - Wrapper/channel app -> Planner API `access_as_user`
+- In split mode, run:
+  - `bash mvp/infra/scripts/complete-entra-admin-consent.sh secure`
+  - `bash mvp/infra/scripts/complete-entra-admin-consent.sh open`
 
 Missing Azure CLI extensions:
 
@@ -301,12 +381,16 @@ Unable to create app registrations:
 
 - Grant an Entra role that can create app registrations, then rerun the Azure
   bootstrap.
+- In split mode, if the deployment operator cannot create apps, have an Entra
+  admin rerun the Azure bootstrap or complete the Entra admin step, depending on
+  what the status file says.
 
 Admin consent still pending:
 
-- The Azure bootstrap now treats this as a blocking failure.
-  Grant the required Entra role, rerun the Azure bootstrap, and only then run
-  the M365 bootstrap.
+- In single-operator mode, the Azure bootstrap treats this as a blocking
+  failure.
+- In split mode, the Azure bootstrap pauses and writes the next role / next
+  script into the bootstrap status file.
 
 Azure OpenAI deployment creation fails with quota or model-capacity errors:
 
@@ -319,6 +403,13 @@ Graph token missing Teams publish/install scopes:
 
 - Set `M365_GRAPH_PUBLISHER_CLIENT_ID` in the input env, rerun the M365
   bootstrap, and complete device-code sign-in.
+- In split mode, if the current operator does not have catalog-publish scope,
+  run:
+  - `bash mvp/infra/scripts/complete-m365-catalog-publish.sh secure`
+  - `bash mvp/infra/scripts/complete-m365-catalog-publish.sh open`
+- Then rerun:
+  - `bash mvp/infra/scripts/bootstrap-m365-demo.sh secure`
+  - `bash mvp/infra/scripts/bootstrap-m365-demo.sh open`
 
 Secure Databricks is private from the operator machine:
 
@@ -336,6 +427,9 @@ Repeatability and reruns:
 
 - Re-running the Azure bootstrap is the normal convergence path.
 - Re-running the M365 bootstrap is safe when you need to republish or reinstall.
+- If split mode pauses a run, check the status file before rerunning:
+  - `bash mvp/infra/scripts/show-bootstrap-status.sh secure`
+  - `bash mvp/infra/scripts/show-bootstrap-status.sh open`
 - For a full clean rebuild, destroy the old environment, wait for Azure resource
   group deletion to finish, then rerun the Azure bootstrap from the same
   `*.inputs` file.
@@ -435,6 +529,9 @@ Practical guidance:
 The new bootstraps are the recommended operator path. The lower-level scripts
 remain available for recovery and debugging:
 
+- [`mvp/infra/scripts/show-bootstrap-status.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/show-bootstrap-status.sh)
+- [`mvp/infra/scripts/complete-entra-admin-consent.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/complete-entra-admin-consent.sh)
+- [`mvp/infra/scripts/complete-m365-catalog-publish.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/complete-m365-catalog-publish.sh)
 - [`mvp/infra/scripts/deploy-foundation.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/deploy-foundation.sh)
 - [`mvp/infra/scripts/setup-custom-engine-app-registrations.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/setup-custom-engine-app-registrations.sh)
 - [`mvp/infra/scripts/deploy-planner-api.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/deploy-planner-api.sh)

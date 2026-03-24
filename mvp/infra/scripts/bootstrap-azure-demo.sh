@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HELPER_SCRIPT="$ROOT_DIR/infra/bootstrap_helpers.py"
 MODE="${1:-secure}"
 REQUIRE_ADMIN_CONSENT="${REQUIRE_ADMIN_CONSENT:-true}"
+SPLIT_RESPONSIBILITY_MODE="${SPLIT_RESPONSIBILITY_MODE:-false}"
 
 if [[ "$MODE" != "open" && "$MODE" != "secure" ]]; then
   echo "Usage: bash mvp/infra/scripts/bootstrap-azure-demo.sh <open|secure>" >&2
@@ -28,6 +29,11 @@ else
   RUNTIME_FILE="$ROOT_DIR/.env"
   RUNTIME_EXAMPLE="$ROOT_DIR/.env.example"
 fi
+
+# shellcheck disable=SC1091
+source "$ROOT_DIR/infra/scripts/bootstrap-status-lib.sh"
+STATUS_FILE="$(bootstrap_status_file_for_mode "$ROOT_DIR" "$MODE")"
+ENTRA_ADMIN_CONSENT_PENDING="false"
 
 source_env() {
   if [[ -f "$RUNTIME_FILE" ]]; then
@@ -76,6 +82,20 @@ log_success() {
   echo "[bootstrap-azure-demo] OK: $*"
 }
 
+handoff_and_exit() {
+  local role_name="$1"
+  local next_step_script="$2"
+  local message="$3"
+
+  bootstrap_status_pause "$STATUS_FILE" "$role_name" "$next_step_script" "$message"
+  echo
+  echo "Bootstrap paused at a privilege boundary."
+  echo "Reason: $message"
+  echo "Next step:"
+  echo "  $next_step_script"
+  exit 2
+}
+
 run_bootstrap_step() {
   local step_name="$1"
   shift
@@ -83,9 +103,11 @@ run_bootstrap_step() {
   log_step "$step_name"
   if "$@"; then
     log_success "$step_name"
+    bootstrap_status_note_step "$STATUS_FILE" "$step_name"
     return 0
   fi
 
+  bootstrap_status_fail "$STATUS_FILE" "$step_name failed."
   echo "[bootstrap-azure-demo] ERROR: $step_name failed." >&2
   return 1
 }
@@ -348,21 +370,32 @@ PY
 
   if [[ "$CAN_CREATE_APPS" != "true" ]]; then
     if [[ "$POLICY_READABLE" == "true" ]]; then
-      echo "The signed-in operator does not appear able to create app registrations in this tenant." >&2
-      echo "Grant Application Administrator, Cloud Application Administrator, or Global Administrator, or enable user app registration in Entra ID." >&2
-      exit 1
+      if [[ "$SPLIT_RESPONSIBILITY_MODE" == "true" ]]; then
+        echo "Warning: the signed-in operator does not appear able to create app registrations in this tenant." >&2
+        echo "A separate Entra admin may need to run the Entra completion step or rerun the Azure bootstrap." >&2
+      else
+        echo "The signed-in operator does not appear able to create app registrations in this tenant." >&2
+        echo "Grant Application Administrator, Cloud Application Administrator, or Global Administrator, or enable user app registration in Entra ID." >&2
+        exit 1
+      fi
     fi
     echo "Warning: the bootstrap could not conclusively verify app-registration create rights." >&2
     echo "If setup-custom-engine-app-registrations.sh fails, grant Application Administrator, Cloud Application Administrator, or Global Administrator and rerun." >&2
   fi
 
   if [[ "$REQUIRE_ADMIN_CONSENT" == "true" && "$CAN_GRANT_ADMIN_CONSENT" != "true" ]]; then
-    echo "The signed-in operator does not appear able to grant tenant-wide admin consent for the generated Entra applications." >&2
-    echo "Grant Application Administrator, Cloud Application Administrator, Global Administrator, or Privileged Role Administrator before running the operator bootstrap." >&2
-    if [[ -n "$OPERATOR_DIRECTORY_ROLES" ]]; then
-      echo "Signed-in directory roles: $OPERATOR_DIRECTORY_ROLES" >&2
+    if [[ "$SPLIT_RESPONSIBILITY_MODE" == "true" ]]; then
+      echo "Warning: the signed-in operator does not appear able to grant tenant-wide admin consent for the generated Entra applications." >&2
+      echo "The bootstrap will continue in split-responsibility mode and pause for an Entra admin later." >&2
+      ENTRA_ADMIN_CONSENT_PENDING="true"
+    else
+      echo "The signed-in operator does not appear able to grant tenant-wide admin consent for the generated Entra applications." >&2
+      echo "Grant Application Administrator, Cloud Application Administrator, Global Administrator, or Privileged Role Administrator before running the operator bootstrap." >&2
+      if [[ -n "$OPERATOR_DIRECTORY_ROLES" ]]; then
+        echo "Signed-in directory roles: $OPERATOR_DIRECTORY_ROLES" >&2
+      fi
+      exit 1
     fi
-    exit 1
   fi
 }
 
@@ -459,6 +492,21 @@ validate_azure_outputs() {
   fi
 }
 
+run_entra_app_registration_step() {
+  local fail_on_missing_admin_consent="$REQUIRE_ADMIN_CONSENT"
+  if [[ "$SPLIT_RESPONSIBILITY_MODE" == "true" ]]; then
+    fail_on_missing_admin_consent="false"
+  fi
+
+  ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" FAIL_ON_MISSING_ADMIN_CONSENT="$fail_on_missing_admin_consent" \
+    bash "$ROOT_DIR/infra/scripts/setup-custom-engine-app-registrations.sh"
+}
+
+entra_admin_consent_is_pending() {
+  [[ "${PLANNER_API_ADMIN_CONSENT_STATUS:-}" != "granted" || "${WRAPPER_API_ADMIN_CONSENT_STATUS:-}" != "granted" ]]
+}
+
+bootstrap_status_init "$STATUS_FILE" "$MODE" "azure" "$INPUT_FILE" "$RUNTIME_FILE" "$SPLIT_RESPONSIBILITY_MODE"
 run_bootstrap_step "Ensure operator input file exists" ensure_input_file
 run_bootstrap_step "Render runtime env from operator input" render_runtime_env
 run_bootstrap_step "Load runtime env" source_env
@@ -479,10 +527,27 @@ run_bootstrap_step "Reload runtime env after foundation" source_env
 
 run_bootstrap_step "Build and publish planner and wrapper images" build_and_publish_images
 
-run_bootstrap_step "Create or update Entra app registrations" \
-  env ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" FAIL_ON_MISSING_ADMIN_CONSENT="$REQUIRE_ADMIN_CONSENT" \
-  bash "$ROOT_DIR/infra/scripts/setup-custom-engine-app-registrations.sh"
+if ! run_bootstrap_step "Create or update Entra app registrations" run_entra_app_registration_step; then
+  if [[ "$SPLIT_RESPONSIBILITY_MODE" == "true" ]]; then
+    source_env
+    if [[ -n "${PLANNER_API_CLIENT_ID:-}" && -n "${BOT_APP_ID:-}" ]]; then
+      handoff_and_exit \
+        "entra_admin" \
+        "bash mvp/infra/scripts/complete-entra-admin-consent.sh $MODE" \
+        "The deployment operator could not finish Entra application setup. An Entra admin should complete the app registration and consent step."
+    fi
+    handoff_and_exit \
+      "entra_admin" \
+      "SPLIT_RESPONSIBILITY_MODE=true bash mvp/infra/scripts/bootstrap-azure-demo.sh $MODE" \
+      "The deployment operator could not create the required Entra applications. An Entra admin should rerun the Azure bootstrap or complete the app-registration phase."
+  fi
+  exit 1
+fi
 run_bootstrap_step "Reload runtime env after Entra app registration setup" source_env
+
+if entra_admin_consent_is_pending; then
+  ENTRA_ADMIN_CONSENT_PENDING="true"
+fi
 
 run_bootstrap_step "Deploy planner API and secure seed job resources" \
   env ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \
@@ -518,6 +583,15 @@ run_bootstrap_step "Create or update Azure Bot OAuth connection" \
 run_bootstrap_step "Reload runtime env after bot OAuth setup" source_env
 
 run_bootstrap_step "Validate Azure bootstrap outputs" validate_azure_outputs
+
+if [[ "$SPLIT_RESPONSIBILITY_MODE" == "true" && "$ENTRA_ADMIN_CONSENT_PENDING" == "true" ]]; then
+  handoff_and_exit \
+    "entra_admin" \
+    "bash mvp/infra/scripts/complete-entra-admin-consent.sh $MODE" \
+    "Azure resources are deployed, but Entra admin consent is still pending for the generated applications."
+fi
+
+bootstrap_status_complete "$STATUS_FILE" "Azure bootstrap completed successfully."
 
 echo
 echo "Azure bootstrap completed for mode=$MODE."

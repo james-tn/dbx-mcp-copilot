@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HELPER_SCRIPT="$ROOT_DIR/infra/bootstrap_helpers.py"
 MODE="${1:-secure}"
+SPLIT_RESPONSIBILITY_MODE="${SPLIT_RESPONSIBILITY_MODE:-false}"
 
 if [[ "$MODE" != "open" && "$MODE" != "secure" ]]; then
   echo "Usage: bash mvp/infra/scripts/bootstrap-m365-demo.sh <open|secure>" >&2
@@ -29,6 +30,12 @@ else
 fi
 
 GRAPH_UPLOAD_RESPONSE_PATH="$ROOT_DIR/appPackage/build/graph-upload-response-${MODE}.json"
+
+# shellcheck disable=SC1091
+source "$ROOT_DIR/infra/scripts/bootstrap-status-lib.sh"
+STATUS_FILE="$(bootstrap_status_file_for_mode "$ROOT_DIR" "$MODE")"
+HAS_GRAPH_PUBLISH_SCOPE="false"
+HAS_GRAPH_INSTALL_SCOPE="false"
 
 source_env() {
   if [[ -f "$RUNTIME_FILE" ]]; then
@@ -77,6 +84,20 @@ log_success() {
   echo "[bootstrap-m365-demo] OK: $*"
 }
 
+handoff_and_exit() {
+  local role_name="$1"
+  local next_step_script="$2"
+  local message="$3"
+
+  bootstrap_status_pause "$STATUS_FILE" "$role_name" "$next_step_script" "$message"
+  echo
+  echo "Bootstrap paused at a privilege boundary."
+  echo "Reason: $message"
+  echo "Next step:"
+  echo "  $next_step_script"
+  exit 2
+}
+
 run_bootstrap_step() {
   local step_name="$1"
   shift
@@ -84,9 +105,11 @@ run_bootstrap_step() {
   log_step "$step_name"
   if "$@"; then
     log_success "$step_name"
+    bootstrap_status_note_step "$STATUS_FILE" "$step_name"
     return 0
   fi
 
+  bootstrap_status_fail "$STATUS_FILE" "$step_name failed."
   echo "[bootstrap-m365-demo] ERROR: $step_name failed." >&2
   return 1
 }
@@ -167,6 +190,17 @@ preflight_runtime() {
       exit 1
     fi
   done
+
+  if [[ "${PLANNER_API_ADMIN_CONSENT_STATUS:-granted}" != "granted" || "${WRAPPER_API_ADMIN_CONSENT_STATUS:-granted}" != "granted" ]]; then
+    if [[ "$SPLIT_RESPONSIBILITY_MODE" == "true" ]]; then
+      handoff_and_exit \
+        "entra_admin" \
+        "bash mvp/infra/scripts/complete-entra-admin-consent.sh $MODE" \
+        "The Azure bootstrap is present, but Entra admin consent is still pending for the generated applications."
+    fi
+    echo "Entra admin consent is still pending for the generated applications. Complete the Azure consent step first." >&2
+    exit 1
+  fi
 }
 
 preflight_m365() {
@@ -184,14 +218,22 @@ preflight_m365() {
   GRAPH_TOKEN="$(graph_access_token)"
   GRAPH_SCOPES="$(graph_token_scopes "$GRAPH_TOKEN")"
 
-  if [[ "$GRAPH_SCOPES" != *"AppCatalog.Submit"* && "$GRAPH_SCOPES" != *"AppCatalog.ReadWrite.All"* && "$GRAPH_SCOPES" != *"Directory.ReadWrite.All"* ]]; then
-    echo "The Microsoft Graph token is missing a Teams app catalog publish scope." >&2
+  if [[ "$GRAPH_SCOPES" == *"AppCatalog.Submit"* || "$GRAPH_SCOPES" == *"AppCatalog.ReadWrite.All"* || "$GRAPH_SCOPES" == *"Directory.ReadWrite.All"* ]]; then
+    HAS_GRAPH_PUBLISH_SCOPE="true"
+  fi
+
+  if [[ "$GRAPH_SCOPES" == *"TeamsAppInstallation.ReadWriteForUser"* || "$GRAPH_SCOPES" == *"TeamsAppInstallation.ReadWriteSelfForUser"* ]]; then
+    HAS_GRAPH_INSTALL_SCOPE="true"
+  fi
+
+  if [[ "$HAS_GRAPH_INSTALL_SCOPE" != "true" ]]; then
+    echo "The Microsoft Graph token is missing a Teams self-install scope." >&2
     echo "Scopes on the current token: $GRAPH_SCOPES" >&2
     exit 1
   fi
 
-  if [[ "$GRAPH_SCOPES" != *"TeamsAppInstallation.ReadWriteForUser"* && "$GRAPH_SCOPES" != *"TeamsAppInstallation.ReadWriteSelfForUser"* ]]; then
-    echo "The Microsoft Graph token is missing a Teams self-install scope." >&2
+  if [[ "$HAS_GRAPH_PUBLISH_SCOPE" != "true" && -z "${GRAPH_TEAMS_APP_ID:-}" && "$SPLIT_RESPONSIBILITY_MODE" != "true" ]]; then
+    echo "The Microsoft Graph token is missing a Teams app catalog publish scope." >&2
     echo "Scopes on the current token: $GRAPH_SCOPES" >&2
     exit 1
   fi
@@ -238,6 +280,17 @@ validate_m365_outputs() {
   fi
 }
 
+run_publish_step() {
+  if [[ "$HAS_GRAPH_PUBLISH_SCOPE" != "true" ]]; then
+    echo "Skipping publish because the current token does not have Teams catalog publish scope and an existing GRAPH_TEAMS_APP_ID is already present."
+    return 0
+  fi
+
+  GRAPH_ACCESS_TOKEN="$GRAPH_TOKEN" ENV_FILE="$RUNTIME_FILE" OUTPUT_PATH="$GRAPH_UPLOAD_RESPONSE_PATH" \
+    bash "$ROOT_DIR/scripts/publish-m365-app-package-graph.sh"
+}
+
+bootstrap_status_init "$STATUS_FILE" "$MODE" "m365" "$INPUT_FILE" "$RUNTIME_FILE" "$SPLIT_RESPONSIBILITY_MODE"
 run_bootstrap_step "Ensure operator input file exists" ensure_input_file
 run_bootstrap_step "Render runtime env from operator input" render_runtime_env
 run_bootstrap_step "Load runtime env" source_env
@@ -247,9 +300,14 @@ run_bootstrap_step "Build Teams/Copilot app package" \
   env ENV_FILE="$RUNTIME_FILE" \
   bash "$ROOT_DIR/scripts/build-m365-app-package.sh"
 
-run_bootstrap_step "Publish Teams app package to catalog" \
-  env GRAPH_ACCESS_TOKEN="$GRAPH_TOKEN" ENV_FILE="$RUNTIME_FILE" OUTPUT_PATH="$GRAPH_UPLOAD_RESPONSE_PATH" \
-  bash "$ROOT_DIR/scripts/publish-m365-app-package-graph.sh"
+if [[ "$HAS_GRAPH_PUBLISH_SCOPE" != "true" && "$SPLIT_RESPONSIBILITY_MODE" == "true" && -z "${GRAPH_TEAMS_APP_ID:-}" ]]; then
+  handoff_and_exit \
+    "m365_catalog_admin" \
+    "bash mvp/infra/scripts/complete-m365-catalog-publish.sh $MODE" \
+    "The current Microsoft Graph token does not have Teams app catalog publish scope."
+fi
+
+run_bootstrap_step "Publish Teams app package to catalog" run_publish_step
 
 run_bootstrap_step "Persist Graph app identifiers to runtime env" persist_graph_ids
 run_bootstrap_step "Reload runtime env after publish" source_env
@@ -259,6 +317,7 @@ run_bootstrap_step "Install Teams app for signed-in operator" \
   bash "$ROOT_DIR/scripts/install-m365-app-for-self-graph.sh"
 
 run_bootstrap_step "Validate M365 bootstrap outputs" validate_m365_outputs
+bootstrap_status_complete "$STATUS_FILE" "M365 bootstrap completed successfully."
 
 echo
 echo "M365 bootstrap completed for mode=$MODE."
