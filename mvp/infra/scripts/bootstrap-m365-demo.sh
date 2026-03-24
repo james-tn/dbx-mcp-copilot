@@ -69,6 +69,28 @@ env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 }
 
+log_step() {
+  echo "[bootstrap-m365-demo] STEP: $*"
+}
+
+log_success() {
+  echo "[bootstrap-m365-demo] OK: $*"
+}
+
+run_bootstrap_step() {
+  local step_name="$1"
+  shift
+
+  log_step "$step_name"
+  if "$@"; then
+    log_success "$step_name"
+    return 0
+  fi
+
+  echo "[bootstrap-m365-demo] ERROR: $step_name failed." >&2
+  return 1
+}
+
 ensure_command() {
   local command_name="$1"
   if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -204,22 +226,39 @@ PY
   fi
 }
 
-ensure_input_file
-render_runtime_env
-source_env
-preflight_m365
+validate_m365_outputs() {
+  if [[ -z "${WRAPPER_BASE_URL:-}" ]]; then
+    echo "WRAPPER_BASE_URL is missing from $RUNTIME_FILE." >&2
+    exit 1
+  fi
 
-ENV_FILE="$RUNTIME_FILE" \
+  if [[ -z "${GRAPH_TEAMS_APP_ID:-}" ]]; then
+    echo "GRAPH_TEAMS_APP_ID was not written back to $RUNTIME_FILE after publish." >&2
+    exit 1
+  fi
+}
+
+run_bootstrap_step "Ensure operator input file exists" ensure_input_file
+run_bootstrap_step "Render runtime env from operator input" render_runtime_env
+run_bootstrap_step "Load runtime env" source_env
+run_bootstrap_step "Run M365 preflight checks" preflight_m365
+
+run_bootstrap_step "Build Teams/Copilot app package" \
+  env ENV_FILE="$RUNTIME_FILE" \
   bash "$ROOT_DIR/scripts/build-m365-app-package.sh"
 
-GRAPH_ACCESS_TOKEN="$GRAPH_TOKEN" ENV_FILE="$RUNTIME_FILE" OUTPUT_PATH="$GRAPH_UPLOAD_RESPONSE_PATH" \
+run_bootstrap_step "Publish Teams app package to catalog" \
+  env GRAPH_ACCESS_TOKEN="$GRAPH_TOKEN" ENV_FILE="$RUNTIME_FILE" OUTPUT_PATH="$GRAPH_UPLOAD_RESPONSE_PATH" \
   bash "$ROOT_DIR/scripts/publish-m365-app-package-graph.sh"
 
-persist_graph_ids
-source_env
+run_bootstrap_step "Persist Graph app identifiers to runtime env" persist_graph_ids
+run_bootstrap_step "Reload runtime env after publish" source_env
 
-GRAPH_ACCESS_TOKEN="$GRAPH_TOKEN" ENV_FILE="$RUNTIME_FILE" \
+run_bootstrap_step "Install Teams app for signed-in operator" \
+  env GRAPH_ACCESS_TOKEN="$GRAPH_TOKEN" ENV_FILE="$RUNTIME_FILE" \
   bash "$ROOT_DIR/scripts/install-m365-app-for-self-graph.sh"
+
+run_bootstrap_step "Validate M365 bootstrap outputs" validate_m365_outputs
 
 echo
 echo "M365 bootstrap completed for mode=$MODE."

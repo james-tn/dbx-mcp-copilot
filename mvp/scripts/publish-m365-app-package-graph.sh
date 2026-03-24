@@ -17,6 +17,14 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+log_step() {
+  echo "[publish-m365-app-package-graph] STEP: $*" >&2
+}
+
+log_success() {
+  echo "[publish-m365-app-package-graph] OK: $*" >&2
+}
+
 if [[ ! -f "$PACKAGE_PATH" ]]; then
   echo "App package not found at $PACKAGE_PATH. Run build-m365-app-package.sh first." >&2
   exit 1
@@ -66,6 +74,7 @@ if [[ "$SCOPES" != *"AppCatalog.Submit"* && "$SCOPES" != *"AppCatalog.ReadWrite.
   echo "Current token scopes: $SCOPES" >&2
   exit 2
 fi
+log_success "Resolved Graph publish token with required catalog scope"
 
 response_file="$(mktemp)"
 app_lookup_file="$(mktemp)"
@@ -77,6 +86,7 @@ fi
 lookup_existing_app() {
   local external_id="$1"
   local lookup_status
+  log_step "Looking up existing Teams catalog app for externalId=$external_id"
   lookup_status="$(curl -sS -o "$app_lookup_file" -w "%{http_code}" \
     --get "https://graph.microsoft.com/v1.0/appCatalogs/teamsApps" \
     -H "Authorization: Bearer $GRAPH_TOKEN" \
@@ -87,6 +97,7 @@ lookup_existing_app() {
     echo "HTTP_STATUS=$lookup_status" >&2
     exit 1
   fi
+  log_success "Looked up existing Teams catalog app for externalId=$external_id"
   python - <<'PY' "$app_lookup_file"
 import json
 import sys
@@ -143,9 +154,11 @@ status_code="$(curl -sS -o "$response_file" -w "%{http_code}" \
   -H "Authorization: Bearer $GRAPH_TOKEN" \
   -H "Content-Type: application/zip" \
   --data-binary "@$PACKAGE_PATH")"
+log_step "Initial Graph upload returned HTTP $status_code"
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 if [[ "$status_code" == "409" ]]; then
+  log_step "Initial Graph upload reported an existing catalog entry; attempting appDefinition update"
   app_package_id="$(resolve_app_package_id)"
   existing_app_info="$(lookup_existing_app "$app_package_id" || true)"
   existing_app_id="$(printf '%s\n' "$existing_app_info" | sed -n '1p')"
@@ -182,6 +195,7 @@ if [[ "$status_code" == "409" ]]; then
   else
     status_code="$update_status"
   fi
+  log_success "Graph catalog update path completed with HTTP $status_code"
 
   app_lookup_json="$(printf '%s\n' "$existing_app_info" | sed -n '3p')"
   printf '%s\n' "$app_lookup_json" > "$response_file"
@@ -195,3 +209,4 @@ echo "UPLOAD_RESPONSE_PATH=$OUTPUT_PATH"
 if [[ "$status_code" -lt 200 || "$status_code" -ge 300 ]]; then
   exit 1
 fi
+log_success "Published Teams app package to Microsoft Graph app catalog"

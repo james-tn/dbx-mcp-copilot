@@ -45,6 +45,23 @@ env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 }
 
+log_step() {
+  echo "[deploy-planner-api] STEP: $*" >&2
+}
+
+log_success() {
+  echo "[deploy-planner-api] OK: $*" >&2
+}
+
+log_warn() {
+  echo "[deploy-planner-api] WARN: $*" >&2
+}
+
+fail_step() {
+  echo "[deploy-planner-api] ERROR: $*" >&2
+  exit 1
+}
+
 if [[ -n "${DATABRICKS_RESOURCE_GROUP:-}" && -n "${DATABRICKS_WORKSPACE_NAME:-}" ]]; then
   resolved_workspace_url="$(az databricks workspace show \
     --resource-group "$DATABRICKS_RESOURCE_GROUP" \
@@ -265,16 +282,84 @@ identity_exists() {
     >/dev/null 2>&1
 }
 
+ensure_role_assignment_for_object_id() {
+  local assignee_object_id="$1"
+  local assignee_principal_type="$2"
+  local role_name="$3"
+  local scope="$4"
+  local description="$5"
+  local existing_count=""
+
+  existing_count="$(az role assignment list \
+    --assignee-object-id "$assignee_object_id" \
+    --scope "$scope" \
+    --query "[?roleDefinitionName=='$role_name'] | length(@)" \
+    -o tsv 2>/dev/null || true)"
+  if [[ "$existing_count" =~ ^[0-9]+$ ]] && [[ "$existing_count" -gt 0 ]]; then
+    log_success "$description already present"
+    return 0
+  fi
+
+  log_step "$description"
+  if ! az role assignment create \
+    --assignee-object-id "$assignee_object_id" \
+    --assignee-principal-type "$assignee_principal_type" \
+    --role "$role_name" \
+    --scope "$scope" \
+    >/dev/null 2>&1; then
+    fail_step "$description failed. Ensure the signed-in operator can create Azure role assignments on scope '$scope'."
+  fi
+  log_success "$description"
+}
+
+verify_arm_resource_user_assigned_identity() {
+  local resource_url="$1"
+  local expected_identity_resource_id="$2"
+  local resource_label="$3"
+  local identity_json
+
+  if ! identity_json="$(az rest --method get --url "$resource_url" --query identity -o json 2>/dev/null)"; then
+    fail_step "Unable to read identity state for $resource_label."
+  fi
+
+  mapfile -t identity_state < <(python - <<'PY' "$identity_json" "$expected_identity_resource_id"
+import json
+import sys
+
+payload = json.loads(sys.argv[1] or "{}")
+expected = sys.argv[2].strip().lower()
+identity_type = str(payload.get("type") or "").strip()
+assigned = list((payload.get("userAssignedIdentities") or {}).keys())
+assigned_normalized = {item.strip().lower() for item in assigned if str(item).strip()}
+ok = bool(identity_type) and identity_type.lower() != "none" and (not expected or expected in assigned_normalized)
+print("true" if ok else "false")
+print(identity_type)
+print(", ".join(assigned))
+PY
+)
+
+  local identity_ok="${identity_state[0]:-false}"
+  local identity_type="${identity_state[1]:-}"
+  local assigned_identities="${identity_state[2]:-}"
+  if [[ "$identity_ok" != "true" ]]; then
+    fail_step "$resource_label is missing the expected user-assigned identity. identity.type='${identity_type:-<empty>}', assigned='${assigned_identities:-<none>}'"
+  fi
+}
+
 ensure_user_assigned_identity() {
   local resource_group="$1"
   local identity_name="$2"
 
   if ! identity_exists "$resource_group" "$identity_name"; then
+    log_step "Creating user-assigned managed identity '$identity_name'"
     az identity create \
       --resource-group "$resource_group" \
       --name "$identity_name" \
       --location "$AZURE_LOCATION" \
       >/dev/null
+    log_success "Created user-assigned managed identity '$identity_name'"
+  else
+    log_success "Using existing user-assigned managed identity '$identity_name'"
   fi
 
   az identity show \
@@ -652,7 +737,9 @@ if [[ "$SECURE_MODE" == "true" ]]; then
   if [[ "$bootstrap_auth_mode" == "managed_identity" ]]; then
     bootstrap_identity_json=""
     if [[ -n "${DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_RESOURCE_ID:-}" ]]; then
+      log_step "Using configured bootstrap managed identity '${DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_RESOURCE_ID}'"
       bootstrap_identity_json="$(az identity show --ids "$DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_RESOURCE_ID" -o json)"
+      log_success "Resolved configured bootstrap managed identity"
     else
       bootstrap_identity_json="$(ensure_user_assigned_identity "$AZURE_RESOURCE_GROUP" "$BOOTSTRAP_MANAGED_IDENTITY_NAME")"
     fi
@@ -671,18 +758,14 @@ import json, sys
 print(json.loads(sys.argv[1])["principalId"])
 PY
 )"
-    az role assignment create \
-      --assignee-object-id "$bootstrap_identity_principal_id" \
-      --assignee-principal-type ServicePrincipal \
-      --role "Contributor" \
-      --scope "$databricks_workspace_resource_id" \
-      >/dev/null 2>&1 || true
+    ensure_role_assignment_for_object_id \
+      "$bootstrap_identity_principal_id" \
+      "ServicePrincipal" \
+      "Contributor" \
+      "$databricks_workspace_resource_id" \
+      "Ensure bootstrap managed identity has Contributor on Databricks workspace"
   else
-    az role assignment create \
-      --assignee "$PLANNER_API_CLIENT_ID" \
-      --role "Contributor" \
-      --scope "$databricks_workspace_resource_id" \
-      >/dev/null 2>&1 || true
+    log_warn "Secure Databricks bootstrap is using azure_service_principal mode. Ensure the planner app has Contributor on the Databricks workspace if secure seed needs Azure resource operations."
   fi
   seed_job_env_vars=(
     "DATABRICKS_BOOTSTRAP_WAREHOUSE_ID=${DATABRICKS_BOOTSTRAP_WAREHOUSE_ID:-${DATABRICKS_WAREHOUSE_ID:-}}"
@@ -799,23 +882,43 @@ echo "Daily Account Planner planner service deployed to: $base_url"
 echo "Set PLANNER_API_BASE_URL=$base_url in $ENV_FILE for validation."
 
 if [[ "$SECURE_MODE" == "true" && -n "$bootstrap_identity_resource_id" ]]; then
+  log_step "Assigning bootstrap managed identity to planner container app '$PLANNER_ACA_APP_NAME'"
   az containerapp identity assign \
     --name "$PLANNER_ACA_APP_NAME" \
     --resource-group "$AZURE_RESOURCE_GROUP" \
     --user-assigned "$bootstrap_identity_resource_id" \
-    >/dev/null 2>&1 || true
+    >/dev/null
+  verify_arm_resource_user_assigned_identity \
+    "https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.App/containerApps/${PLANNER_ACA_APP_NAME}?api-version=2025-07-01" \
+    "$bootstrap_identity_resource_id" \
+    "planner container app '$PLANNER_ACA_APP_NAME'"
+  log_success "Assigned bootstrap managed identity to planner container app '$PLANNER_ACA_APP_NAME'"
 fi
 
 if [[ "$SECURE_MODE" == "true" ]]; then
   seed_job_name="${DATABRICKS_SEED_JOB_NAME:-${PLANNER_ACA_APP_NAME}-seed}"
+  log_step "Creating or updating secure Databricks seed job '$seed_job_name'"
   create_or_update_seed_job_via_rest "$seed_job_name"
+  log_success "Created or updated secure Databricks seed job '$seed_job_name'"
   if [[ -n "$bootstrap_identity_resource_id" ]]; then
-    az containerapp job identity assign \
+    log_step "Assigning bootstrap managed identity to secure Databricks seed job '$seed_job_name'"
+    if ! az containerapp job identity assign \
       --name "$seed_job_name" \
       --resource-group "$AZURE_RESOURCE_GROUP" \
       --user-assigned "$bootstrap_identity_resource_id" \
-      >/dev/null 2>&1 || true
+      >/dev/null; then
+      fail_step "Failed to assign bootstrap managed identity '$bootstrap_identity_resource_id' to secure Databricks seed job '$seed_job_name'."
+    fi
+    verify_arm_resource_user_assigned_identity \
+      "https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.App/jobs/${seed_job_name}?api-version=${CONTAINERAPPS_JOB_API_VERSION}" \
+      "$bootstrap_identity_resource_id" \
+      "secure Databricks seed job '$seed_job_name'"
+    log_success "Assigned bootstrap managed identity to secure Databricks seed job '$seed_job_name'"
+  else
+    fail_step "Secure Databricks mode expected a bootstrap managed identity, but none was resolved."
   fi
+  log_step "Waiting for secure Databricks seed job '$seed_job_name' to become available"
   wait_for_containerapp_job "$AZURE_RESOURCE_GROUP" "$seed_job_name" "${DATABRICKS_SEED_JOB_CREATE_TIMEOUT_SECONDS:-300}"
+  log_success "Secure Databricks seed job '$seed_job_name' is available"
   echo "Secure Databricks seed job configured: $seed_job_name"
 fi

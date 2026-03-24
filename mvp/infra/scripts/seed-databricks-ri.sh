@@ -76,6 +76,19 @@ if command -v python3 >/dev/null 2>&1; then
   python_bin="python3"
 fi
 
+log_step() {
+  echo "[seed-databricks-ri] STEP: $*"
+}
+
+log_success() {
+  echo "[seed-databricks-ri] OK: $*"
+}
+
+fail_step() {
+  echo "[seed-databricks-ri] ERROR: $*" >&2
+  exit 1
+}
+
 upsert_env_value() {
   local key="$1"
   local value="$2"
@@ -104,6 +117,44 @@ if not updated:
 
 env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
+}
+
+get_secure_seed_job_identity_summary() {
+  az rest \
+    --method get \
+    --url "https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.App/jobs/${DATABRICKS_SEED_JOB_NAME}?api-version=${CONTAINERAPPS_JOB_API_VERSION}" \
+    --query "{type:identity.type, assigned:keys(identity.userAssignedIdentities)}" \
+    -o json 2>/dev/null || true
+}
+
+verify_secure_seed_job_identity_ready() {
+  local identity_summary
+  identity_summary="$(get_secure_seed_job_identity_summary)"
+
+  mapfile -t identity_state < <("$python_bin" - <<'PY' "$identity_summary"
+import json
+import sys
+
+raw = sys.argv[1].strip()
+payload = json.loads(raw) if raw else {}
+identity_type = str(payload.get("type") or "").strip()
+assigned = payload.get("assigned") or []
+assigned = [str(item).strip() for item in assigned if str(item).strip()]
+ok = bool(identity_type) and identity_type.lower() != "none" and bool(assigned)
+print("true" if ok else "false")
+print(identity_type)
+print(", ".join(assigned))
+PY
+)
+
+  local identity_ok="${identity_state[0]:-false}"
+  local identity_type="${identity_state[1]:-}"
+  local assigned_identities="${identity_state[2]:-}"
+  if [[ "$identity_ok" != "true" ]]; then
+    fail_step "Secure Databricks seed job '$DATABRICKS_SEED_JOB_NAME' does not have a usable managed identity. identity.type='${identity_type:-<empty>}', assigned='${assigned_identities:-<none>}'"
+  fi
+
+  log_success "Verified secure Databricks seed job identity: type='${identity_type}', assigned='${assigned_identities}'"
 }
 
 "$python_bin" "$HELPER_SCRIPT" render-seed-sql \
@@ -143,7 +194,9 @@ if [[ "$SECURE_MODE" == "true" ]]; then
   fi
 
   az account set --subscription "$AZURE_SUBSCRIPTION_ID"
-  echo "Starting secure Databricks seed job: $DATABRICKS_SEED_JOB_NAME"
+  log_step "Verifying secure Databricks seed job identity before start"
+  verify_secure_seed_job_identity_ready
+  log_step "Starting secure Databricks seed job: $DATABRICKS_SEED_JOB_NAME"
   execution_name="$(
     az rest \
       --method post \
@@ -153,11 +206,12 @@ if [[ "$SECURE_MODE" == "true" ]]; then
   )"
 
   if [[ -z "$execution_name" ]]; then
-    echo "Failed to start secure Databricks seed job." >&2
-    exit 1
+    fail_step "Failed to start secure Databricks seed job '$DATABRICKS_SEED_JOB_NAME'."
   fi
+  log_success "Started secure Databricks seed job execution '$execution_name'"
 
   deadline=$(( $(date +%s) + timeout_seconds ))
+  last_status=""
   while true; do
     status="$(
       az rest \
@@ -167,17 +221,28 @@ if [[ "$SECURE_MODE" == "true" ]]; then
         -o tsv 2>/dev/null || true
     )"
 
+    if [[ -n "$status" && "$status" != "$last_status" ]]; then
+      echo "[seed-databricks-ri] STATUS: execution '$execution_name' is $status"
+      last_status="$status"
+    fi
+
     case "$status" in
       Succeeded)
-        echo "Secure Databricks seed completed successfully via ACA Job: $execution_name"
+        log_success "Secure Databricks seed completed successfully via ACA Job: $execution_name"
         exit 0
         ;;
       Failed|Stopped)
-        echo "Secure Databricks seed job failed with status: $status" >&2
+        echo "[seed-databricks-ri] ERROR: Secure Databricks seed job failed with status: $status" >&2
+        echo "[seed-databricks-ri] ERROR: Execution name: $execution_name" >&2
+        echo "[seed-databricks-ri] ERROR: Job identity summary:" >&2
+        get_secure_seed_job_identity_summary >&2 || true
+        echo "[seed-databricks-ri] ERROR: Execution details:" >&2
         az rest \
           --method get \
           --url "https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.App/jobs/${DATABRICKS_SEED_JOB_NAME}/executions/${execution_name}?api-version=${CONTAINERAPPS_JOB_API_VERSION}" \
           -o json >&2 || true
+        echo "[seed-databricks-ri] ERROR: Follow-up check:" >&2
+        echo "az containerapp job identity show -g ${AZURE_RESOURCE_GROUP} -n ${DATABRICKS_SEED_JOB_NAME}" >&2
         exit 1
         ;;
       *)
@@ -186,8 +251,7 @@ if [[ "$SECURE_MODE" == "true" ]]; then
     esac
 
     if [[ "$(date +%s)" -ge "$deadline" ]]; then
-      echo "Secure Databricks seed job timed out after ${timeout_seconds}s." >&2
-      exit 1
+      fail_step "Secure Databricks seed job timed out after ${timeout_seconds}s. Execution name: $execution_name"
     fi
     sleep "$poll_seconds"
   done

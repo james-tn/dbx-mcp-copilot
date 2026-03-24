@@ -68,6 +68,28 @@ env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 }
 
+log_step() {
+  echo "[bootstrap-azure-demo] STEP: $*"
+}
+
+log_success() {
+  echo "[bootstrap-azure-demo] OK: $*"
+}
+
+run_bootstrap_step() {
+  local step_name="$1"
+  shift
+
+  log_step "$step_name"
+  if "$@"; then
+    log_success "$step_name"
+    return 0
+  fi
+
+  echo "[bootstrap-azure-demo] ERROR: $step_name failed." >&2
+  return 1
+}
+
 ensure_command() {
   local command_name="$1"
   if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -382,17 +404,21 @@ build_and_publish_images() {
     exit 1
   fi
 
+  log_step "Building planner image ${planner_image_ref}"
   az acr build \
     --registry "$ACR_NAME" \
     --image "${planner_repository}:${planner_tag}" \
     --file "$ROOT_DIR/agents/Dockerfile" \
     "$ROOT_DIR" >/dev/null
+  log_success "Built planner image ${planner_image_ref}"
 
+  log_step "Building wrapper image ${wrapper_image_ref}"
   az acr build \
     --registry "$ACR_NAME" \
     --image "${wrapper_repository}:${wrapper_tag}" \
     --file "$ROOT_DIR/m365_wrapper/Dockerfile" \
     "$ROOT_DIR" >/dev/null
+  log_success "Built wrapper image ${wrapper_image_ref}"
 
   upsert_env_value "PLANNER_API_IMAGE" "$planner_image_ref"
   upsert_env_value "WRAPPER_IMAGE" "$wrapper_image_ref"
@@ -433,57 +459,65 @@ validate_azure_outputs() {
   fi
 }
 
-ensure_input_file
-render_runtime_env
-source_env
-preflight_azure
+run_bootstrap_step "Ensure operator input file exists" ensure_input_file
+run_bootstrap_step "Render runtime env from operator input" render_runtime_env
+run_bootstrap_step "Load runtime env" source_env
+run_bootstrap_step "Run Azure preflight checks" preflight_azure
 
 upsert_env_value "CREATE_SECURE_ACR" "true"
 source_env
 
 if foundation_exists; then
   echo "Existing foundation detected for $MODE mode. Reusing it instead of redeploying the foundation."
-  refresh_runtime_from_existing_foundation
+  run_bootstrap_step "Refresh runtime env from existing foundation" refresh_runtime_from_existing_foundation
 else
-  ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" CREATE_SECURE_ACR=true \
+  run_bootstrap_step "Deploy Azure foundation for $MODE mode" \
+    env ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" CREATE_SECURE_ACR=true \
     bash "$ROOT_DIR/infra/scripts/deploy-foundation.sh" "$MODE"
 fi
-source_env
+run_bootstrap_step "Reload runtime env after foundation" source_env
 
-build_and_publish_images
+run_bootstrap_step "Build and publish planner and wrapper images" build_and_publish_images
 
-ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" FAIL_ON_MISSING_ADMIN_CONSENT="$REQUIRE_ADMIN_CONSENT" \
+run_bootstrap_step "Create or update Entra app registrations" \
+  env ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" FAIL_ON_MISSING_ADMIN_CONSENT="$REQUIRE_ADMIN_CONSENT" \
   bash "$ROOT_DIR/infra/scripts/setup-custom-engine-app-registrations.sh"
-source_env
+run_bootstrap_step "Reload runtime env after Entra app registration setup" source_env
 
-ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \
+run_bootstrap_step "Deploy planner API and secure seed job resources" \
+  env ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \
   bash "$ROOT_DIR/infra/scripts/deploy-planner-api.sh"
-source_env
+run_bootstrap_step "Reload runtime env after planner deployment" source_env
 
-ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \
+run_bootstrap_step "Run Databricks seed" \
+  env ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \
   bash "$ROOT_DIR/infra/scripts/seed-databricks-ri.sh"
-source_env
+run_bootstrap_step "Reload runtime env after Databricks seed" source_env
 
 if [[ "$MODE" == "open" ]]; then
-  ENV_FILE="$RUNTIME_FILE" \
+  run_bootstrap_step "Validate open-mode Databricks direct query" \
+    env ENV_FILE="$RUNTIME_FILE" \
     bash "$ROOT_DIR/infra/scripts/validate-databricks-direct-query.sh"
 else
   echo "Skipping local direct Databricks validation for secure mode because the workspace may stay private from the operator machine."
 fi
 
-ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \
+run_bootstrap_step "Deploy M365 wrapper" \
+  env ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \
   bash "$ROOT_DIR/infra/scripts/deploy-m365-wrapper.sh"
-source_env
+run_bootstrap_step "Reload runtime env after wrapper deployment" source_env
 
-ENV_FILE="$RUNTIME_FILE" \
+run_bootstrap_step "Create or update Azure Bot resource" \
+  env ENV_FILE="$RUNTIME_FILE" \
   bash "$ROOT_DIR/infra/scripts/create-azure-bot-resource.sh"
-source_env
+run_bootstrap_step "Reload runtime env after bot resource setup" source_env
 
-ENV_FILE="$RUNTIME_FILE" FAIL_ON_MISSING_ADMIN_CONSENT="$REQUIRE_ADMIN_CONSENT" \
+run_bootstrap_step "Create or update Azure Bot OAuth connection" \
+  env ENV_FILE="$RUNTIME_FILE" FAIL_ON_MISSING_ADMIN_CONSENT="$REQUIRE_ADMIN_CONSENT" \
   bash "$ROOT_DIR/infra/scripts/setup-bot-oauth-connection.sh"
-source_env
+run_bootstrap_step "Reload runtime env after bot OAuth setup" source_env
 
-validate_azure_outputs
+run_bootstrap_step "Validate Azure bootstrap outputs" validate_azure_outputs
 
 echo
 echo "Azure bootstrap completed for mode=$MODE."

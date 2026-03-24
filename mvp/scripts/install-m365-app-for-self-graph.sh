@@ -14,6 +14,14 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+log_step() {
+  echo "[install-m365-app-for-self-graph] STEP: $*" >&2
+}
+
+log_success() {
+  echo "[install-m365-app-for-self-graph] OK: $*" >&2
+}
+
 if [[ -z "${M365_APP_PACKAGE_ID:-}" ]]; then
   if [[ -f "$MANIFEST_PATH" ]]; then
     M365_APP_PACKAGE_ID="$(python - <<'PY' "$MANIFEST_PATH"
@@ -36,8 +44,10 @@ elif [[ -n "${M365_GRAPH_PUBLISHER_CLIENT_ID:-}" ]]; then
 else
   GRAPH_TOKEN="$(az account get-access-token --resource-type ms-graph --query accessToken -o tsv)"
 fi
+log_success "Resolved Graph token for self-install flow"
 
 response_file="$(mktemp)"
+log_step "Looking up Teams catalog app by externalId=$M365_APP_PACKAGE_ID"
 status_code="$(curl -sS -o "$response_file" -w "%{http_code}" \
   --get "https://graph.microsoft.com/v1.0/appCatalogs/teamsApps" \
   -H "Authorization: Bearer $GRAPH_TOKEN" \
@@ -49,6 +59,7 @@ if [[ "$status_code" -lt 200 || "$status_code" -ge 300 ]]; then
   echo "HTTP_STATUS=$status_code"
   exit 1
 fi
+log_success "Resolved Teams catalog app metadata"
 
 teams_app_id="$(python - <<'PY' "$response_file"
 import json
@@ -68,6 +79,7 @@ if [[ -z "$teams_app_id" ]]; then
 fi
 
 me_file="$(mktemp)"
+log_step "Resolving signed-in Microsoft Graph user"
 me_status="$(curl -sS -o "$me_file" -w "%{http_code}" \
   "https://graph.microsoft.com/v1.0/me" \
   -H "Authorization: Bearer $GRAPH_TOKEN")"
@@ -78,6 +90,7 @@ if [[ "$me_status" -lt 200 || "$me_status" -ge 300 ]]; then
   echo "HTTP_STATUS=$me_status"
   exit 1
 fi
+log_success "Resolved signed-in Microsoft Graph user"
 
 user_id="$(python - <<'PY' "$me_file"
 import json
@@ -95,6 +108,7 @@ cat >"$install_body_file" <<JSON
 JSON
 
 install_response="$(mktemp)"
+log_step "Installing Teams app '$teams_app_id' for signed-in user '$user_id'"
 install_status="$(curl -sS -o "$install_response" -w "%{http_code}" \
   -X POST "https://graph.microsoft.com/v1.0/users/$user_id/teamwork/installedApps" \
   -H "Authorization: Bearer $GRAPH_TOKEN" \
@@ -113,3 +127,4 @@ fi
 if [[ "$install_status" -lt 200 || "$install_status" -ge 300 ]]; then
   exit 1
 fi
+log_success "Installed Teams app for signed-in user"
