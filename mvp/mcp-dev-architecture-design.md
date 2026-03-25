@@ -411,8 +411,8 @@ Implemented in code:
 
 Still pending in deployment/bootstrap:
 
-- wrapper managed-identity hosting still needs bootstrap-time identity
-  provisioning and bot/OAuth wiring
+- wrapper managed-identity hosting still needs bot/OAuth wiring after
+  bootstrap-time identity provisioning
 - bootstrap/deploy scripts still persist some secret-based settings in
   transitional paths
 - MCP managed-identity trust still needs full deployment wiring
@@ -430,8 +430,8 @@ These are not goals of this branch design:
 
 The main remaining architecture-to-operations gaps are in deployment wiring:
 
-1. Wrapper bootstrap still needs first-class managed-identity provisioning and
-   federated bot wiring.
+1. Wrapper bootstrap now provisions its user-assigned managed identity, but the
+   Azure Bot/OAuth side still needs federated managed-identity wiring.
 2. MCP deployment/bootstrap still needs managed-identity trust provisioning.
 3. Env examples still include some legacy planner-secret-era variables for
    transition and compatibility.

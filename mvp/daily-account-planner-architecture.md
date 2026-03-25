@@ -255,10 +255,11 @@ The intended bootstrap order on this branch is:
 
 ## Current Transitional Notes
 
-- The wrapper runtime supports managed identity, but Azure Bot OAuth connection
-  automation still depends on the current `az bot authsetting create` command
-  surface. In managed-identity mode, the script now skips destructive secret
-  wiring instead of forcing a secret path.
+- The wrapper bootstrap/runtime path now provisions and uses an explicit
+  user-assigned managed identity for hosted `mcp-dev` deployment, but Azure
+  Bot OAuth connection automation still depends on the current
+  `az bot authsetting create` command surface. In managed-identity mode, the
+  script now skips destructive secret wiring instead of forcing a secret path.
 - `deploy-top-opportunities-app.sh` supports both:
   - direct Databricks CLI deployment
   - pre-provisioned external URL hookup through `TOP_OPPORTUNITIES_APP_BASE_URL`

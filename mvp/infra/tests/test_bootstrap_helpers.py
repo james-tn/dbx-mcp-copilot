@@ -55,6 +55,8 @@ def test_build_runtime_env_secure_derives_names_and_demo_users(tmp_path: Path) -
     assert runtime["ACR_NAME"] == "dailyacctplannersecacr"
     assert runtime["KEYVAULT_NAME"] == "dailyacctplannerseckv"
     assert runtime["BOT_RESOURCE_NAME"] == "dailyacctplannersecbot"
+    assert runtime["BOT_MANAGED_IDENTITY_NAME"] == "dailyacctplannersec-wrapper-mi"
+    assert runtime["MCP_MANAGED_IDENTITY_NAME"] == "dailyacctplannersec-mcp-mi"
     assert runtime["DATABRICKS_SKIP_CATALOG_CREATE"] == "true"
     assert runtime["DATABRICKS_WORKSPACE_USER_UPNS"] == "seller-a@example.com,seller-b@example.com"
     assert runtime["WRAPPER_DEBUG_ALLOWED_UPNS"] == "seller-a@example.com,seller-b@example.com"
@@ -83,6 +85,8 @@ def test_build_runtime_env_open_derives_environment_specific_app_prefix(tmp_path
     runtime = build_runtime_env("open", runtime_example, input_file, runtime_file)
 
     assert runtime["APP_NAME_PREFIX"] == "daily-account-planner-veempoc"
+    assert runtime["BOT_MANAGED_IDENTITY_NAME"] == "veempoc-wrapper-mi"
+    assert runtime["MCP_MANAGED_IDENTITY_NAME"] == "veempoc-mcp-mi"
 
 
 def test_backup_pre_mcpdev_files_copies_existing_runtime_files_once(tmp_path: Path) -> None:

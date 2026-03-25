@@ -291,6 +291,12 @@ def build_runtime_env(
     runtime["BOT_RESOURCE_NAME"] = (
         runtime.get("BOT_RESOURCE_NAME", "").strip() or _sanitize_compact(f"{prefix}bot", 42)
     )
+    runtime["BOT_MANAGED_IDENTITY_NAME"] = (
+        runtime.get("BOT_MANAGED_IDENTITY_NAME", "").strip() or _sanitize_name(prefix, "-wrapper-mi", 60)
+    )
+    runtime["MCP_MANAGED_IDENTITY_NAME"] = (
+        runtime.get("MCP_MANAGED_IDENTITY_NAME", "").strip() or _sanitize_name(prefix, "-mcp-mi", 60)
+    )
     runtime["M365_APP_PACKAGE_ID"] = (
         runtime.get("M365_APP_PACKAGE_ID", "").strip() or _deterministic_package_id(mode, prefix)
     )

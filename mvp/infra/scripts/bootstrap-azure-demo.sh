@@ -132,6 +132,93 @@ resource_exists() {
     >/dev/null 2>&1
 }
 
+identity_exists() {
+  local resource_group="$1"
+  local identity_name="$2"
+
+  az identity show \
+    --resource-group "$resource_group" \
+    --name "$identity_name" \
+    >/dev/null 2>&1
+}
+
+ensure_user_assigned_identity() {
+  local resource_group="$1"
+  local identity_name="$2"
+
+  if ! identity_exists "$resource_group" "$identity_name"; then
+    log_step "Creating user-assigned managed identity '$identity_name'"
+    az identity create \
+      --resource-group "$resource_group" \
+      --name "$identity_name" \
+      --location "$AZURE_LOCATION" \
+      >/dev/null
+    log_success "Created user-assigned managed identity '$identity_name'"
+  else
+    log_success "Using existing user-assigned managed identity '$identity_name'"
+  fi
+
+  az identity show \
+    --resource-group "$resource_group" \
+    --name "$identity_name" \
+    -o json
+}
+
+resolve_user_assigned_identity() {
+  local resource_group="$1"
+  local identity_name="$2"
+  local configured_resource_id="${3:-}"
+
+  if [[ -n "$configured_resource_id" ]]; then
+    log_success "Using configured user-assigned managed identity '$configured_resource_id'"
+    az identity show --ids "$configured_resource_id" -o json
+    return 0
+  fi
+
+  ensure_user_assigned_identity "$resource_group" "$identity_name"
+}
+
+persist_managed_identity_env() {
+  local prefix="$1"
+  local requested_name="$2"
+  local identity_json="$3"
+
+  mapfile -t identity_fields < <("$PYTHON_BIN" - <<'PY' "$requested_name" "$identity_json"
+import json
+import sys
+
+requested_name = sys.argv[1].strip()
+payload = json.loads(sys.argv[2] or "{}")
+resource_id = str(payload.get("id") or "").strip()
+client_id = str(payload.get("clientId") or "").strip()
+identity_name = requested_name or str(payload.get("name") or "").strip()
+print(identity_name)
+print(resource_id)
+print(client_id)
+PY
+)
+
+  upsert_if_value "${prefix}_MANAGED_IDENTITY_NAME" "${identity_fields[0]:-}"
+  upsert_if_value "${prefix}_MANAGED_IDENTITY_RESOURCE_ID" "${identity_fields[1]:-}"
+  upsert_if_value "${prefix}_MANAGED_IDENTITY_CLIENT_ID" "${identity_fields[2]:-}"
+}
+
+ensure_hosted_managed_identities() {
+  if [[ "${BOT_AUTH_TYPE:-user_managed_identity}" == "user_managed_identity" ]]; then
+    local bot_identity_name="${BOT_MANAGED_IDENTITY_NAME:-${WRAPPER_ACA_APP_NAME}-mi}"
+    local bot_identity_json=""
+    bot_identity_json="$(resolve_user_assigned_identity "$AZURE_RESOURCE_GROUP" "$bot_identity_name" "${BOT_MANAGED_IDENTITY_RESOURCE_ID:-}")"
+    persist_managed_identity_env "BOT" "$bot_identity_name" "$bot_identity_json"
+  fi
+
+  if [[ "${MCP_AUTH_MODE:-managed_identity}" == "managed_identity" ]]; then
+    local mcp_identity_name="${MCP_MANAGED_IDENTITY_NAME:-${MCP_ACA_APP_NAME}-mi}"
+    local mcp_identity_json=""
+    mcp_identity_json="$(resolve_user_assigned_identity "$AZURE_RESOURCE_GROUP" "$mcp_identity_name" "${MCP_MANAGED_IDENTITY_RESOURCE_ID:-}")"
+    persist_managed_identity_env "MCP" "$mcp_identity_name" "$mcp_identity_json"
+  fi
+}
+
 ensure_input_file() {
   if [[ -f "$INPUT_FILE" ]]; then
     return 0
@@ -543,6 +630,9 @@ else
     bash "$ROOT_DIR/infra/scripts/deploy-foundation.sh" "$MODE"
 fi
 run_bootstrap_step "Reload runtime env after foundation" source_env
+
+run_bootstrap_step "Ensure hosted managed identities" ensure_hosted_managed_identities
+run_bootstrap_step "Reload runtime env after managed identity setup" source_env
 
 run_bootstrap_step "Build and publish planner, wrapper, and MCP images" build_and_publish_images
 

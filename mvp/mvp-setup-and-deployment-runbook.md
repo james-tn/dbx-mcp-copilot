@@ -191,6 +191,10 @@ Recommended hosted mode:
 - `BOT_MANAGED_IDENTITY_CLIENT_ID`
 - `BOT_MANAGED_IDENTITY_RESOURCE_ID`
 
+Azure bootstrap now provisions the wrapper user-assigned managed identity for
+the hosted `mcp-dev` path and persists the resulting resource id and client id
+back into the runtime env.
+
 Transitional hosted mode:
 
 - `BOT_AUTH_TYPE=client_secret`
@@ -198,9 +202,10 @@ Transitional hosted mode:
 
 ## 8. Known Transitional Behavior
 
-- Wrapper runtime and ACA deploy path now prefer explicit managed-identity
-  settings, but bot OAuth connection automation still skips managed-identity
-  mode because the current CLI command requires a client secret.
+- Wrapper runtime, bootstrap, and ACA deploy path now prefer explicit
+  managed-identity settings, but bot OAuth connection automation still skips
+  managed-identity mode because the current CLI command requires a client
+  secret.
 - Planner deployment is MCP-first at runtime, but the secure seed/bootstrap
   path still lives in the planner deployment script.
 - `dev_ui` is intentionally local-only and is not part of Azure bootstrap.
