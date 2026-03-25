@@ -194,8 +194,11 @@ The wrapper runtime supports:
 - `BOT_AUTH_TYPE=user_managed_identity`
 - `BOT_AUTH_TYPE=system_managed_identity`
 
-The default branch direction is managed identity, with `BOT_APP_PASSWORD`
-treated as transitional.
+The default branch direction is managed identity. In hosted
+`user_managed_identity` mode, the wrapper now expects explicit
+`BOT_MANAGED_IDENTITY_CLIENT_ID` and `BOT_MANAGED_IDENTITY_RESOURCE_ID`
+configuration. `BOT_APP_PASSWORD` remains transitional for explicit
+`client_secret` mode only.
 
 ## Shared Backend Package
 

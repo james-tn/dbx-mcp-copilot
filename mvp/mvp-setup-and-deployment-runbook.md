@@ -188,6 +188,8 @@ Transitional fallback:
 Recommended hosted mode:
 
 - `BOT_AUTH_TYPE=user_managed_identity`
+- `BOT_MANAGED_IDENTITY_CLIENT_ID`
+- `BOT_MANAGED_IDENTITY_RESOURCE_ID`
 
 Transitional hosted mode:
 
@@ -196,9 +198,9 @@ Transitional hosted mode:
 
 ## 8. Known Transitional Behavior
 
-- Wrapper runtime supports managed identity, but bot OAuth connection automation
-  still skips managed-identity mode because the current CLI command requires a
-  client secret.
+- Wrapper runtime and ACA deploy path now prefer explicit managed-identity
+  settings, but bot OAuth connection automation still skips managed-identity
+  mode because the current CLI command requires a client secret.
 - Planner deployment is MCP-first at runtime, but the secure seed/bootstrap
   path still lives in the planner deployment script.
 - `dev_ui` is intentionally local-only and is not part of Azure bootstrap.

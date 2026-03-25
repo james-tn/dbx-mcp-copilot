@@ -411,8 +411,10 @@ Implemented in code:
 
 Still pending in deployment/bootstrap:
 
-- wrapper hosted path still assumes `BOT_APP_PASSWORD`
-- bootstrap/deploy scripts still persist secret-based settings
+- wrapper managed-identity hosting still needs bootstrap-time identity
+  provisioning and bot/OAuth wiring
+- bootstrap/deploy scripts still persist some secret-based settings in
+  transitional paths
 - MCP managed-identity trust still needs full deployment wiring
 
 ## Explicit Non-Goals
@@ -428,7 +430,8 @@ These are not goals of this branch design:
 
 The main remaining architecture-to-operations gaps are in deployment wiring:
 
-1. Wrapper deployment still expects `BOT_APP_PASSWORD`.
+1. Wrapper bootstrap still needs first-class managed-identity provisioning and
+   federated bot wiring.
 2. MCP deployment/bootstrap still needs managed-identity trust provisioning.
 3. Env examples still include some legacy planner-secret-era variables for
    transition and compatibility.

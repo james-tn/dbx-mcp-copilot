@@ -55,7 +55,7 @@ def get_bot_managed_identity_client_id() -> str:
     configured = os.environ.get("BOT_MANAGED_IDENTITY_CLIENT_ID", "").strip()
     if configured:
         return configured
-    return get_bot_app_id()
+    raise ValueError("BOT_MANAGED_IDENTITY_CLIENT_ID is required for BOT_AUTH_TYPE=user_managed_identity.")
 
 
 def get_planner_api_scope() -> str:

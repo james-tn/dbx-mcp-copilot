@@ -15,6 +15,7 @@ TEAMS_WEB_CLIENT_ID="${TEAMS_WEB_CLIENT_ID:-5e3ce6c0-2b1f-4285-8d4b-75ee78787346
 FAIL_ON_MISSING_ADMIN_CONSENT="${FAIL_ON_MISSING_ADMIN_CONSENT:-false}"
 PRESERVE_EXISTING_CREDENTIALS="${PRESERVE_EXISTING_CREDENTIALS:-false}"
 BOT_AUTH_TYPE="${BOT_AUTH_TYPE:-user_managed_identity}"
+PLANNER_API_AUTH_MODE="${PLANNER_API_AUTH_MODE:-managed_identity}"
 MCP_AUTH_MODE="${MCP_AUTH_MODE:-managed_identity}"
 
 if [[ -f "$ENV_FILE" ]]; then
@@ -201,6 +202,24 @@ if not updated:
     lines.append(rendered)
 
 env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}
+
+delete_env_value() {
+  local key="$1"
+
+  python - <<'PY' "$ENV_FILE" "$key"
+from pathlib import Path
+import sys
+
+env_path = Path(sys.argv[1])
+key = sys.argv[2]
+
+if not env_path.exists():
+    raise SystemExit(0)
+
+lines = [line for line in env_path.read_text(encoding="utf-8").splitlines() if not line.startswith(f"{key}=")]
+env_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 PY
 }
 
@@ -423,11 +442,11 @@ else
   bot_secret=""
 fi
 
-if [[ "${PLANNER_API_AUTH_MODE:-managed_identity}" == "client_secret" && "$PRESERVE_EXISTING_CREDENTIALS" == "true" && -n "${PLANNER_API_CLIENT_SECRET:-}" ]]; then
+if [[ "$PLANNER_API_AUTH_MODE" == "client_secret" && "$PRESERVE_EXISTING_CREDENTIALS" == "true" && -n "${PLANNER_API_CLIENT_SECRET:-}" ]]; then
   planner_secret="${PLANNER_API_CLIENT_SECRET:-}"
-elif [[ "${PLANNER_API_AUTH_MODE:-managed_identity}" == "client_secret" && -n "$REUSE_PLANNER_API_APP_ID" ]]; then
+elif [[ "$PLANNER_API_AUTH_MODE" == "client_secret" && -n "$REUSE_PLANNER_API_APP_ID" ]]; then
   planner_secret="${PLANNER_API_CLIENT_SECRET:-}"
-elif [[ "${PLANNER_API_AUTH_MODE:-managed_identity}" == "client_secret" ]]; then
+elif [[ "$PLANNER_API_AUTH_MODE" == "client_secret" ]]; then
   planner_secret_json="$(az ad app credential reset --id "$planner_object_id" --append --display-name "planner-api-secret" --years 1 -o json)"
   planner_secret="$(python - <<'PY' "$planner_secret_json"
 import json, sys
@@ -458,19 +477,43 @@ fi
 
 upsert_env_value "PLANNER_API_CLIENT_ID" "$planner_app_id"
 upsert_env_value "PLANNER_API_OBJECT_ID" "$planner_object_id"
-upsert_env_value "PLANNER_API_CLIENT_SECRET" "$planner_secret"
+upsert_env_value "PLANNER_API_AUTH_MODE" "$PLANNER_API_AUTH_MODE"
+if [[ "$PLANNER_API_AUTH_MODE" == "client_secret" ]]; then
+  upsert_env_value "PLANNER_API_CLIENT_SECRET" "$planner_secret"
+else
+  delete_env_value "PLANNER_API_CLIENT_SECRET"
+fi
 upsert_env_value "PLANNER_API_EXPECTED_AUDIENCE" "api://$planner_app_id"
 upsert_env_value "PLANNER_API_SCOPE" "api://$planner_app_id/access_as_user"
 upsert_env_value "MCP_CLIENT_ID" "$mcp_app_id"
 upsert_env_value "MCP_OBJECT_ID" "$mcp_object_id"
-upsert_env_value "MCP_CLIENT_SECRET" "$mcp_secret"
+if [[ "$MCP_AUTH_MODE" == "client_secret" ]]; then
+  upsert_env_value "MCP_CLIENT_SECRET" "$mcp_secret"
+else
+  delete_env_value "MCP_CLIENT_SECRET"
+fi
 upsert_env_value "MCP_EXPECTED_AUDIENCE" "${MCP_EXPECTED_AUDIENCE:-api://$planner_app_id}"
 upsert_env_value "MCP_AUTH_MODE" "$MCP_AUTH_MODE"
 upsert_env_value "BOT_APP_ID" "$bot_app_id"
 upsert_env_value "BOT_APP_OBJECT_ID" "$bot_object_id"
-upsert_env_value "BOT_APP_PASSWORD" "$bot_secret"
+if [[ "$BOT_AUTH_TYPE" == "client_secret" ]]; then
+  upsert_env_value "BOT_APP_PASSWORD" "$bot_secret"
+else
+  delete_env_value "BOT_APP_PASSWORD"
+fi
 upsert_env_value "BOT_AUTH_TYPE" "$BOT_AUTH_TYPE"
-upsert_env_value "BOT_MANAGED_IDENTITY_CLIENT_ID" "${BOT_MANAGED_IDENTITY_CLIENT_ID:-$bot_app_id}"
+if [[ -n "${BOT_MANAGED_IDENTITY_CLIENT_ID:-}" ]]; then
+  upsert_env_value "BOT_MANAGED_IDENTITY_CLIENT_ID" "$BOT_MANAGED_IDENTITY_CLIENT_ID"
+fi
+if [[ -n "${BOT_MANAGED_IDENTITY_RESOURCE_ID:-}" ]]; then
+  upsert_env_value "BOT_MANAGED_IDENTITY_RESOURCE_ID" "$BOT_MANAGED_IDENTITY_RESOURCE_ID"
+fi
+if [[ -n "${MCP_MANAGED_IDENTITY_CLIENT_ID:-}" ]]; then
+  upsert_env_value "MCP_MANAGED_IDENTITY_CLIENT_ID" "$MCP_MANAGED_IDENTITY_CLIENT_ID"
+fi
+if [[ -n "${MCP_MANAGED_IDENTITY_RESOURCE_ID:-}" ]]; then
+  upsert_env_value "MCP_MANAGED_IDENTITY_RESOURCE_ID" "$MCP_MANAGED_IDENTITY_RESOURCE_ID"
+fi
 upsert_env_value "BOT_SSO_APP_ID" "$bot_app_id"
 upsert_env_value "BOT_SSO_RESOURCE" "$bot_sso_resource"
 upsert_env_value "AZUREBOTOAUTHCONNECTIONNAME" "SERVICE_CONNECTION"
@@ -488,16 +531,17 @@ M365 wrapper / bot app created or reused.
 Updated $ENV_FILE with:
 PLANNER_API_CLIENT_ID=$planner_app_id
 PLANNER_API_OBJECT_ID=$planner_object_id
-PLANNER_API_CLIENT_SECRET=$planner_secret
+PLANNER_API_AUTH_MODE=$PLANNER_API_AUTH_MODE
+PLANNER_API_CLIENT_SECRET=${planner_secret:-<managed-identity>}
 PLANNER_API_EXPECTED_AUDIENCE=api://$planner_app_id
 PLANNER_API_SCOPE=api://$planner_app_id/access_as_user
 MCP_CLIENT_ID=$mcp_app_id
 MCP_OBJECT_ID=$mcp_object_id
-MCP_CLIENT_SECRET=$mcp_secret
+MCP_CLIENT_SECRET=${mcp_secret:-<managed-identity>}
 MCP_EXPECTED_AUDIENCE=${MCP_EXPECTED_AUDIENCE:-api://$planner_app_id}
 BOT_APP_ID=$bot_app_id
 BOT_APP_OBJECT_ID=$bot_object_id
-BOT_APP_PASSWORD=$bot_secret
+BOT_APP_PASSWORD=${bot_secret:-<managed-identity>}
 BOT_AUTH_TYPE=$BOT_AUTH_TYPE
 BOT_SSO_APP_ID=$bot_app_id
 BOT_SSO_RESOURCE=$bot_sso_resource

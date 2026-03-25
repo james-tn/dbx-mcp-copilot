@@ -205,7 +205,7 @@ common_env_vars=(
   "AZURE_TENANT_ID=$AZURE_TENANT_ID"
   "BOT_APP_ID=$BOT_APP_ID"
   "BOT_AUTH_TYPE=$BOT_AUTH_TYPE"
-  "BOT_MANAGED_IDENTITY_CLIENT_ID=${BOT_MANAGED_IDENTITY_CLIENT_ID:-$BOT_APP_ID}"
+  "BOT_MANAGED_IDENTITY_CLIENT_ID=${BOT_MANAGED_IDENTITY_CLIENT_ID:-}"
   "SECURE_DEPLOYMENT=$SECURE_MODE"
   "PLANNER_API_EXPECTED_AUDIENCE=$PLANNER_API_EXPECTED_AUDIENCE"
   "PLANNER_API_SCOPE=${PLANNER_API_SCOPE:-${PLANNER_API_EXPECTED_AUDIENCE}/access_as_user}"
@@ -234,6 +234,15 @@ if [[ "$BOT_AUTH_TYPE" == "client_secret" ]]; then
   secret_pairs=(
     "bot-app-password=$BOT_APP_PASSWORD"
   )
+elif [[ "$BOT_AUTH_TYPE" == "user_managed_identity" ]]; then
+  if [[ -z "${BOT_MANAGED_IDENTITY_CLIENT_ID:-}" ]]; then
+    echo "BOT_MANAGED_IDENTITY_CLIENT_ID is required when BOT_AUTH_TYPE=user_managed_identity." >&2
+    exit 1
+  fi
+  if [[ -z "${BOT_MANAGED_IDENTITY_RESOURCE_ID:-}" ]]; then
+    echo "BOT_MANAGED_IDENTITY_RESOURCE_ID is required when BOT_AUTH_TYPE=user_managed_identity for hosted wrapper deployment." >&2
+    exit 1
+  fi
 fi
 
 if resource_exists "$AZURE_RESOURCE_GROUP" "$WRAPPER_ACA_APP_NAME" "Microsoft.App/containerApps"; then

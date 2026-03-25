@@ -79,14 +79,30 @@ def test_build_connection_manager_supports_user_managed_identity(monkeypatch) ->
     monkeypatch.setenv("AZURE_TENANT_ID", "tenant-id")
     monkeypatch.setenv("BOT_APP_ID", "bot-app-id")
     monkeypatch.setenv("BOT_AUTH_TYPE", "user_managed_identity")
+    monkeypatch.setenv("BOT_MANAGED_IDENTITY_CLIENT_ID", "managed-identity-client-id")
     monkeypatch.delenv("BOT_APP_PASSWORD", raising=False)
 
     manager = build_connection_manager()
     config = manager.get_default_connection_configuration()
 
     assert str(config.AUTH_TYPE).lower().endswith("user_managed_identity")
-    assert config.CLIENT_ID == "bot-app-id"
+    assert config.CLIENT_ID == "managed-identity-client-id"
     assert config.CLIENT_SECRET is None
+
+
+def test_build_connection_manager_requires_explicit_user_managed_identity_client_id(monkeypatch) -> None:
+    monkeypatch.setenv("AZURE_TENANT_ID", "tenant-id")
+    monkeypatch.setenv("BOT_APP_ID", "bot-app-id")
+    monkeypatch.setenv("BOT_AUTH_TYPE", "user_managed_identity")
+    monkeypatch.delenv("BOT_MANAGED_IDENTITY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("BOT_APP_PASSWORD", raising=False)
+
+    try:
+        build_connection_manager()
+    except ValueError as exc:
+        assert "BOT_MANAGED_IDENTITY_CLIENT_ID" in str(exc)
+    else:
+        raise AssertionError("Expected explicit managed identity client id requirement")
 
 
 def test_wrapper_incremental_delivery_flag_defaults_off(monkeypatch) -> None:
