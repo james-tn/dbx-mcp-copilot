@@ -1,5 +1,11 @@
 # Veeam Revenue Intelligence: M365 Copilot Agent Design
 
+> Historical strategy document only.
+> This file is not the implementation source of truth for the current `mcp-dev`
+> branch. Use [`mvp/daily-account-planner-architecture.md`](/mnt/c/testing/veeam/revenue_intelligence/mvp/daily-account-planner-architecture.md)
+> and [`mvp/mvp-setup-and-deployment-runbook.md`](/mnt/c/testing/veeam/revenue_intelligence/mvp/mvp-setup-and-deployment-runbook.md)
+> for the current architecture and operator flow.
+
 ## Building Account Pulse & Next Move for Microsoft 365 Copilot
 
 > **Version:** 1.0 | **Date:** 2026-03-17

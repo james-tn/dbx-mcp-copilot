@@ -70,3 +70,34 @@ def test_send_turn_raises_auth_error_for_unauthorized_response() -> None:
             )
         )
     asyncio.run(client.close())
+
+
+def test_collect_streamed_turn_parses_sse_events() -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        body = (
+            'event: ack\n'
+            'data: {"event":"ack"}\n\n'
+            'event: text_delta\n'
+            'data: {"event":"text_delta","delta":"Hello "}\n\n'
+            'event: final\n'
+            'data: {"event":"final","reply":"Hello world"}\n\n'
+        )
+        return httpx.Response(200, text=body)
+
+    transport = httpx.MockTransport(_handler)
+    client = PlannerServiceClient(
+        base_url="https://planner.example.com",
+        timeout_seconds=5,
+        http_client=httpx.AsyncClient(transport=transport),
+    )
+
+    payload = asyncio.run(
+        client.collect_streamed_turn(
+            session_id="conversation-1",
+            text="hello",
+            access_token="planner-token",
+        )
+    )
+
+    assert payload["reply"] == "Hello world"
+    asyncio.run(client.close())

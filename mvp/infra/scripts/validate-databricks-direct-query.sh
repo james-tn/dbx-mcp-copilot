@@ -52,15 +52,15 @@ else
   export DATABRICKS_CATALOG="${DATABRICKS_CATALOG:-veeam_demo}"
 fi
 
-export PYTHONPATH="$ROOT_DIR/agents${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 python - <<'PY'
 import asyncio
 import json
 import os
 
-from auth_context import acquire_databricks_access_token
-from databricks_sql import DatabricksSqlClient
+from mcp_server.auth_context import acquire_databricks_access_token
+from mcp_server.databricks_sql import DatabricksSqlClient
 
 
 async def main() -> None:

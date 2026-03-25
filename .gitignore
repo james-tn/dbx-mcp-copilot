@@ -1,6 +1,7 @@
 # Local environment files
 .env
 **/.env
+*.pre-mcpdev
 
 # Python bytecode
 __pycache__/
@@ -9,3 +10,4 @@ __pycache__/
 
 # Local-only source material and scratch docs
 mvp/customer_input/
+mvp/infra/outputs/

@@ -378,7 +378,7 @@ trap cleanup_job_payload EXIT
 
 render_seed_job_payload() {
   local output_path="$1"
-  python - <<'PY' "$output_path" "$AZURE_LOCATION" "$ACA_ENVIRONMENT_NAME" "$AZURE_SUBSCRIPTION_ID" "$AZURE_RESOURCE_GROUP" "$PLANNER_API_IMAGE" "${registry_settings[0]:-}" "${registry_settings[1]:-}" "${registry_settings[2]:-}" "$PLANNER_API_CLIENT_SECRET" "${DATABRICKS_SEED_TIMEOUT_SECONDS:-1800}" "${PLANNER_ACA_APP_NAME}" "${PLANNER_SEED_COMMAND}" "$(printf '%s\n' "${common_env_vars[@]}")" "$(printf '%s\n' "${seed_job_env_vars[@]}")"
+  python - <<'PY' "$output_path" "$AZURE_LOCATION" "$ACA_ENVIRONMENT_NAME" "$AZURE_SUBSCRIPTION_ID" "$AZURE_RESOURCE_GROUP" "$PLANNER_API_IMAGE" "${registry_settings[0]:-}" "${registry_settings[1]:-}" "${registry_settings[2]:-}" "${PLANNER_API_CLIENT_SECRET:-}" "${DATABRICKS_SEED_TIMEOUT_SECONDS:-1800}" "${PLANNER_ACA_APP_NAME}" "${PLANNER_SEED_COMMAND}" "$(printf '%s\n' "${common_env_vars[@]}")" "$(printf '%s\n' "${seed_job_env_vars[@]}")"
 import json
 import sys
 
@@ -430,13 +430,16 @@ configuration = {
         "parallelism": 1,
         "replicaCompletionCount": 1,
     },
-    "secrets": [
+    "secrets": [],
+}
+
+if planner_api_client_secret:
+    configuration["secrets"].append(
         {
             "name": "planner-api-client-secret",
             "value": planner_api_client_secret,
         }
-    ],
-}
+    )
 
 if registry_server and registry_username and registry_password:
     configuration["secrets"].append(
@@ -559,8 +562,8 @@ required_vars=(
   AZURE_OPENAI_ENDPOINT
   AZURE_OPENAI_DEPLOYMENT
   PLANNER_API_CLIENT_ID
-  PLANNER_API_CLIENT_SECRET
   PLANNER_API_EXPECTED_AUDIENCE
+  MCP_BASE_URL
   DATABRICKS_HOST
 )
 
@@ -667,23 +670,7 @@ common_env_vars=(
   "AZURE_OPENAI_RATE_LIMIT_BACKOFF_SECONDS=${AZURE_OPENAI_RATE_LIMIT_BACKOFF_SECONDS:-2}"
   "PLANNER_API_CLIENT_ID=$PLANNER_API_CLIENT_ID"
   "PLANNER_API_EXPECTED_AUDIENCE=$PLANNER_API_EXPECTED_AUDIENCE"
-  "DATABRICKS_HOST=$DATABRICKS_HOST"
-  "DATABRICKS_CATALOG=${effective_databricks_catalog}"
-  "DATABRICKS_SKIP_CATALOG_CREATE=${effective_skip_catalog_create}"
-  "DATABRICKS_OBO_SCOPE=${DATABRICKS_OBO_SCOPE:-2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default}"
-  "DATABRICKS_WAREHOUSE_ID=${DATABRICKS_WAREHOUSE_ID:-}"
-  "DATABRICKS_AUTO_CREATE_WAREHOUSE=${DATABRICKS_AUTO_CREATE_WAREHOUSE}"
-  "DATABRICKS_WAREHOUSE_NAME=${DATABRICKS_WAREHOUSE_NAME}"
-  "DATABRICKS_WAREHOUSE_CLUSTER_SIZE=${DATABRICKS_WAREHOUSE_CLUSTER_SIZE}"
-  "DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS=${DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS}"
-  "DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS=${DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS}"
-  "DATABRICKS_WAREHOUSE_AUTO_STOP_MINS=${DATABRICKS_WAREHOUSE_AUTO_STOP_MINS}"
-  "DATABRICKS_WAREHOUSE_TYPE=${DATABRICKS_WAREHOUSE_TYPE}"
-  "DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS=${DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS}"
-  "DATABRICKS_SQL_TIMEOUT_SECONDS=${DATABRICKS_SQL_TIMEOUT_SECONDS:-30}"
-  "DATABRICKS_SQL_RETRY_COUNT=${DATABRICKS_SQL_RETRY_COUNT:-1}"
-  "DATABRICKS_SQL_POLL_ATTEMPTS=${DATABRICKS_SQL_POLL_ATTEMPTS:-6}"
-  "DATABRICKS_SQL_POLL_INTERVAL_SECONDS=${DATABRICKS_SQL_POLL_INTERVAL_SECONDS:-1}"
+  "MCP_BASE_URL=$MCP_BASE_URL"
   "SESSION_STORE_MODE=${SESSION_STORE_MODE:-memory}"
   "SESSION_MAX_TURNS=${SESSION_MAX_TURNS:-20}"
   "SECURE_DEPLOYMENT=$SECURE_MODE"
@@ -697,13 +684,8 @@ common_env_vars=(
   "ACCOUNT_PULSE_ENABLE_INTERNAL_AGGREGATOR=${ACCOUNT_PULSE_ENABLE_INTERNAL_AGGREGATOR:-true}"
 )
 
-secret_env_vars=(
-  "PLANNER_API_CLIENT_SECRET=secretref:planner-api-client-secret"
-)
-
-secret_pairs=(
-  "planner-api-client-secret=$PLANNER_API_CLIENT_SECRET"
-)
+secret_env_vars=()
+secret_pairs=()
 
 if [[ "$SECURE_MODE" != "true" && -n "${AZURE_OPENAI_API_KEY:-}" ]]; then
   secret_env_vars+=(
@@ -784,6 +766,10 @@ PY
     )
   fi
   if [[ "$bootstrap_auth_mode" == "azure_service_principal" ]]; then
+    if [[ -z "${PLANNER_API_CLIENT_SECRET:-}" ]]; then
+      echo "Secure bootstrap auth mode azure_service_principal requires PLANNER_API_CLIENT_SECRET, but this path is disabled by default in mcp-dev." >&2
+      exit 1
+    fi
     seed_job_env_vars+=(
       "ARM_TENANT_ID=$AZURE_TENANT_ID"
       "ARM_CLIENT_ID=$PLANNER_API_CLIENT_ID"
@@ -836,11 +822,13 @@ if [[ -n "${AZURE_OPENAI_ACCOUNT_NAME:-}" ]]; then
 fi
 
 if resource_exists "$AZURE_RESOURCE_GROUP" "$PLANNER_ACA_APP_NAME" "Microsoft.App/containerApps"; then
-  az containerapp secret set \
-    --name "$PLANNER_ACA_APP_NAME" \
-    --resource-group "$AZURE_RESOURCE_GROUP" \
-    --secrets "${secret_pairs[@]}" \
-    >/dev/null
+  if [[ "${#secret_pairs[@]}" -gt 0 ]]; then
+    az containerapp secret set \
+      --name "$PLANNER_ACA_APP_NAME" \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      --secrets "${secret_pairs[@]}" \
+      >/dev/null
+  fi
   az containerapp update \
     --name "$PLANNER_ACA_APP_NAME" \
     --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -865,7 +853,6 @@ else
     --ingress "$ingress_mode" \
     --min-replicas "${ACA_MIN_REPLICAS:-1}" \
     --max-replicas "${ACA_MAX_REPLICAS:-1}" \
-    --secrets "${secret_pairs[@]}" \
     --env-vars "${common_env_vars[@]}" "${secret_env_vars[@]}" \
     >/dev/null
 fi

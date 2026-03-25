@@ -12,39 +12,39 @@ import json
 import logging
 import os
 import re
-import sys
 import time
 from pathlib import Path
-from typing import Annotated, Any, Callable, Sequence
+from typing import Any, Callable, Sequence
 
-from agent_framework import tool
+from agent_framework import MCPStreamableHTTPTool, tool
 from agent_framework.azure import AzureOpenAIResponsesClient
+import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 try:
+    from .auth_context import PlannerMcpBearerAuth
     from .config import (
         get_account_pulse_execution_mode,
         get_account_pulse_internal_aggregator_enabled,
         get_account_pulse_max_concurrency,
+        get_mcp_base_url,
         get_account_pulse_model_concurrency,
         get_account_pulse_replay_fixture_set,
         get_account_pulse_source_mode,
     )
     from .resilience import run_with_rate_limit_retry
 except ImportError:
+    from auth_context import PlannerMcpBearerAuth
     from config import (
         get_account_pulse_execution_mode,
         get_account_pulse_internal_aggregator_enabled,
         get_account_pulse_max_concurrency,
+        get_mcp_base_url,
         get_account_pulse_model_concurrency,
         get_account_pulse_replay_fixture_set,
         get_account_pulse_source_mode,
     )
     from resilience import run_with_rate_limit_retry
-
-sys.path.insert(0, str(Path(__file__).resolve().parent / "tools"))
-
-from edgar_lookup import edgar_lookup as _edgar_lookup
 
 _FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "account_pulse_replay.json"
 logger = logging.getLogger(__name__)
@@ -239,20 +239,19 @@ def _fixture_for_parent(fixture_set: dict[str, Any], parent_name: str) -> dict[s
 
 
 def _build_live_edgar_tool():
-    @tool(
-        name="edgar_lookup",
-        description=(
-            "Look up the assigned parent company in SEC EDGAR and return JSON with "
-            "public status plus recent 10-K, 10-Q, and 8-K filings."
+    return MCPStreamableHTTPTool(
+        name="shared_research_data",
+        url=get_mcp_base_url(),
+        description="Shared research tools served by the Daily Account Planner MCP server.",
+        load_tools=True,
+        load_prompts=False,
+        allowed_tools=["edgar_lookup"],
+        request_timeout=60,
+        http_client=httpx.AsyncClient(
+            timeout=60.0,
+            auth=PlannerMcpBearerAuth(),
         ),
     )
-    async def edgar_lookup(
-        company_name: Annotated[str, Field(description="Parent company name to search in EDGAR")],
-    ) -> str:
-        result = await asyncio.to_thread(_edgar_lookup, company_name)
-        return _json_dumps(result)
-
-    return edgar_lookup
 
 
 def _build_replay_tools(fixture_set: dict[str, Any], parent_name: str):

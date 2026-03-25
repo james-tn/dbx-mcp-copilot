@@ -6,8 +6,11 @@ import os
 import sys
 from typing import Any
 
+from agent_framework import MCPStreamableHTTPTool
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import parallel_scan
 from parallel_scan import (
     ScanBundle,
     WorkerScanResult,
@@ -264,3 +267,13 @@ def test_build_scan_parents_parallel_tool_serializes_bundle(monkeypatch) -> None
     payload = json.loads(raw)
     assert payload["scan_targets_total"] == 1
     assert payload["scan_targets_completed"] == 1
+
+
+def test_live_edgar_tool_is_loaded_from_mcp(monkeypatch) -> None:
+    monkeypatch.setenv("MCP_BASE_URL", "https://mcp.example.com/mcp")
+
+    tool = parallel_scan._build_live_edgar_tool()
+
+    assert isinstance(tool, MCPStreamableHTTPTool)
+    assert tool.url == "https://mcp.example.com/mcp"
+    assert tool.allowed_tools == ["edgar_lookup"]

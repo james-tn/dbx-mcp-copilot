@@ -1,8 +1,5 @@
 """
-Direct Databricks SQL helper for the Daily Account Planner.
-
-The planner executes a small set of app-owned canned queries through the
-Databricks SQL Statements API. Agents never receive a dynamic SQL capability.
+Shared Databricks SQL helper for enterprise middle-tier services.
 """
 
 from __future__ import annotations
@@ -11,25 +8,13 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass
-from pathlib import Path
-import sys
 from typing import Any
 
 import httpx
 from azure.identity import AzureCliCredential, DefaultAzureCredential
 
-from databricks_network import enable_private_databricks_resolution
-
-try:
-    from ..shared.identity import is_hosted_environment
-except ImportError:
-    _MODULE_PATH = Path(__file__).resolve()
-    for _candidate_root in (_MODULE_PATH.parent.parent, _MODULE_PATH.parent):
-        if (_candidate_root / "shared").exists():
-            if str(_candidate_root) not in sys.path:
-                sys.path.insert(0, str(_candidate_root))
-            break
-    from shared.identity import is_hosted_environment
+from .databricks_network import enable_private_databricks_resolution
+from .identity import is_hosted_environment
 
 _DATABRICKS_AUDIENCE = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default"
 _DEFAULT_HOST = "https://adb-7405610222366876.16.azuredatabricks.net"
@@ -60,6 +45,7 @@ class DatabricksSqlSettings:
     poll_attempts: int
     poll_interval_seconds: float
     pat: str | None
+
 
 def load_settings() -> DatabricksSqlSettings:
     host = os.environ.get("DATABRICKS_HOST", "").strip().rstrip("/") or _DEFAULT_HOST

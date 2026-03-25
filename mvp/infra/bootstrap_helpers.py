@@ -36,27 +36,27 @@ REQUIRED_INPUTS = {
 
 MODE_DEFAULTS = {
     "open": {
-        "AZURE_RESOURCE_GROUP": "rg-daily-account-planner",
+        "AZURE_RESOURCE_GROUP": "rg-daily-account-planner-mcpdev",
         "AZURE_LOCATION": "eastus",
         "DEPLOYMENT_MODE": "open",
         "SECURE_DEPLOYMENT": "false",
-        "INFRA_NAME_PREFIX": "dailyacctplanneropen",
+        "INFRA_NAME_PREFIX": "dailyacctplannermcpdev",
         "WRAPPER_ENABLE_DEBUG_CHAT": "false",
         "APP_NAME_PREFIX": "",
-        "M365_APP_SHORT_NAME": "Daily Planner",
-        "M365_APP_FULL_NAME": "Daily Account Planner",
+        "M365_APP_SHORT_NAME": "Daily Planner MCP Dev",
+        "M365_APP_FULL_NAME": "Daily Account Planner MCP Dev",
     },
     "secure": {
-        "AZURE_RESOURCE_GROUP": "rg-daily-account-planner-secure",
+        "AZURE_RESOURCE_GROUP": "rg-daily-account-planner-mcpdev-secure",
         "AZURE_LOCATION": "eastus2",
         "DEPLOYMENT_MODE": "secure",
         "SECURE_DEPLOYMENT": "true",
-        "INFRA_NAME_PREFIX": "dailyacctplannersec",
+        "INFRA_NAME_PREFIX": "dailyacctplannermcpdevsec",
         "DATABRICKS_SKIP_CATALOG_CREATE": "true",
         "WRAPPER_ENABLE_DEBUG_CHAT": "true",
-        "APP_NAME_PREFIX": "daily-account-planner-secure",
-        "M365_APP_SHORT_NAME": "Daily Secured Planner",
-        "M365_APP_FULL_NAME": "Daily Secured Account Planner",
+        "APP_NAME_PREFIX": "",
+        "M365_APP_SHORT_NAME": "Daily Secured Planner MCP Dev",
+        "M365_APP_FULL_NAME": "Daily Secured Account Planner MCP Dev",
     },
 }
 
@@ -109,6 +109,21 @@ def write_env_file(path: str | Path, values: OrderedDict[str, str]) -> None:
     env_path = Path(path)
     rendered_lines = [f"{key}={_render_env_value(value)}" for key, value in values.items()]
     env_path.write_text("\n".join(rendered_lines) + "\n", encoding="utf-8")
+
+
+def backup_pre_mcpdev_files(root: str | Path) -> list[tuple[str, str]]:
+    root_path = Path(root)
+    backups: list[tuple[str, str]] = []
+    for relative_path in (".env", ".env.secure", ".env.inputs", ".env.secure.inputs"):
+        source = root_path / relative_path
+        if not source.exists():
+            continue
+        backup = source.with_name(f"{source.name}.pre-mcpdev")
+        if backup.exists():
+            continue
+        backup.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        backups.append((str(source), str(backup)))
+    return backups
 
 
 def csv_items(value: str) -> list[str]:
@@ -240,12 +255,8 @@ def build_runtime_env(
     runtime["DEPLOYMENT_MODE"] = mode
     runtime["SECURE_DEPLOYMENT"] = "true" if mode == "secure" else "false"
     app_name_prefix = runtime.get("APP_NAME_PREFIX", "").strip()
-    if mode == "open":
-        legacy_open_prefix = "daily-account-planner"
-        if not app_name_prefix or app_name_prefix == legacy_open_prefix:
-            app_name_prefix = f"{legacy_open_prefix}-{prefix}"
-    else:
-        app_name_prefix = app_name_prefix or defaults["APP_NAME_PREFIX"]
+    if not app_name_prefix:
+        app_name_prefix = f"daily-account-planner-{prefix}"
     runtime["APP_NAME_PREFIX"] = app_name_prefix
     runtime["AZURE_OPENAI_ACCOUNT_NAME"] = (
         runtime.get("AZURE_OPENAI_ACCOUNT_NAME", "").strip()
@@ -261,6 +272,9 @@ def build_runtime_env(
     )
     runtime["WRAPPER_ACA_APP_NAME"] = (
         runtime.get("WRAPPER_ACA_APP_NAME", "").strip() or _sanitize_name(prefix, "-m365-wrapper", 60)
+    )
+    runtime["MCP_ACA_APP_NAME"] = (
+        runtime.get("MCP_ACA_APP_NAME", "").strip() or _sanitize_name(prefix, "-mcp-server", 60)
     )
     runtime["SECURE_VNET_NAME"] = runtime.get("SECURE_VNET_NAME", "").strip() or _sanitize_name(prefix, "-vnet", 60)
     runtime["DATABRICKS_WORKSPACE_NAME"] = (
@@ -346,6 +360,13 @@ def _command_render_seed_sql(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_backup_runtime_envs(args: argparse.Namespace) -> int:
+    backups = backup_pre_mcpdev_files(args.root)
+    for source, backup in backups:
+        print(f"{source} -> {backup}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -370,6 +391,10 @@ def main(argv: list[str] | None = None) -> int:
     render_seed.add_argument("--seller-a-upn", required=True)
     render_seed.add_argument("--seller-b-upn", required=True)
     render_seed.set_defaults(func=_command_render_seed_sql)
+
+    backup_runtime = subparsers.add_parser("backup-runtime-envs")
+    backup_runtime.add_argument("--root", required=True)
+    backup_runtime.set_defaults(func=_command_backup_runtime_envs)
 
     args = parser.parse_args(argv)
     return args.func(args)

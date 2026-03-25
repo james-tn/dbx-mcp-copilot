@@ -12,17 +12,22 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from agent_framework import Agent, tool
+from agent_framework import Agent, MCPStreamableHTTPTool, tool
 from agent_framework.azure import AzureOpenAIResponsesClient
+import httpx
 
 try:
+    from .auth_context import PlannerMcpBearerAuth
     from .config import get_account_pulse_execution_mode
-    from .databricks_tools import get_scoped_accounts, get_top_opportunities
+    from .config import get_mcp_base_url
     from .parallel_scan import ScanBundle, build_scan_parents_parallel_tool
+    from ..shared.streaming_context import emit_stream_event
 except ImportError:
+    from auth_context import PlannerMcpBearerAuth
     from config import get_account_pulse_execution_mode
-    from databricks_tools import get_scoped_accounts, get_top_opportunities
+    from config import get_mcp_base_url
     from parallel_scan import ScanBundle, build_scan_parents_parallel_tool
+    from shared.streaming_context import emit_stream_event
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -93,7 +98,7 @@ Close with:
 3. Never confuse companies with similar names.
 4. Flag single-source stories: "Developing — reported by [source], not yet confirmed."
 5. No invented financial data.
-6. If the seller asks how data access works, explain that the planner uses the signed-in user's Databricks access and secure views.
+6. If the seller asks how data access works, explain that the planner uses the signed-in user's secure enterprise data access through MCP-backed tools.
 
 ## Filing Handling
 
@@ -291,6 +296,40 @@ def _tool_func(tool_obj: Any) -> Any:
     return getattr(tool_obj, "func", tool_obj)
 
 
+async def _call_mcp_json(
+    *,
+    tool_name: str,
+    arguments: dict[str, Any] | None = None,
+    progress_label: str | None = None,
+) -> str:
+    label = progress_label or tool_name
+    await emit_stream_event("tool_call_started", tool_name=tool_name, label=label)
+    tool = MCPStreamableHTTPTool(
+        name="enterprise_data",
+        url=get_mcp_base_url(),
+        description="Enterprise data tools served by the Daily Account Planner MCP server.",
+        load_tools=True,
+        load_prompts=False,
+        allowed_tools=[tool_name],
+        request_timeout=60,
+        http_client=httpx.AsyncClient(
+            timeout=60.0,
+            auth=PlannerMcpBearerAuth(),
+        ),
+    )
+    async with tool:
+        result = await tool.call_tool(tool_name, **(arguments or {}))
+    await emit_stream_event(
+        "tool_call_progress",
+        tool_name=tool_name,
+        label=label,
+        progress=1.0,
+        total=1.0,
+        message="completed",
+    )
+    return result
+
+
 def _normalize_string_list(values: Any) -> list[str]:
     if values in (None, ""):
         return []
@@ -399,13 +438,13 @@ def _build_parent_scan_targets(
 def create_account_pulse_agent(
     client: AzureOpenAIResponsesClient,
     *,
-    scoped_accounts_tool: Any = get_scoped_accounts,
-    top_opportunities_tool: Any = get_top_opportunities,
+    scoped_accounts_tool: Any | None = None,
+    top_opportunities_tool: Any | None = None,
 ) -> Agent:
-    """Create the Account Pulse agent with semantic Databricks tools and internal parent scanning."""
+    """Create the Account Pulse agent with MCP-backed scope loading and internal parent scanning."""
     scan_parents_parallel = build_scan_parents_parallel_tool(client)
-    scoped_accounts_func = _tool_func(scoped_accounts_tool)
-    top_opportunities_func = _tool_func(top_opportunities_tool)
+    scoped_accounts_func = _tool_func(scoped_accounts_tool) if scoped_accounts_tool is not None else None
+    top_opportunities_func = _tool_func(top_opportunities_tool) if top_opportunities_tool is not None else None
     scan_parents_parallel_func = _tool_func(scan_parents_parallel)
 
     @tool(
@@ -419,7 +458,15 @@ def create_account_pulse_agent(
     async def generate_account_pulse_briefing(request: str) -> str:
         started = time.perf_counter()
         logger.info("Account Pulse briefing started.", extra={"request_text": request[:120]})
-        scoped_accounts_payload = json.loads(await scoped_accounts_func())
+        if scoped_accounts_func is not None:
+            scoped_accounts_payload = json.loads(await scoped_accounts_func())
+        else:
+            scoped_accounts_payload = json.loads(
+                await _call_mcp_json(
+                    tool_name="get_scoped_accounts",
+                    progress_label="Loading scoped accounts",
+                )
+            )
         accounts = list(scoped_accounts_payload.get("accounts", []) or [])
         if not accounts:
             logger.warning("Account Pulse briefing aborted because no scoped accounts were returned.")
@@ -428,9 +475,18 @@ def create_account_pulse_agent(
 
         top_opportunities_payload = None
         if str(scoped_accounts_payload.get("segment", "")).upper() == "VEL":
-            top_opportunities_payload = json.loads(
-                await top_opportunities_func(filter_mode="velocity_candidates")
-            )
+            if top_opportunities_func is not None:
+                top_opportunities_payload = json.loads(
+                    await top_opportunities_func(filter_mode="velocity_candidates")
+                )
+            else:
+                top_opportunities_payload = json.loads(
+                    await _call_mcp_json(
+                        tool_name="get_top_opportunities",
+                        arguments={"filter_mode": "velocity_candidates"},
+                        progress_label="Loading top opportunities",
+                    )
+                )
 
         scan_targets, selected_account_count = _build_parent_scan_targets(
             scoped_accounts_payload,
@@ -474,8 +530,8 @@ def create_account_pulse_agent(
     return client.as_agent(
         name="AccountPulse",
         description=(
-            "Specialist for morning briefings across seller accounts using Databricks, "
-            "parallel parent scanning, and source-grounded signal aggregation."
+            "Specialist for morning briefings across seller accounts using MCP-backed "
+            "enterprise data access, parallel parent scanning, and source-grounded signal aggregation."
         ),
         instructions=ACCOUNT_PULSE_INSTRUCTIONS,
         tools=[generate_account_pulse_briefing],

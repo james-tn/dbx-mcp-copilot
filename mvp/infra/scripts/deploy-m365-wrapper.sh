@@ -115,6 +115,14 @@ SECURE_MODE="false"
 if [[ "${DEPLOYMENT_MODE,,}" == "secure" || "${DEPLOYMENT_MODE,,}" == "true" ]]; then
   SECURE_MODE="true"
 fi
+BOT_AUTH_TYPE="${BOT_AUTH_TYPE:-}"
+if [[ -z "$BOT_AUTH_TYPE" ]]; then
+  if [[ -n "${BOT_APP_PASSWORD:-}" ]]; then
+    BOT_AUTH_TYPE="client_secret"
+  else
+    BOT_AUTH_TYPE="user_managed_identity"
+  fi
+fi
 
 required_vars=(
   AZURE_SUBSCRIPTION_ID
@@ -124,7 +132,6 @@ required_vars=(
   WRAPPER_IMAGE
   AZURE_TENANT_ID
   BOT_APP_ID
-  BOT_APP_PASSWORD
   PLANNER_API_EXPECTED_AUDIENCE
 )
 
@@ -197,6 +204,8 @@ demo_debug_allowed_upns="$(derive_demo_user_csv)"
 common_env_vars=(
   "AZURE_TENANT_ID=$AZURE_TENANT_ID"
   "BOT_APP_ID=$BOT_APP_ID"
+  "BOT_AUTH_TYPE=$BOT_AUTH_TYPE"
+  "BOT_MANAGED_IDENTITY_CLIENT_ID=${BOT_MANAGED_IDENTITY_CLIENT_ID:-$BOT_APP_ID}"
   "SECURE_DEPLOYMENT=$SECURE_MODE"
   "PLANNER_API_EXPECTED_AUDIENCE=$PLANNER_API_EXPECTED_AUDIENCE"
   "PLANNER_API_SCOPE=${PLANNER_API_SCOPE:-${PLANNER_API_EXPECTED_AUDIENCE}/access_as_user}"
@@ -212,16 +221,29 @@ common_env_vars=(
   "WRAPPER_DEBUG_EXPECTED_AUDIENCE=${WRAPPER_DEBUG_EXPECTED_AUDIENCE:-${BOT_SSO_RESOURCE:-api://botid-${BOT_APP_ID}}}"
 )
 
-secret_env_vars=(
-  "BOT_APP_PASSWORD=secretref:bot-app-password"
-)
+secret_env_vars=()
+secret_pairs=()
+if [[ "$BOT_AUTH_TYPE" == "client_secret" ]]; then
+  if [[ -z "${BOT_APP_PASSWORD:-}" ]]; then
+    echo "BOT_APP_PASSWORD is required when BOT_AUTH_TYPE=client_secret." >&2
+    exit 1
+  fi
+  secret_env_vars=(
+    "BOT_APP_PASSWORD=secretref:bot-app-password"
+  )
+  secret_pairs=(
+    "bot-app-password=$BOT_APP_PASSWORD"
+  )
+fi
 
 if resource_exists "$AZURE_RESOURCE_GROUP" "$WRAPPER_ACA_APP_NAME" "Microsoft.App/containerApps"; then
-  az containerapp secret set \
-    --name "$WRAPPER_ACA_APP_NAME" \
-    --resource-group "$AZURE_RESOURCE_GROUP" \
-    --secrets "bot-app-password=$BOT_APP_PASSWORD" \
-    >/dev/null
+  if [[ "${#secret_pairs[@]}" -gt 0 ]]; then
+    az containerapp secret set \
+      --name "$WRAPPER_ACA_APP_NAME" \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      --secrets "${secret_pairs[@]}" \
+      >/dev/null
+  fi
   az containerapp update \
     --name "$WRAPPER_ACA_APP_NAME" \
     --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -241,8 +263,15 @@ else
     --ingress external \
     --min-replicas "${ACA_MIN_REPLICAS:-1}" \
     --max-replicas "${ACA_MAX_REPLICAS:-1}" \
-    --secrets "bot-app-password=$BOT_APP_PASSWORD" \
     --env-vars "${common_env_vars[@]}" "${secret_env_vars[@]}" \
+    >/dev/null
+fi
+
+if [[ "$BOT_AUTH_TYPE" == "user_managed_identity" && -n "${BOT_MANAGED_IDENTITY_RESOURCE_ID:-}" ]]; then
+  az containerapp identity assign \
+    --name "$WRAPPER_ACA_APP_NAME" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --user-assigned "$BOT_MANAGED_IDENTITY_RESOURCE_ID" \
     >/dev/null
 fi
 

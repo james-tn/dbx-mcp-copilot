@@ -16,12 +16,21 @@ from typing import Any
 
 from azure.identity import ClientSecretCredential, ManagedIdentityCredential
 
-from databricks_admin import (
-    DatabricksAdminClient,
-    DatabricksAdminError,
-    DatabricksAdminSettings,
-)
-from databricks_sql import DatabricksSqlClient, DatabricksSqlError, DatabricksSqlSettings, load_settings
+try:
+    from .databricks_admin import (
+        DatabricksAdminClient,
+        DatabricksAdminError,
+        DatabricksAdminSettings,
+    )
+    from .databricks_sql import DatabricksSqlClient, DatabricksSqlError, DatabricksSqlSettings, load_settings
+except ImportError:
+    from databricks_admin import (
+        DatabricksAdminClient,
+        DatabricksAdminError,
+        DatabricksAdminSettings,
+    )
+    from databricks_sql import DatabricksSqlClient, DatabricksSqlError, DatabricksSqlSettings, load_settings
+
 from infra.bootstrap_helpers import derive_demo_users, render_seed_sql_template
 
 _MODULE_DIR = Path(__file__).resolve().parent

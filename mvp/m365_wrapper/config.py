@@ -40,6 +40,24 @@ def get_bot_app_id() -> str:
     return _required("BOT_APP_ID")
 
 
+def get_bot_auth_type() -> AuthTypes:
+    configured = os.environ.get("BOT_AUTH_TYPE", "").strip().lower()
+    if configured == "user_managed_identity":
+        return AuthTypes.user_managed_identity
+    if configured == "system_managed_identity":
+        return AuthTypes.system_managed_identity
+    if configured == "client_secret":
+        return AuthTypes.client_secret
+    return AuthTypes.client_secret if os.environ.get("BOT_APP_PASSWORD", "").strip() else AuthTypes.user_managed_identity
+
+
+def get_bot_managed_identity_client_id() -> str:
+    configured = os.environ.get("BOT_MANAGED_IDENTITY_CLIENT_ID", "").strip()
+    if configured:
+        return configured
+    return get_bot_app_id()
+
+
 def get_planner_api_scope() -> str:
     configured = os.environ.get("PLANNER_API_SCOPE", "").strip()
     if configured:
@@ -93,6 +111,11 @@ def get_wrapper_debug_expected_audience() -> str:
     return f"api://botid-{get_bot_app_id()}"
 
 
+def get_wrapper_incremental_delivery_enabled() -> bool:
+    value = os.environ.get("WRAPPER_ENABLE_INCREMENTAL_DELIVERY", "false").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 def get_port() -> int:
     try:
         return int(os.environ.get("PORT", "3978"))
@@ -119,16 +142,31 @@ def get_obo_connection_name() -> str:
 
 def build_connection_manager() -> MsalConnectionManager:
     tenant_id = _required("AZURE_TENANT_ID")
-    bot_app_id = _required("BOT_APP_ID")
-    bot_app_password = _required("BOT_APP_PASSWORD")
-
-    service_connection = AgentAuthConfiguration(
-        auth_type=AuthTypes.client_secret,
-        connection_name="SERVICE_CONNECTION",
-        tenant_id=tenant_id,
-        client_id=bot_app_id,
-        client_secret=bot_app_password,
-    )
+    auth_type = get_bot_auth_type()
+    if auth_type == AuthTypes.client_secret:
+        bot_app_id = _required("BOT_APP_ID")
+        bot_app_password = _required("BOT_APP_PASSWORD")
+        service_connection = AgentAuthConfiguration(
+            auth_type=AuthTypes.client_secret,
+            connection_name="SERVICE_CONNECTION",
+            tenant_id=tenant_id,
+            client_id=bot_app_id,
+            client_secret=bot_app_password,
+        )
+    elif auth_type == AuthTypes.user_managed_identity:
+        service_connection = AgentAuthConfiguration(
+            auth_type=AuthTypes.user_managed_identity,
+            connection_name="SERVICE_CONNECTION",
+            tenant_id=tenant_id,
+            client_id=get_bot_managed_identity_client_id(),
+        )
+    else:
+        service_connection = AgentAuthConfiguration(
+            auth_type=AuthTypes.system_managed_identity,
+            connection_name="SERVICE_CONNECTION",
+            tenant_id=tenant_id,
+            client_id=get_bot_app_id(),
+        )
 
     obo_connection_name = get_obo_connection_name()
     abs_oauth_connection_name = get_abs_oauth_connection_name()
@@ -137,19 +175,19 @@ def build_connection_manager() -> MsalConnectionManager:
     }
     if abs_oauth_connection_name not in connections:
         connections[abs_oauth_connection_name] = AgentAuthConfiguration(
-            auth_type=AuthTypes.client_secret,
+            auth_type=service_connection.AUTH_TYPE,
             connection_name=abs_oauth_connection_name,
-            tenant_id=tenant_id,
-            client_id=bot_app_id,
-            client_secret=bot_app_password,
+            tenant_id=service_connection.TENANT_ID,
+            client_id=service_connection.CLIENT_ID,
+            client_secret=service_connection.CLIENT_SECRET,
         )
     if obo_connection_name != "SERVICE_CONNECTION":
         connections[obo_connection_name] = AgentAuthConfiguration(
-            auth_type=AuthTypes.client_secret,
+            auth_type=service_connection.AUTH_TYPE,
             connection_name=obo_connection_name,
-            tenant_id=tenant_id,
-            client_id=bot_app_id,
-            client_secret=bot_app_password,
+            tenant_id=service_connection.TENANT_ID,
+            client_id=service_connection.CLIENT_ID,
+            client_secret=service_connection.CLIENT_SECRET,
         )
 
     return MsalConnectionManager(connections_configurations=connections)

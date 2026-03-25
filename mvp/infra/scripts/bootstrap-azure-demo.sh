@@ -151,6 +151,7 @@ upsert_if_value() {
 }
 
 render_runtime_env() {
+  "$PYTHON_BIN" "$HELPER_SCRIPT" backup-runtime-envs --root "$ROOT_DIR" >/dev/null
   if ! "$PYTHON_BIN" "$HELPER_SCRIPT" render-runtime-env \
     --mode "$MODE" \
     --input-file "$INPUT_FILE" \
@@ -417,6 +418,7 @@ preflight_azure() {
 build_and_publish_images() {
   local planner_repository="daily-account-planner/planner"
   local wrapper_repository="daily-account-planner/wrapper"
+  local mcp_repository="daily-account-planner/mcp"
   local git_short_sha
   local build_suffix
   git_short_sha="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
@@ -424,8 +426,10 @@ build_and_publish_images() {
   build_suffix="$(date -u +%Y%m%d%H%M%S)-${git_short_sha}"
   local planner_tag="${MODE}-${build_suffix}"
   local wrapper_tag="${MODE}-${build_suffix}"
+  local mcp_tag="${MODE}-${build_suffix}"
   local planner_image_ref="${ACR_NAME}.azurecr.io/${planner_repository}:${planner_tag}"
   local wrapper_image_ref="${ACR_NAME}.azurecr.io/${wrapper_repository}:${wrapper_tag}"
+  local mcp_image_ref="${ACR_NAME}.azurecr.io/${mcp_repository}:${mcp_tag}"
 
   if [[ -z "${ACR_NAME:-}" ]]; then
     echo "ACR_NAME was not populated by the foundation deploy." >&2
@@ -453,8 +457,17 @@ build_and_publish_images() {
     "$ROOT_DIR" >/dev/null
   log_success "Built wrapper image ${wrapper_image_ref}"
 
+  log_step "Building MCP image ${mcp_image_ref}"
+  az acr build \
+    --registry "$ACR_NAME" \
+    --image "${mcp_repository}:${mcp_tag}" \
+    --file "$ROOT_DIR/mcp_server/Dockerfile" \
+    "$ROOT_DIR" >/dev/null
+  log_success "Built MCP image ${mcp_image_ref}"
+
   upsert_env_value "PLANNER_API_IMAGE" "$planner_image_ref"
   upsert_env_value "WRAPPER_IMAGE" "$wrapper_image_ref"
+  upsert_env_value "MCP_IMAGE" "$mcp_image_ref"
   source_env
 }
 
@@ -463,6 +476,7 @@ validate_azure_outputs() {
 
   for resource_type in \
     "Microsoft.App/containerApps:$PLANNER_ACA_APP_NAME" \
+    "Microsoft.App/containerApps:$MCP_ACA_APP_NAME" \
     "Microsoft.App/containerApps:$WRAPPER_ACA_APP_NAME" \
     "Microsoft.BotService/botServices:$BOT_RESOURCE_NAME"; do
     local type_name="${resource_type%%:*}"
@@ -476,8 +490,13 @@ validate_azure_outputs() {
     fi
   done
 
-  if [[ -z "${PLANNER_API_BASE_URL:-}" || -z "${WRAPPER_BASE_URL:-}" ]]; then
-    echo "Planner or wrapper base URLs were not written back to $RUNTIME_FILE." >&2
+  if [[ -z "${PLANNER_API_BASE_URL:-}" || -z "${WRAPPER_BASE_URL:-}" || -z "${MCP_BASE_URL:-}" ]]; then
+    echo "Planner, MCP, or wrapper base URLs were not written back to $RUNTIME_FILE." >&2
+    exit 1
+  fi
+
+  if [[ -z "${TOP_OPPORTUNITIES_APP_BASE_URL:-}" ]]; then
+    echo "Top Opportunities app base URL was not written back to $RUNTIME_FILE." >&2
     exit 1
   fi
 
@@ -503,7 +522,7 @@ run_entra_app_registration_step() {
 }
 
 entra_admin_consent_is_pending() {
-  [[ "${PLANNER_API_ADMIN_CONSENT_STATUS:-}" != "granted" || "${WRAPPER_API_ADMIN_CONSENT_STATUS:-}" != "granted" ]]
+  [[ "${PLANNER_API_ADMIN_CONSENT_STATUS:-}" != "granted" || "${MCP_API_ADMIN_CONSENT_STATUS:-}" != "granted" || "${WRAPPER_API_ADMIN_CONSENT_STATUS:-}" != "granted" ]]
 }
 
 bootstrap_status_init "$STATUS_FILE" "$MODE" "azure" "$INPUT_FILE" "$RUNTIME_FILE" "$SPLIT_RESPONSIBILITY_MODE"
@@ -525,7 +544,7 @@ else
 fi
 run_bootstrap_step "Reload runtime env after foundation" source_env
 
-run_bootstrap_step "Build and publish planner and wrapper images" build_and_publish_images
+run_bootstrap_step "Build and publish planner, wrapper, and MCP images" build_and_publish_images
 
 if ! run_bootstrap_step "Create or update Entra app registrations" run_entra_app_registration_step; then
   if [[ "$SPLIT_RESPONSIBILITY_MODE" == "true" ]]; then
@@ -549,6 +568,16 @@ if entra_admin_consent_is_pending; then
   ENTRA_ADMIN_CONSENT_PENDING="true"
 fi
 
+run_bootstrap_step "Deploy Top Opportunities Databricks app" \
+  env ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \
+  bash "$ROOT_DIR/infra/scripts/deploy-top-opportunities-app.sh"
+run_bootstrap_step "Reload runtime env after Databricks app deployment" source_env
+
+run_bootstrap_step "Deploy MCP server" \
+  env ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \
+  bash "$ROOT_DIR/infra/scripts/deploy-mcp-server.sh"
+run_bootstrap_step "Reload runtime env after MCP deployment" source_env
+
 run_bootstrap_step "Deploy planner API and secure seed job resources" \
   env ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \
   bash "$ROOT_DIR/infra/scripts/deploy-planner-api.sh"
@@ -566,6 +595,14 @@ if [[ "$MODE" == "open" ]]; then
 else
   echo "Skipping local direct Databricks validation for secure mode because the workspace may stay private from the operator machine."
 fi
+
+run_bootstrap_step "Validate Top Opportunities Databricks app" \
+  env ENV_FILE="$RUNTIME_FILE" \
+  bash "$ROOT_DIR/infra/scripts/validate-top-opportunities-app.sh"
+
+run_bootstrap_step "Validate MCP service" \
+  env ENV_FILE="$RUNTIME_FILE" \
+  bash "$ROOT_DIR/infra/scripts/validate-mcp-service-e2e.sh"
 
 run_bootstrap_step "Deploy M365 wrapper" \
   env ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \

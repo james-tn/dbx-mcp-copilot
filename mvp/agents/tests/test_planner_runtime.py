@@ -8,6 +8,7 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import sentinel
 
+from agent_framework import MCPStreamableHTTPTool
 from agent_framework.exceptions import ChatClientException
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -82,7 +83,7 @@ def test_runtime_planner_instructions_route_by_handoff() -> None:
     assert "Account Pulse" in RUNTIME_PLANNER_INSTRUCTIONS
     assert "Next Move" in RUNTIME_PLANNER_INSTRUCTIONS
     assert "Hand off instead." in RUNTIME_PLANNER_INSTRUCTIONS
-    assert "signed-in user's Databricks access" in RUNTIME_PLANNER_INSTRUCTIONS
+    assert "signed-in user's secure enterprise data access" in RUNTIME_PLANNER_INSTRUCTIONS
     assert "semantic Databricks tools directly" not in RUNTIME_PLANNER_INSTRUCTIONS
 
 
@@ -90,6 +91,7 @@ def test_create_runtime_planner_agent_builds_handoff_workflow(monkeypatch) -> No
     client = _FakeResponsesClient()
     _FakeBuilder.instances.clear()
     monkeypatch.setattr("planner.HandoffBuilder", _FakeBuilder)
+    monkeypatch.setenv("MCP_BASE_URL", "https://mcp.example.com/mcp")
 
     agent = create_runtime_planner_agent(client)
     session = agent.create_session()
@@ -100,6 +102,8 @@ def test_create_runtime_planner_agent_builds_handoff_workflow(monkeypatch) -> No
     assert client.calls[0]["name"] == "DailyAccountPlanner"
     assert client.calls[1]["name"] == "AccountPulse"
     assert client.calls[2]["name"] == "NextMove"
+    assert len(client.calls[2]["tools"]) == 1
+    assert isinstance(client.calls[2]["tools"][0], MCPStreamableHTTPTool)
 
     builder = _FakeBuilder.instances[0]
     assert [participant.name for participant in builder.participants_arg] == [

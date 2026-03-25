@@ -1,596 +1,275 @@
-# Daily Account Planner MVP Architecture
+# Daily Account Planner Architecture
 
-## 1. Purpose
+## Status
 
-This MVP delivers the Daily Account Planner as a Microsoft 365 Copilot-facing
-seller experience with:
+This document is the implementation source of truth for the `mcp-dev` branch.
 
-- a stateful **planner service** deployed to Azure Container Apps
-- a thin **M365 wrapper** exposed through a Custom Engine Agent
-- Microsoft Agent Framework handoff orchestration between:
-  - `DailyAccountPlanner`
-  - `AccountPulse`
-  - `NextMove`
-- delegated **user-scoped Databricks access** using OAuth On-Behalf-Of
-- planner-owned **canned SQL queries** against `${DATABRICKS_CATALOG}.ri_secure.*`
+The current branch preserves the old deployed environment, but local `.env` files
+now default to a side-by-side `mcp-dev` environment after automatic one-time
+backup to:
 
-The current operator deployment supports both:
+- `.env.pre-mcpdev`
+- `.env.secure.pre-mcpdev`
+- `.env.inputs.pre-mcpdev`
+- `.env.secure.inputs.pre-mcpdev`
 
-- **open mode**: planner ingress is external and local direct-query validation is
-  expected to work from the operator machine
-- **secure mode**: planner ingress is internal, Databricks seed runs inside the
-  private ACA environment, and local direct-query validation from the operator
-  machine is intentionally skipped
+## Goals
 
-The planner owns conversation state, orchestration, business data access, and
-seller-facing behavior. The wrapper is intentionally thin and only forwards
-authenticated Copilot/Bot turns into the planner API.
+- Make MCP the only enterprise tool boundary for planner agents.
+- Remove planner-owned Databricks auth and source-specific execution logic.
+- Keep open/local development fast with public endpoints and simple compose.
+- Keep secure/private deployment as the next validation lane.
+- Reduce steady-state hosted secrets:
+  - planner runtime should not require `PLANNER_API_CLIENT_SECRET`
+  - wrapper runtime should not require `BOT_APP_PASSWORD`
+  - MCP should prefer managed-identity-backed OBO over `MCP_CLIENT_SECRET`
 
-## 1.1 High-Level Topology
+## Runtime Topology
 
-```mermaid
-flowchart LR
-    Seller[Seller in M365 Copilot]
-    Wrapper[M365 Wrapper<br/>Custom Engine ingress<br/>Azure Container Apps]
-    Planner[Planner Service<br/>Azure Container Apps]
-    Router[DailyAccountPlanner<br/>MAF handoff router]
-    Pulse[AccountPulse]
-    NextMove[NextMove]
-    DB[(Databricks<br/>ri_secure views)]
-    Web[External Web Search]
-    Edgar[EDGAR]
-
-    Seller --> Wrapper
-    Wrapper --> Planner
-    Planner --> Router
-    Router --> Pulse
-    Router --> NextMove
-    Pulse --> DB
-    NextMove --> DB
-    Pulse --> Web
-    Pulse --> Edgar
+```text
+Seller
+  -> M365 / Teams / Copilot
+  -> M365 wrapper
+  -> planner API
+  -> agent handoff workflow
+  -> MCP server
+  -> backend services
+       - Databricks SQL
+       - Databricks App for get_top_opportunities
+       - EDGAR lookup
 ```
 
-## 2. Architecture Decisions
+## Component Responsibilities
 
-### 2.1 Runtime split
+### Planner service
 
-The MVP uses two Python services:
+The planner owns only:
 
-1. **Planner service**
-   - deployed to Azure Container Apps
-   - owns session state, MAF handoff orchestration, Databricks OBO, and
-     business-query execution
-   - exposes the planner API for direct validation and wrapper forwarding
+- planner API auth
+- session state
+- seller turn history
+- top-level routing between `AccountPulse` and `NextMove`
+- seller-facing response shaping
+- MCP connectivity
+- local/dev SSE streaming for the end-user experience
 
-2. **M365 wrapper**
-   - deployed separately to Azure Container Apps
-   - surfaced to Microsoft 365 Copilot through a Custom Engine Agent
-   - validates Bot/SDK traffic, acquires a planner API token for the signed-in
-     user through Azure Bot OAuth or agentic auth, and forwards the turn to the
-     planner service
+The planner does not own:
 
-### 2.2 Direct-query data path
+- Databricks OBO
+- Databricks SQL execution
+- Databricks App routing
+- EDGAR transport logic
+- backend-specific query normalization
 
-The planner executes a fixed set of app-authored SQL statements against the
-configured secure catalog and normalizes the results into seller-facing semantic
-tool payloads. Agents stay SQL-free.
+### MCP server
 
-### 2.3 Planner-owned business tools
+The MCP server is the enterprise trust boundary.
 
-The planner owns the business operations needed by the specialist agents:
+It owns:
 
-- scoped account retrieval
-- ranked opportunity retrieval
-- contact lookup
-- local developer rep lookup
+- tool definitions exposed to the planner through MCP
+- Databricks delegated auth and OBO
+- Databricks SQL execution
+- routing of `get_top_opportunities` to the Databricks App backend
+- EDGAR integration
+- backend normalization into stable seller-tool payload shapes
 
-These operations remain typed, parameterized, and controlled by application
-code rather than by generic query generation.
+Current stable tool contract:
 
-## 3. End-to-End Request Flow
+- `get_scoped_accounts`
+- `lookup_rep`
+- `get_top_opportunities`
+- `get_account_contacts`
+- `edgar_lookup`
 
-1. A seller signs in to Microsoft 365 Copilot and opens the thin custom engine
-   wrapper.
-2. The wrapper receives the Bot activity at `POST /api/messages`.
-3. The wrapper obtains a delegated planner API token for that signed-in user.
-   - for agentic traffic, the wrapper can use Agents SDK
-     `AgenticUserAuthorization`
-   - for the normal installed M365/Teams path, the working live path is Azure
-     Bot `UserAuthorization` against the bot OAuth connection
-4. The wrapper forwards the user message and `conversation.id` to the planner
-   service.
-5. The planner validates the inbound bearer token for the planner API audience.
-6. The planner performs OBO to Databricks using its confidential client.
-7. The planner runs fixed SQL against `${DATABRICKS_CATALOG}.ri_secure.*`.
-8. The planner uses Microsoft Agent Framework handoff to route the request to
-   `AccountPulse` or `NextMove`.
-9. `AccountPulse` or `NextMove` executes planner-owned semantic business logic,
-   not SQL generation.
-10. The planner returns the seller-facing reply through the wrapper to Copilot.
+### Databricks App
 
-```mermaid
-sequenceDiagram
-    participant Seller as Seller
-    participant Copilot as M365 Copilot
-    participant Wrapper as Thin M365 Wrapper
-    participant Planner as Planner Service
-    participant Entra as Entra ID
-    participant DB as Databricks
+`get_top_opportunities` is intentionally app-backed on this branch to
+demonstrate backend variety.
 
-    Seller->>Copilot: Ask planner question
-    Copilot->>Wrapper: POST /api/messages
-    Wrapper->>Entra: Resolve planner API user token
-    Entra-->>Wrapper: Planner API bearer
-    Wrapper->>Planner: Forward turn + conversation.id + bearer
-    Planner->>Planner: Validate planner API token
-    Planner->>Entra: OBO for Databricks scope
-    Entra-->>Planner: Databricks delegated token
-    Planner->>DB: Fixed secure-view SQL queries
-    DB-->>Planner: Scoped rows
-    Planner-->>Wrapper: Seller-facing reply
-    Wrapper-->>Copilot: Bot response
-    Copilot-->>Seller: Final planner answer
+The app:
+
+- validates the incoming bearer token
+- reuses the shared enterprise auth and Databricks backend code
+- returns the same payload shape that MCP expects
+
+The app does not import MCP-specific service modules anymore.
+
+### M365 wrapper
+
+The wrapper is intentionally thin.
+
+It owns:
+
+- Bot / M365 channel ingress
+- sign-in and planner token acquisition
+- fast-turn vs delayed-ack behavior
+- planner API forwarding
+- final channel delivery
+
+The wrapper now defaults to the planner SSE endpoint even when it finally sends
+one buffered answer back to the channel.
+
+## Local/Open Development Model
+
+The primary inner loop for this branch is local/open development.
+
+The first-class local stack is:
+
+- `planner-service`
+- `mcp-server`
+- `top-opportunities-app`
+- `m365-wrapper`
+- `dev-ui`
+
+Use:
+
+```bash
+cd mvp
+docker compose up --build
 ```
 
-## 4. Planner Runtime
+The preferred developer UI is `dev_ui`, which uses planner SSE and shows:
 
-### 4.1 Session model
+- `ack`
+- `tool_call_started`
+- `tool_call_progress`
+- `text_delta`
+- `final`
+- `error`
 
-- Session store abstraction exists, but MVP storage is **in memory**
-- Session identity is keyed by planner `session_id`
-- Wrapper uses `conversation.id` as planner `session_id`
-- Planner ACA replicas must stay pinned to `min=1`, `max=1`
-- No cross-user session sharing is allowed
+Open/local development intentionally allows:
 
-### 4.2 Public planner API
+- public planner and MCP endpoints
+- unsecured/private-network-free local Databricks connectivity
+- direct or pre-provisioned Databricks App hookup
 
-The planner service is the primary runtime contract:
+## Agent Tool Loading
 
-- `POST /api/chat/sessions`
-- `POST /api/chat/sessions/{session_id}/messages`
-- `GET /api/chat/sessions/{session_id}`
-- `GET /healthz`
+Planner agents do not define enterprise tools locally.
 
-The planner no longer exposes `/api/messages` as a Bot ingress.
+Instead:
 
-## 5. Multi-Agent Behavior
+- the planner uses the built-in Agent Framework MCP tool client
+- tool schemas are loaded from the MCP server
+- source-specific tool logic stays out of planner code
 
-### 5.1 Top-level planner
+This branch keeps the planner developer experience intentionally simple:
 
-`DailyAccountPlanner` is the single seller-facing entry point. It decides when
-to hand off to:
+- authenticate to planner
+- connect to MCP
+- call enterprise tools through the MCP contract
 
-- `AccountPulse` for briefing, news, filings, cyber events, and "what is
-  happening" requests
-- `NextMove` for focus ranking, top opportunities, contact lookup, and outreach
+## Auth Model
 
-The top-level planner should only ask a brief clarification when the user’s
-intent is genuinely ambiguous.
+### Planner inbound auth
 
-```mermaid
-flowchart TD
-    Start[Seller message] --> Router{Intent clear?}
-    Router -->|Briefing / news / what's happening| Pulse[Hand off to AccountPulse]
-    Router -->|Focus / outreach / top accounts| Next[Hand off to NextMove]
-    Router -->|Ambiguous| Clarify[Ask one short clarification]
-```
-
-### 5.2 Account Pulse
-
-Account Pulse:
-
-- remains a specialist agent in the handoff graph
-- uses one planner-owned internal entry tool: `generate_account_pulse_briefing(request)`
-- keeps the seller-facing contract as one briefing agent even though the work
-  inside it is multi-stage
-
-`generate_account_pulse_briefing(...)` owns the full deterministic briefing
-pipeline:
-
-1. loads the scoped account list through `get_scoped_accounts()`
-2. narrows to a named account when the seller follow-up clearly asks for one
-3. applies Velocity prefiltering through
-   `get_top_opportunities(filter_mode="velocity_candidates")` when needed
-4. groups the selected rows by `global_ultimate`
-5. builds typed parent scan targets with relationship context
-6. calls the internal parallel scan tool once
-7. renders the final seller-facing markdown briefing
-
-This keeps the top-level Account Pulse prompt simple and prevents the model from
-returning raw intermediate JSON or drifting off the required briefing format.
-
-#### Internal parallel scan pipeline
-
-Account Pulse uses an internal bounded-concurrency scan engine:
-
-- `scan_parents_parallel(scan_targets)` is the internal boundary for parent
-  scanning
-- work is partitioned by unique `global_ultimate` parent
-- one internal worker agent flow scans one parent at a time
-- the planner runs up to 8 concurrent worker flows in process
-- workers use replay-aware or live source tools for:
-  - general news search
-  - cybersecurity search
-  - EDGAR lookup
-- a normalization pass deduplicates and validates worker results
-- one internal aggregation agent converts worker outputs into the canonical
-  `scan_bundle`
-- the final markdown renderer formats the seller-facing response from that
-  canonical bundle
-
-The dynamic parallel path is feature-flagged and benchmarked against the legacy
-sequential pattern before default cutover.
-
-```mermaid
-flowchart TD
-    Request[Generate Account Pulse briefing] --> Scoped[Load scoped accounts]
-    Scoped --> Narrow{Named account follow-up?}
-    Narrow -->|Yes| Filter[Filter scoped rows to requested account]
-    Narrow -->|No| Keep[Keep full scoped rows]
-    Filter --> Segment{Segment = Velocity?}
-    Keep --> Segment
-    Segment -->|Yes| Velocity[Load Velocity candidates]
-    Segment -->|No| Group[Group rows by global_ultimate]
-    Velocity --> Group
-    Group --> Targets[Build typed parent scan targets]
-    Targets --> Parallel[Run parallel parent scan]
-    Parallel --> Render[Render final markdown briefing]
-    Render --> Reply[Seller-facing Account Pulse response]
-```
-
-```mermaid
-flowchart LR
-    Targets[Parent scan targets] --> Pool[Bounded async pool<br/>max 8 workers]
-    Pool --> W1[Worker agent<br/>Parent A]
-    Pool --> W2[Worker agent<br/>Parent B]
-    Pool --> W3[Worker agent<br/>Parent N]
-    W1 --> Sources1[Web + cyber + EDGAR]
-    W2 --> Sources2[Web + cyber + EDGAR]
-    W3 --> Sources3[Web + cyber + EDGAR]
-    Sources1 --> Normalize[Normalize + validate + dedupe]
-    Sources2 --> Normalize
-    Sources3 --> Normalize
-    Normalize --> Aggregate[Internal aggregation agent]
-    Aggregate --> Bundle[Canonical scan_bundle]
-    Bundle --> Formatter[Markdown formatter]
-```
-
-### 5.3 Next Move
-
-Next Move:
-
-- defaults to a quick ranked list
-- supports deeper account guidance and email drafting
-- calls `get_top_opportunities(...)`
-- calls `get_account_contacts(account_id)`
-- can use `lookup_rep(...)` only in local development flows
-
-## 6. Semantic Tool Contract
-
-The planner keeps the seller-friendly tool contract:
-
-- `get_scoped_accounts()`
-- `get_top_opportunities(limit=5, offset=0, territory_override=None, filter_mode=None)`
-- `get_account_contacts(account_id)`
-- `lookup_rep(rep_name)` for local-only development
-
-These are planner-owned business tools backed by direct Databricks SQL.
-
-Additionally, Account Pulse owns two internal tools that are not part of the
-seller-facing shared planner contract:
-
-- `generate_account_pulse_briefing(request)`
-- `scan_parents_parallel(scan_targets)`
-
-Prompts must remain SQL-free.
-
-## 7. Databricks Access Model
-
-### 7.1 Authentication
-
-The planner is the Databricks trust boundary.
-
-- inbound user token must target `api://<planner-api-app-id>`
-- planner validates that token
-- planner performs Databricks OBO using:
-  - `PLANNER_API_CLIENT_ID`
-  - `PLANNER_API_CLIENT_SECRET`
-  - `DATABRICKS_OBO_SCOPE=2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default`
-
-The wrapper does **not** mint or forward Databricks tokens directly.
-
-```mermaid
-flowchart LR
-    UserToken[User token for planner API] --> Planner[Planner Service]
-    Planner --> Validate[Validate audience]
-    Validate --> OBO[OBO to Databricks scope]
-    OBO --> DBToken[Delegated Databricks token]
-    DBToken --> SQL[Fixed SQL statements]
-    SQL --> SecureViews[DATABRICKS_CATALOG.ri_secure.*]
-```
-
-### 7.2 Query execution
-
-The planner uses the Databricks SQL Statements API with fixed application-owned
-queries against the configured secure catalog:
-
-- `${DATABRICKS_CATALOG}.ri_secure.accounts`
-- `${DATABRICKS_CATALOG}.ri_secure.reps`
-- `${DATABRICKS_CATALOG}.ri_secure.opportunities`
-- `${DATABRICKS_CATALOG}.ri_secure.contacts`
-
-The planner normalizes result sets into the typed tool payloads expected by the
-agents.
-
-### 7.3 Seeded demo data
-
-The MVP keeps synthetic but enriched RI data in the real Databricks workspace so
-the behavior is realistic enough to validate:
-
-- customer vs prospect context
-- parent/subsidiary relationships
-- renewal-aware nudges
-- upsell and multi-play opportunities
-- no-play and no-contact cases
-- stale-contact cases
-- ENT / COM / VEL differences
-
-The access-control demo is intentionally a **two-user** model. The seeded
-entitlements and grants are rendered for the operator-supplied:
-
-- `SELLER_A_UPN`
-- `SELLER_B_UPN`
-
-## 8. M365 Wrapper
-
-The thin wrapper exists only to surface the planner in M365 Copilot.
-
-Responsibilities:
-
-- expose `POST /api/messages`
-- receive Bot / Custom Engine requests
-- resolve the signed-in user’s planner API token through the Agents SDK auth layer
-  - non-agentic M365 traffic uses Azure Bot `UserAuthorization` against a bot
-    OAuth connection on the bot app itself
-  - agentic traffic can still use `AgenticUserAuthorization` when available
-- forward the text and conversation ID to the planner service
-- remain stateless and orchestration-free
-- allow Bot Framework sign-in invoke callbacks to complete without sending a
-  seller-facing message
-- own the wrapper-side long-running turn behavior:
-  - no visible acknowledgement for fast turns
-  - delayed generic acknowledgement after the configured threshold
-  - busy rejection for overlapping turns in the same conversation
-  - proactive continuation back into the same conversation for the final reply
-
-Reusable wrapper pattern:
-
-- most of this wrapper shape is reusable for other M365 agentic deployments
-- the reusable pieces are:
-  - Bot and Agents SDK bootstrap
-  - auth handler wiring
-  - conversation-to-session mapping
-  - long-running turn handling
-  - busy gating
-  - seller-safe fallback messaging
-- the main service-specific pieces are:
-  - the downstream HTTP client
-  - payload translation between Bot activities and the target service API
-  - target scopes, app IDs, and telemetry labels
-
-Current implementation note:
-
-- the wrapper carries a local compatibility bridge for the Python Microsoft
-  Agents SDK long-running proactive path so the original user message contract
-  is preserved when the wrapper resumes the turn through proactive continuation
-
-Local note:
-
-- direct shell calls to the wrapper cannot fully simulate Copilot ingress because
-  `/api/messages` expects a Bot or channel-issued bearer token for the bot app
-  audience
-- local wrapper verification therefore has two layers:
-  - service-local forwarding tests
-  - channel-local validation through Agents Playground / Azure Bot
-
-The wrapper must not:
-
-- call Databricks
-- own planner state
-- duplicate planner orchestration logic
-
-M365 packaging requirements:
-
-- the Teams/M365 app package must include `webApplicationInfo`
-- `webApplicationInfo.id` should be the bot Entra app ID
-- `webApplicationInfo.resource` should use the bot SSO Application ID URI,
-  typically `api://botid-<bot-app-id>`
-- `token.botframework.com` must be included in `validDomains`
-- the current MVP package uses `functionsAs=agentOnly`
-
-## 9. Configuration Contract
-
-### 9.1 Planner service
-
-Required runtime variables:
-
-- `AZURE_TENANT_ID`
-- `AZURE_OPENAI_ENDPOINT`
-- `AZURE_OPENAI_DEPLOYMENT`
 - `PLANNER_API_CLIENT_ID`
-- `PLANNER_API_CLIENT_SECRET`
 - `PLANNER_API_EXPECTED_AUDIENCE`
-- `DATABRICKS_HOST`
-- `DATABRICKS_OBO_SCOPE`
-- `SESSION_STORE_MODE=memory`
-- `SESSION_MAX_TURNS`
 
-Runtime variables commonly generated or backfilled by the bootstrap:
+The planner runtime no longer needs `PLANNER_API_CLIENT_SECRET` in steady state.
 
-- `DATABRICKS_WAREHOUSE_ID`
-- `DATABRICKS_AUTO_CREATE_WAREHOUSE`
-- `DATABRICKS_WAREHOUSE_NAME`
-- `DATABRICKS_WAREHOUSE_CLUSTER_SIZE`
-- `DATABRICKS_WAREHOUSE_MIN_NUM_CLUSTERS`
-- `DATABRICKS_WAREHOUSE_MAX_NUM_CLUSTERS`
-- `DATABRICKS_WAREHOUSE_AUTO_STOP_MINS`
-- `DATABRICKS_WAREHOUSE_TYPE`
+### MCP inbound and downstream auth
 
-Optional development-only variables:
+The planner forwards the authenticated user bearer token to MCP.
 
-- `RI_SCOPE_MODE`
-- `RI_DEMO_TERRITORY`
-- `DATABRICKS_PAT`
-- `PLANNER_API_BEARER_TOKEN`
-- `ACCOUNT_PULSE_EXECUTION_MODE`
-- `ACCOUNT_PULSE_MAX_CONCURRENCY`
-- `ACCOUNT_PULSE_SOURCE_MODE`
-- `ACCOUNT_PULSE_REPLAY_FIXTURE_SET`
-- `ACCOUNT_PULSE_ENABLE_INTERNAL_AGGREGATOR`
+MCP validates the inbound token against `MCP_EXPECTED_AUDIENCE`.
+On this branch, that audience may intentionally be the same as the planner API
+audience if the planner is forwarding the original planner-bound user token.
 
-### 9.2 Wrapper
+For downstream Databricks delegated auth, MCP uses:
 
-Required runtime variables:
+- `MCP_CLIENT_ID`
+- optional `MCP_CLIENT_SECRET`
+- preferred `MCP_MANAGED_IDENTITY_CLIENT_ID`
 
-- `AZURE_TENANT_ID`
-- `BOT_APP_ID`
-- `BOT_APP_PASSWORD`
-- `BOT_SSO_APP_ID` (normally the same app registration as `BOT_APP_ID`)
-- `BOT_SSO_RESOURCE`
-- `BOT_RESOURCE_NAME`
-- `PLANNER_SERVICE_BASE_URL`
-- `PLANNER_API_SCOPE`
-- `AZUREBOTOAUTHCONNECTIONNAME`
-- `M365_AUTH_HANDLER_ID`
-- `WRAPPER_FORWARD_TIMEOUT_SECONDS`
+The explicit MCP identity now lives in MCP config instead of falling back to
+planner identity variables.
 
-Optional wrapper variables:
+### Wrapper auth
 
-- `OBOCONNECTIONNAME`
-  - reserved for agentic or future alternate auth flows
-  - not required for the current live non-agentic M365 sign-in path
+The wrapper runtime supports:
 
-### 9.3 ACA deployment
+- `BOT_AUTH_TYPE=client_secret`
+- `BOT_AUTH_TYPE=user_managed_identity`
+- `BOT_AUTH_TYPE=system_managed_identity`
 
-- `ACA_ENVIRONMENT_NAME`
-- `PLANNER_ACA_APP_NAME`
-- `WRAPPER_ACA_APP_NAME`
-- `ACA_MIN_REPLICAS=1`
-- `ACA_MAX_REPLICAS=1`
-- `PLANNER_API_IMAGE`
-- `WRAPPER_IMAGE`
+The default branch direction is managed identity, with `BOT_APP_PASSWORD`
+treated as transitional.
 
-Optional CLI publish variables:
+## Shared Backend Package
 
-- `M365_GRAPH_PUBLISHER_CLIENT_ID`
+Shared enterprise backend code now lives under `mvp/shared/`:
 
-## 10. Deployment Sequence
+- `shared/enterprise_auth.py`
+- `shared/databricks_sql.py`
+- `shared/databricks_network.py`
+- `shared/enterprise_tool_backend.py`
 
-The recommended operator flow is now a **two-step bootstrap**, not a manual
-script-by-script sequence:
+These modules are the shared source of truth for:
 
-1. Fill the small operator-owned input env:
-   - `mvp/.env.inputs` for open mode
-   - `mvp/.env.secure.inputs` for secure mode
-2. Run Azure bootstrap:
-   - `bash mvp/infra/scripts/bootstrap-azure-demo.sh open|secure`
-3. Run M365 bootstrap:
-   - `bash mvp/infra/scripts/bootstrap-m365-demo.sh open|secure`
+- request auth and request identity binding
+- Databricks SQL access
+- backend payload shaping for enterprise tools
 
-What the Azure bootstrap now owns:
+Compatibility wrappers still exist under `mvp/mcp_server/` for the current test
+and script surface, but the backend implementation no longer belongs there.
 
-- runtime env generation from the operator input env
-- foundation reuse or deployment
-- planner and wrapper image build/publish
-- app registration create/reuse with persisted app IDs/object IDs
-- mandatory admin-consent gating for the operator path
-- planner deployment
-- secure or open Databricks seeding
-- secure seed-job execution for private mode
-- wrapper deployment
-- Azure Bot resource and OAuth connection updates
+## Deployment Shape
 
-What the M365 bootstrap now owns:
+Hosted open/secure deployment now targets four runtime components:
 
-- Teams/M365 package build
-- catalog publish through Graph
-- self-install for the signed-in operator
+1. planner image
+2. wrapper image
+3. MCP image
+4. Databricks App deployment for top opportunities
 
-Operational behavior that now matters for repeatability:
+`dev_ui` remains local-only.
 
-- the operator edits only `*.inputs`
-- `.env` and `.env.secure` are script-owned generated runtime files
-- runtime files preserve generated values only when the bootstrap input
-  signature still matches the same tenant/subscription/prefix/user set
-- missing admin consent is a blocking failure for the operator bootstrap
-- when no Databricks SQL warehouse exists, the bootstrap can create one
-  automatically instead of failing late
+Default side-by-side names now use the `mcp-dev` prefixes:
 
-## 11. Test Strategy
+- open resource group: `rg-daily-account-planner-mcpdev`
+- secure resource group: `rg-daily-account-planner-mcpdev-secure`
+- open prefix: `dailyacctplannermcpdev`
+- secure prefix: `dailyacctplannermcpdevsec`
 
-### 11.1 Unit tests
+## Bootstrap Order
 
-- inbound planner token validation
-- Databricks OBO acquisition
-- direct SQL execution helper behavior
-- semantic tool payload stability
-- session creation and isolation
-- planner routing and handoff behavior
-- Account Pulse account narrowing and formatter behavior
-- parallel scan worker validation, dedupe, and concurrency cap behavior
+The intended bootstrap order on this branch is:
 
-### 11.2 Integration tests
+1. foundation
+2. app registrations / identities
+3. planner image build
+4. wrapper image build
+5. MCP image build
+6. Databricks App deploy
+7. MCP deploy
+8. planner deploy
+9. wrapper deploy
+10. Azure Bot resource
+11. bot OAuth / auth wiring
+12. M365 publish / install
 
-- direct planner chat flow
-- wrapper forwarding to planner
-- real Databricks seeded data visibility
-- user-scoped delegated data access through planner
-- multi-turn Account Pulse behavior, including follow-up briefing on one named
-  account from a prior briefing
-- replay-backed Account Pulse benchmark comparisons between sequential and
-  dynamic parallel execution
+## Current Transitional Notes
 
-### 11.3 Acceptance milestones
+- The wrapper runtime supports managed identity, but Azure Bot OAuth connection
+  automation still depends on the current `az bot authsetting create` command
+  surface. In managed-identity mode, the script now skips destructive secret
+  wiring instead of forcing a secret path.
+- `deploy-top-opportunities-app.sh` supports both:
+  - direct Databricks CLI deployment
+  - pre-provisioned external URL hookup through `TOP_OPPORTUNITIES_APP_BASE_URL`
+- Secure bootstrap still carries some Databricks bootstrap and seed logic in the
+  planner deploy script because the private seed job is not yet fully split into
+  a separate provisioning surface.
 
-Focused execution milestones for this MVP are:
+## Acceptance Focus
 
-1. **Direct Databricks OBO path**
-   - planner validates user token
-   - planner acquires Databricks delegated token
-   - fixed secure-view queries succeed
+The branch should be considered healthy when these flows work:
 
-2. **Local end-to-end**
-   - planner direct API is validated with a real delegated user token
-   - wrapper forwarding behavior is validated locally at service level
-   - channel ingress is validated separately through Agents Playground / Azure Bot
-   - Account Pulse multi-turn briefing flow is validated locally
-
-3. **Azure Container Apps**
-   - planner and wrapper both deploy cleanly
-   - planner remains single replica for in-memory sessions
-
-4. **Thin M365 deployment**
-   - Azure Bot points to wrapper
-   - Custom Engine Agent forwards turns unchanged
-   - first-turn sign-in and token exchange succeed
-   - seller sees Account Pulse and Next Move through Copilot
-
-## 12. Main Implementation Notes
-
-- Direct canned queries are the correct phase-1 path because the planner needs
-  a small fixed set of business operations, not dynamic SQL generation.
-- The semantic tool contract stays stable even if the transport or SQL
-  implementation evolves later.
-- Account Pulse now uses a deterministic planner-owned briefing pipeline rather
-  than relying on the specialist model to manually chain all intermediate tools.
-- Account Pulse follow-up prompts that name one account should narrow to that
-  account while preserving parent-company signal context.
-- The Account Pulse parallel scan engine is intentionally internal to the
-  planner runtime so the handoff graph stays simple: `DailyAccountPlanner` ->
-  `AccountPulse` or `NextMove`.
-- `PLANNER_API_CLIENT_ID` and `PLANNER_API_CLIENT_SECRET` remain required
-  because Databricks OBO is performed by the planner service.
-- The current Teams/M365 package uses `functionsAs=agentOnly`; moving to an
-  agentic-user template path later would require `agenticUserTemplateId` in the
-  package schema.
+- `hello`
+- `where should I focus?`
+- `give me my morning briefing`
+- same-session follow-up after a completed turn
+- long-running briefing with delayed ack and successful final delivery
+- local `dev_ui` streaming

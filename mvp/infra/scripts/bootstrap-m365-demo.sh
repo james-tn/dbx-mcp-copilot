@@ -133,6 +133,7 @@ ensure_input_file() {
 }
 
 render_runtime_env() {
+  "$PYTHON_BIN" "$HELPER_SCRIPT" backup-runtime-envs --root "$ROOT_DIR" >/dev/null
   if ! "$PYTHON_BIN" "$HELPER_SCRIPT" render-runtime-env \
     --mode "$MODE" \
     --input-file "$INPUT_FILE" \

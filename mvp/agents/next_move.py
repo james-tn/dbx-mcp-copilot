@@ -1,19 +1,22 @@
 """
 Next Move Agent — propensity ranking and personalized outreach.
 
-Finds highest-potential accounts using Databricks-backed propensity data,
-explains why, shows contacts, and drafts JOLT-methodology emails.
+Finds highest-potential accounts using enterprise data tools loaded directly
+from MCP, explains why, shows contacts, and drafts JOLT-methodology emails.
 """
 
 from pathlib import Path
 
-from agent_framework import Agent
+from agent_framework import Agent, MCPStreamableHTTPTool
 from agent_framework.azure import AzureOpenAIResponsesClient
+import httpx
 
 try:
-    from .databricks_tools import get_account_contacts, get_scoped_accounts, get_top_opportunities, lookup_rep
+    from .auth_context import PlannerMcpBearerAuth
+    from .config import get_mcp_base_url
 except ImportError:
-    from databricks_tools import get_account_contacts, get_scoped_accounts, get_top_opportunities, lookup_rep
+    from auth_context import PlannerMcpBearerAuth
+    from config import get_mcp_base_url
 
 _PROMPT_FILE = Path(__file__).resolve().parent / "next_move_prompt.txt"
 
@@ -36,13 +39,31 @@ NEXT_MOVE_INSTRUCTIONS = _load_next_move_instructions()
 # ---------------------------------------------------------------------------
 
 def create_next_move_agent(client: AzureOpenAIResponsesClient) -> Agent:
-    """Create the Next Move agent with semantic Databricks tools."""
+    """Create the Next Move agent with tools loaded directly from MCP."""
+    enterprise_mcp_tool = MCPStreamableHTTPTool(
+        name="enterprise_data",
+        url=get_mcp_base_url(),
+        description="Enterprise data tools served by the Daily Account Planner MCP server.",
+        load_tools=True,
+        load_prompts=False,
+        allowed_tools=[
+            "get_scoped_accounts",
+            "lookup_rep",
+            "get_top_opportunities",
+            "get_account_contacts",
+        ],
+        request_timeout=60,
+        http_client=httpx.AsyncClient(
+            timeout=60.0,
+            auth=PlannerMcpBearerAuth(),
+        ),
+    )
     return client.as_agent(
         name="NextMove",
         description=(
             "Specialist for focus ranking, contact selection, and seller outreach "
-            "using Databricks secure views."
+            "using enterprise account data tools loaded from MCP."
         ),
         instructions=NEXT_MOVE_INSTRUCTIONS,
-        tools=[get_scoped_accounts, lookup_rep, get_top_opportunities, get_account_contacts],
+        tools=[enterprise_mcp_tool],
     )

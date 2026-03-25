@@ -15,8 +15,12 @@ from urllib.parse import quote
 
 import httpx
 
-from databricks_network import enable_private_databricks_resolution
-from databricks_sql import DatabricksSqlSettings
+try:
+    from .databricks_network import enable_private_databricks_resolution
+    from .databricks_sql import DatabricksSqlSettings
+except ImportError:
+    from databricks_network import enable_private_databricks_resolution
+    from databricks_sql import DatabricksSqlSettings
 
 
 class DatabricksAdminError(RuntimeError):

@@ -14,6 +14,8 @@ TEAMS_DESKTOP_MOBILE_CLIENT_ID="${TEAMS_DESKTOP_MOBILE_CLIENT_ID:-1fec8e78-bce4-
 TEAMS_WEB_CLIENT_ID="${TEAMS_WEB_CLIENT_ID:-5e3ce6c0-2b1f-4285-8d4b-75ee78787346}"
 FAIL_ON_MISSING_ADMIN_CONSENT="${FAIL_ON_MISSING_ADMIN_CONSENT:-false}"
 PRESERVE_EXISTING_CREDENTIALS="${PRESERVE_EXISTING_CREDENTIALS:-false}"
+BOT_AUTH_TYPE="${BOT_AUTH_TYPE:-user_managed_identity}"
+MCP_AUTH_MODE="${MCP_AUTH_MODE:-managed_identity}"
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a
@@ -218,6 +220,12 @@ bot_json="$(ensure_app \
   "${BOT_APP_ID:-}" \
   "${BOT_APP_OBJECT_ID:-}" \
   "wrapper/bot app")"
+mcp_json="$(ensure_app \
+  "$APP_NAME_PREFIX-mcp" \
+  false \
+  "${MCP_CLIENT_ID:-}" \
+  "${MCP_OBJECT_ID:-}" \
+  "MCP middle-tier app")"
 
 planner_object_id="$(python - <<'PY' "$planner_json"
 import json, sys
@@ -239,9 +247,20 @@ import json, sys
 print(json.loads(sys.argv[1])["appId"])
 PY
 )"
+mcp_object_id="$(python - <<'PY' "$mcp_json"
+import json, sys
+print(json.loads(sys.argv[1])["id"])
+PY
+)"
+mcp_app_id="$(python - <<'PY' "$mcp_json"
+import json, sys
+print(json.loads(sys.argv[1])["appId"])
+PY
+)"
 
 ensure_service_principal "$planner_app_id"
 ensure_service_principal "$bot_app_id"
+ensure_service_principal "$mcp_app_id"
 
 scope_id="$(az ad app show --id "$planner_object_id" --query "api.oauth2PermissionScopes[?value=='access_as_user'].id | [0]" -o tsv)"
 if [[ -z "$scope_id" ]]; then
@@ -350,8 +369,8 @@ for item in sp.get("oauth2PermissionScopes", []):
 PY
 )"
 
-planner_access_file="$(mktemp)"
-cat >"$planner_access_file" <<JSON
+mcp_access_file="$(mktemp)"
+cat >"$mcp_access_file" <<JSON
 {
   "requiredResourceAccess": [
     {
@@ -366,8 +385,8 @@ cat >"$planner_access_file" <<JSON
   ]
 }
 JSON
-patch_application "$planner_object_id" "$planner_access_file"
-rm -f "$planner_access_file"
+patch_application "$mcp_object_id" "$mcp_access_file"
+rm -f "$mcp_access_file"
 
 wrapper_access_file="$(mktemp)"
 cat >"$wrapper_access_file" <<JSON
@@ -388,31 +407,48 @@ JSON
 patch_application "$bot_object_id" "$wrapper_access_file"
 rm -f "$wrapper_access_file"
 
-planner_admin_consent_status="$(try_admin_consent "$planner_app_id" "Planner API -> Azure Databricks user_impersonation" || true)"
+mcp_admin_consent_status="$(try_admin_consent "$mcp_app_id" "MCP middle tier -> Azure Databricks user_impersonation" || true)"
 bot_admin_consent_status="$(try_admin_consent "$bot_app_id" "Wrapper/channel app -> Planner API access_as_user" || true)"
 
-if [[ "$PRESERVE_EXISTING_CREDENTIALS" == "true" && -n "${BOT_APP_PASSWORD:-}" ]]; then
+if [[ "$BOT_AUTH_TYPE" == "client_secret" && "$PRESERVE_EXISTING_CREDENTIALS" == "true" && -n "${BOT_APP_PASSWORD:-}" ]]; then
   bot_secret="$BOT_APP_PASSWORD"
-else
+elif [[ "$BOT_AUTH_TYPE" == "client_secret" ]]; then
   bot_secret_json="$(az ad app credential reset --id "$bot_object_id" --append --display-name "bot-secret" --years 1 -o json)"
   bot_secret="$(python - <<'PY' "$bot_secret_json"
 import json, sys
 print(json.loads(sys.argv[1])["password"])
 PY
 )"
+else
+  bot_secret=""
 fi
 
-if [[ "$PRESERVE_EXISTING_CREDENTIALS" == "true" && -n "${PLANNER_API_CLIENT_SECRET:-}" ]]; then
+if [[ "${PLANNER_API_AUTH_MODE:-managed_identity}" == "client_secret" && "$PRESERVE_EXISTING_CREDENTIALS" == "true" && -n "${PLANNER_API_CLIENT_SECRET:-}" ]]; then
   planner_secret="${PLANNER_API_CLIENT_SECRET:-}"
-elif [[ -n "$REUSE_PLANNER_API_APP_ID" ]]; then
+elif [[ "${PLANNER_API_AUTH_MODE:-managed_identity}" == "client_secret" && -n "$REUSE_PLANNER_API_APP_ID" ]]; then
   planner_secret="${PLANNER_API_CLIENT_SECRET:-}"
-else
+elif [[ "${PLANNER_API_AUTH_MODE:-managed_identity}" == "client_secret" ]]; then
   planner_secret_json="$(az ad app credential reset --id "$planner_object_id" --append --display-name "planner-api-secret" --years 1 -o json)"
   planner_secret="$(python - <<'PY' "$planner_secret_json"
 import json, sys
 print(json.loads(sys.argv[1])["password"])
 PY
 )"
+else
+  planner_secret=""
+fi
+
+if [[ "$MCP_AUTH_MODE" == "client_secret" && "$PRESERVE_EXISTING_CREDENTIALS" == "true" && -n "${MCP_CLIENT_SECRET:-}" ]]; then
+  mcp_secret="${MCP_CLIENT_SECRET:-}"
+elif [[ "$MCP_AUTH_MODE" == "client_secret" ]]; then
+  mcp_secret_json="$(az ad app credential reset --id "$mcp_object_id" --append --display-name "mcp-client-secret" --years 1 -o json)"
+  mcp_secret="$(python - <<'PY' "$mcp_secret_json"
+import json, sys
+print(json.loads(sys.argv[1])["password"])
+PY
+)"
+else
+  mcp_secret=""
 fi
 
 planner_status="created-or-reused"
@@ -425,16 +461,24 @@ upsert_env_value "PLANNER_API_OBJECT_ID" "$planner_object_id"
 upsert_env_value "PLANNER_API_CLIENT_SECRET" "$planner_secret"
 upsert_env_value "PLANNER_API_EXPECTED_AUDIENCE" "api://$planner_app_id"
 upsert_env_value "PLANNER_API_SCOPE" "api://$planner_app_id/access_as_user"
+upsert_env_value "MCP_CLIENT_ID" "$mcp_app_id"
+upsert_env_value "MCP_OBJECT_ID" "$mcp_object_id"
+upsert_env_value "MCP_CLIENT_SECRET" "$mcp_secret"
+upsert_env_value "MCP_EXPECTED_AUDIENCE" "${MCP_EXPECTED_AUDIENCE:-api://$planner_app_id}"
+upsert_env_value "MCP_AUTH_MODE" "$MCP_AUTH_MODE"
 upsert_env_value "BOT_APP_ID" "$bot_app_id"
 upsert_env_value "BOT_APP_OBJECT_ID" "$bot_object_id"
 upsert_env_value "BOT_APP_PASSWORD" "$bot_secret"
+upsert_env_value "BOT_AUTH_TYPE" "$BOT_AUTH_TYPE"
+upsert_env_value "BOT_MANAGED_IDENTITY_CLIENT_ID" "${BOT_MANAGED_IDENTITY_CLIENT_ID:-$bot_app_id}"
 upsert_env_value "BOT_SSO_APP_ID" "$bot_app_id"
 upsert_env_value "BOT_SSO_RESOURCE" "$bot_sso_resource"
 upsert_env_value "AZUREBOTOAUTHCONNECTIONNAME" "SERVICE_CONNECTION"
 upsert_env_value "OBOCONNECTIONNAME" "PLANNER_API_CONNECTION"
 upsert_env_value "M365_AUTH_HANDLER_ID" "planner_api"
 upsert_env_value "WRAPPER_DEBUG_EXPECTED_AUDIENCE" "$bot_sso_resource"
-upsert_env_value "PLANNER_API_ADMIN_CONSENT_STATUS" "$planner_admin_consent_status"
+upsert_env_value "PLANNER_API_ADMIN_CONSENT_STATUS" "granted"
+upsert_env_value "MCP_API_ADMIN_CONSENT_STATUS" "$mcp_admin_consent_status"
 upsert_env_value "WRAPPER_API_ADMIN_CONSENT_STATUS" "$bot_admin_consent_status"
 
 cat <<EOF
@@ -447,9 +491,14 @@ PLANNER_API_OBJECT_ID=$planner_object_id
 PLANNER_API_CLIENT_SECRET=$planner_secret
 PLANNER_API_EXPECTED_AUDIENCE=api://$planner_app_id
 PLANNER_API_SCOPE=api://$planner_app_id/access_as_user
+MCP_CLIENT_ID=$mcp_app_id
+MCP_OBJECT_ID=$mcp_object_id
+MCP_CLIENT_SECRET=$mcp_secret
+MCP_EXPECTED_AUDIENCE=${MCP_EXPECTED_AUDIENCE:-api://$planner_app_id}
 BOT_APP_ID=$bot_app_id
 BOT_APP_OBJECT_ID=$bot_object_id
 BOT_APP_PASSWORD=$bot_secret
+BOT_AUTH_TYPE=$BOT_AUTH_TYPE
 BOT_SSO_APP_ID=$bot_app_id
 BOT_SSO_RESOURCE=$bot_sso_resource
 AZUREBOTOAUTHCONNECTIONNAME=SERVICE_CONNECTION
@@ -457,15 +506,15 @@ OBOCONNECTIONNAME=PLANNER_API_CONNECTION
 M365_AUTH_HANDLER_ID=planner_api
 
 Admin consent status:
-- Planner API -> Azure Databricks user_impersonation: $planner_admin_consent_status
+- MCP middle tier -> Azure Databricks user_impersonation: $mcp_admin_consent_status
 - Wrapper/channel app -> Planner API access_as_user: $bot_admin_consent_status
 
 If either value is manual-required, complete:
-- az ad app permission admin-consent --id $planner_app_id
+- az ad app permission admin-consent --id $mcp_app_id
 - az ad app permission admin-consent --id $bot_app_id
 EOF
 
-if [[ "$FAIL_ON_MISSING_ADMIN_CONSENT" == "true" && ( "$planner_admin_consent_status" != "granted" || "$bot_admin_consent_status" != "granted" ) ]]; then
+if [[ "$FAIL_ON_MISSING_ADMIN_CONSENT" == "true" && ( "$mcp_admin_consent_status" != "granted" || "$bot_admin_consent_status" != "granted" ) ]]; then
   echo "Required Entra admin consent was not granted for the operator bootstrap. Resolve the consent commands above and rerun." >&2
   exit 1
 fi

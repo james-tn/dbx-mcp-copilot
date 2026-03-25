@@ -10,12 +10,14 @@ Exposes:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import json
 import time
-from typing import Any
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from agent_framework import Message
 
@@ -36,9 +38,9 @@ try:
         get_session_max_turns,
         get_session_store_mode,
     )
-    from .databricks_tools import close_request_databricks_client
     from .planner import create_runtime_planner_agent, extract_routed_agent_from_workflow_result
     from .session_store import InMemorySessionStore
+    from ..shared.streaming_context import bind_stream_emitter, reset_stream_emitter
 except ImportError:
     from auth_context import (
         AuthenticationRequiredError,
@@ -56,9 +58,9 @@ except ImportError:
         get_session_max_turns,
         get_session_store_mode,
     )
-    from databricks_tools import close_request_databricks_client
     from planner import create_runtime_planner_agent, extract_routed_agent_from_workflow_result
     from session_store import InMemorySessionStore
+    from shared.streaming_context import bind_stream_emitter, reset_stream_emitter
 
 
 logger = logging.getLogger(__name__)
@@ -124,6 +126,59 @@ class PlannerRuntime:
             raise HTTPException(status_code=403, detail="Session does not belong to this user.")
         return await self._run_turn(state=state, text=text)
 
+    async def stream_direct_turn(
+        self,
+        *,
+        session_id: str,
+        owner_id: str,
+        text: str,
+    ) -> AsyncIterator[str]:
+        state = self.session_store.get(session_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="Session not found.")
+        if state.owner_id != owner_id:
+            raise HTTPException(status_code=403, detail="Session does not belong to this user.")
+
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        async def _emit(payload: dict[str, object]) -> None:
+            await queue.put(payload)
+
+        async def _run_turn() -> dict[str, Any]:
+            token = bind_stream_emitter(_emit)
+            try:
+                return await self._run_turn(state=state, text=text)
+            finally:
+                reset_stream_emitter(token)
+
+        await queue.put({"event": "ack", "session_id": session_id, "message": "planner_turn_started"})
+        turn_task = asyncio.create_task(_run_turn())
+
+        try:
+            while not turn_task.done() or not queue.empty():
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+                yield _format_sse(payload["event"], payload)
+
+            result = await turn_task
+            for chunk in _chunk_text(result["reply"]):
+                yield _format_sse("text_delta", {"event": "text_delta", "delta": chunk})
+            yield _format_sse(
+                "final",
+                {
+                    "event": "final",
+                    "session_id": result["session_id"],
+                    "reply": result["reply"],
+                    "channel": result["channel"],
+                    "turns": result["turns"],
+                },
+            )
+        except Exception as exc:
+            logger.exception("Planner streaming turn failed.", extra={"session_id": session_id, "owner_id": owner_id})
+            yield _format_sse("error", {"event": "error", "detail": str(exc)})
+
     async def _run_turn(self, *, state, text: str) -> dict[str, Any]:
         started = time.perf_counter()
         routed_agent = None
@@ -176,6 +231,17 @@ app = FastAPI(title="Daily Account Planner API", version="1.0.0")
 _AUTHENTICATED_PATH_PREFIXES = ("/api/chat/sessions",)
 
 
+def _chunk_text(text: str, *, chunk_size: int = 160) -> list[str]:
+    normalized = (text or "").strip()
+    if not normalized:
+        return []
+    return [normalized[index : index + chunk_size] for index in range(0, len(normalized), chunk_size)]
+
+
+def _format_sse(event: str, payload: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
 def _message_history_for_state(state) -> list[Message]:
     return [
         Message(role=turn.role, text=turn.text)
@@ -208,12 +274,11 @@ async def attach_request_identity(request: Request, call_next):
             content={"detail": str(exc)},
         )
 
-    token_ref, claims_ref, databricks_token_ref = bind_request_identity(user_assertion, claims)
+    token_ref, claims_ref = bind_request_identity(user_assertion, claims)
     try:
         return await call_next(request)
     finally:
-        await close_request_databricks_client()
-        reset_request_identity(token_ref, claims_ref, databricks_token_ref)
+        reset_request_identity(token_ref, claims_ref)
 
 
 def _require_user_id() -> str:
@@ -244,3 +309,17 @@ async def get_session(session_id: str) -> dict[str, Any]:
 async def send_session_message(session_id: str, payload: SendMessageRequest) -> dict[str, Any]:
     owner_id = _require_user_id()
     return await runtime.run_direct_turn(session_id=session_id, owner_id=owner_id, text=payload.text)
+
+
+@app.post("/api/chat/sessions/{session_id}/messages/stream")
+async def stream_session_message(session_id: str, payload: SendMessageRequest) -> StreamingResponse:
+    owner_id = _require_user_id()
+    return StreamingResponse(
+        runtime.stream_direct_turn(session_id=session_id, owner_id=owner_id, text=payload.text),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )

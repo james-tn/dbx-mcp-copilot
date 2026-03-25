@@ -73,9 +73,7 @@ def test_create_session_requires_auth(monkeypatch) -> None:
 
 def test_create_session_uses_authenticated_owner(monkeypatch) -> None:
     fake_runtime = _FakeRuntime()
-    closed: list[str] = []
     monkeypatch.setattr(api, "runtime", fake_runtime)
-    monkeypatch.setattr(api, "close_request_databricks_client", lambda: asyncio.sleep(0, result=closed.append("closed")))
     monkeypatch.setattr(
         api,
         "validate_bearer_token",
@@ -100,7 +98,6 @@ def test_create_session_uses_authenticated_owner(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["session_id"] == "session-1"
     assert fake_runtime.calls == [("create_session", "user-123", None)]
-    assert closed == ["closed"]
 
 
 def test_planner_bot_ingress_is_not_exposed() -> None:
@@ -132,3 +129,40 @@ def test_message_history_for_state_uses_clean_text_messages() -> None:
         ("assistant", "Here are the top accounts."),
         ("user", "Go deeper on the top one."),
     ]
+
+
+def test_stream_session_message_returns_sse(monkeypatch) -> None:
+    class _StreamingRuntime(_FakeRuntime):
+        async def stream_direct_turn(self, *, session_id: str, owner_id: str, text: str):
+            self.calls.append(("stream_direct_turn", session_id, owner_id, text))
+            yield 'event: ack\ndata: {"event":"ack"}\n\n'
+            yield 'event: final\ndata: {"event":"final","reply":"echo: streamed"}\n\n'
+
+    fake_runtime = _StreamingRuntime()
+    monkeypatch.setattr(api, "runtime", fake_runtime)
+    monkeypatch.setattr(
+        api,
+        "validate_bearer_token",
+        lambda token: TokenClaims(
+            oid="user-123",
+            tid="tenant",
+            upn="seller@example.com",
+            aud="api://planner-api",
+            scp="access_as_user",
+        ),
+    )
+
+    async def _run():
+        async with AsyncClient(transport=ASGITransport(app=api.app), base_url="http://test") as client:
+            return await client.post(
+                "/api/chat/sessions/session-1/messages/stream",
+                json={"text": "stream me"},
+                headers={"Authorization": "Bearer planner-token"},
+            )
+
+    response = asyncio.run(_run())
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: ack" in response.text
+    assert "event: final" in response.text
+    assert fake_runtime.calls == [("stream_direct_turn", "session-1", "user-123", "stream me")]

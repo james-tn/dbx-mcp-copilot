@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-import databricks_seed
+from mcp_server import databricks_seed
 
 SELLER_A_UPN = "seller-a@example.com"
 SELLER_B_UPN = "seller-b@example.com"

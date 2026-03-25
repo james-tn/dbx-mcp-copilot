@@ -1,0 +1,9 @@
+command:
+  - gunicorn
+  - app:app
+  - -k
+  - uvicorn.workers.UvicornWorker
+  - -w
+  - "2"
+  - --bind
+  - 0.0.0.0:${DATABRICKS_APP_PORT}

@@ -15,12 +15,20 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+BOT_AUTH_TYPE="${BOT_AUTH_TYPE:-}"
+if [[ -z "$BOT_AUTH_TYPE" ]]; then
+  if [[ -n "${BOT_APP_PASSWORD:-}" ]]; then
+    BOT_AUTH_TYPE="client_secret"
+  else
+    BOT_AUTH_TYPE="user_managed_identity"
+  fi
+fi
+
 required_vars=(
   AZURE_TENANT_ID
   AZURE_SUBSCRIPTION_ID
   AZURE_RESOURCE_GROUP
   BOT_APP_ID
-  BOT_APP_PASSWORD
   BOT_SSO_RESOURCE
   PLANNER_API_CLIENT_ID
   PLANNER_API_SCOPE
@@ -35,6 +43,21 @@ done
 
 az account set --subscription "$AZURE_SUBSCRIPTION_ID"
 az account show >/dev/null
+
+if [[ "$BOT_AUTH_TYPE" != "client_secret" || -z "${BOT_APP_PASSWORD:-}" ]]; then
+  cat <<EOF
+Skipping Azure Bot OAuth connection creation for managed-identity wrapper auth.
+
+Current mode:
+BOT_AUTH_TYPE=$BOT_AUTH_TYPE
+BOT_RESOURCE_NAME=${BOT_RESOURCE_NAME:-}
+BOT_APP_ID=$BOT_APP_ID
+
+The current Azure CLI command surface for 'az bot authsetting create' still requires a client secret.
+For the mcp-dev branch, this script leaves the bot OAuth connection unchanged in managed-identity mode.
+EOF
+  exit 0
+fi
 
 if az ad app permission admin-consent --id "$BOT_APP_ID" >/dev/null 2>&1; then
   admin_consent_status="granted"

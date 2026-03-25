@@ -33,6 +33,7 @@ try:
         get_wrapper_debug_chat_enabled,
         get_wrapper_debug_expected_audience,
         get_wrapper_ack_threshold_seconds,
+        get_wrapper_incremental_delivery_enabled,
         get_wrapper_long_running_messages_enabled,
         get_wrapper_timeout_seconds,
     )
@@ -56,6 +57,7 @@ except ImportError:
         get_wrapper_debug_chat_enabled,
         get_wrapper_debug_expected_audience,
         get_wrapper_ack_threshold_seconds,
+        get_wrapper_incremental_delivery_enabled,
         get_wrapper_long_running_messages_enabled,
         get_wrapper_timeout_seconds,
     )
@@ -303,10 +305,12 @@ class WrapperRuntime:
         *,
         long_running_messages_enabled: bool,
         ack_threshold_seconds: float,
+        incremental_delivery_enabled: bool = False,
     ) -> None:
         self.client = client
         self.long_running_messages_enabled = long_running_messages_enabled
         self.ack_threshold_seconds = ack_threshold_seconds
+        self.incremental_delivery_enabled = incremental_delivery_enabled
         self._busy_sessions: set[str] = set()
         self._busy_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -317,7 +321,16 @@ class WrapperRuntime:
         session_id: str,
         text: str,
         planner_access_token: str,
+        event_handler: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> str:
+        if hasattr(self.client, "collect_streamed_turn"):
+            payload = await self.client.collect_streamed_turn(
+                session_id=session_id,
+                text=text,
+                access_token=planner_access_token,
+                event_handler=event_handler,
+            )
+            return str(payload.get("reply", "") or "").strip()
         return await self.client.send_turn(
             session_id=session_id,
             text=text,
@@ -823,6 +836,7 @@ def create_app() -> FastAPI:
         ),
         long_running_messages_enabled=long_running_messages_enabled,
         ack_threshold_seconds=get_wrapper_ack_threshold_seconds(),
+        incremental_delivery_enabled=get_wrapper_incremental_delivery_enabled(),
     )
     debug_chat_enabled = get_wrapper_debug_chat_enabled()
     debug_expected_audience = get_wrapper_debug_expected_audience() if debug_chat_enabled else ""

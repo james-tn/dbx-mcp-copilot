@@ -1,4 +1,4 @@
-"""Prompt/runtime contract tests for the planner API Databricks path."""
+"""Prompt/runtime contract tests for the planner API MCP-backed path."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from account_pulse import (
     _build_parent_scan_targets,
     render_account_pulse_briefing_markdown,
 )
-from databricks_tools import get_account_contacts, get_scoped_accounts, get_top_opportunities, lookup_rep
 from next_move import NEXT_MOVE_INSTRUCTIONS
 
 
@@ -24,21 +23,20 @@ def test_config_no_longer_exposes_direct_execute_sql() -> None:
 def test_account_pulse_prompt_uses_semantic_tools() -> None:
     assert "SELECT name, global_ultimate" not in ACCOUNT_PULSE_INSTRUCTIONS
     assert "generate_account_pulse_briefing" in ACCOUNT_PULSE_INSTRUCTIONS
-    assert "signed-in user's Databricks access" in ACCOUNT_PULSE_INSTRUCTIONS
+    assert "secure enterprise data access through MCP-backed tools" in ACCOUNT_PULSE_INSTRUCTIONS
 
 
 def test_next_move_prompt_uses_semantic_tools() -> None:
     assert "SELECT * FROM veeam_demo.ri_secure.opportunities" not in NEXT_MOVE_INSTRUCTIONS
     assert "get_top_opportunities" in NEXT_MOVE_INSTRUCTIONS
     assert "get_account_contacts" in NEXT_MOVE_INSTRUCTIONS
-    assert "signed-in user's access to Databricks secure views" in NEXT_MOVE_INSTRUCTIONS
+    assert "signed-in user's secure enterprise data access" in NEXT_MOVE_INSTRUCTIONS
 
 
-def test_semantic_tool_names_are_stable() -> None:
-    assert get_scoped_accounts.name == "get_scoped_accounts"
-    assert lookup_rep.name == "lookup_rep"
-    assert get_top_opportunities.name == "get_top_opportunities"
-    assert get_account_contacts.name == "get_account_contacts"
+def test_semantic_tool_names_are_stable_in_prompts() -> None:
+    assert "get_top_opportunities" in ACCOUNT_PULSE_INSTRUCTIONS
+    assert "get_top_opportunities" in NEXT_MOVE_INSTRUCTIONS
+    assert "get_account_contacts" in NEXT_MOVE_INSTRUCTIONS
 
 
 def test_account_pulse_formatter_produces_required_sections() -> None:
@@ -76,6 +74,7 @@ def test_account_pulse_formatter_produces_required_sections() -> None:
     )
 
     assert "## Account Pulse" in markdown
+    assert "Scanning your" not in markdown
     assert "| Threats | Changes | Business | Regulatory |" in markdown
     assert "[[CyberDaily - 2026-03-19]](https://example.test/ford-cyber)" in markdown
     assert "accounts had no new signals" in markdown

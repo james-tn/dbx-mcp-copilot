@@ -1,29 +1,14 @@
-"""
-Semantic Databricks-backed tools for the Daily Account Planner.
-
-These tools hide raw SQL and direct Databricks transport details from prompts. The
-planner now defaults to user-scoped Databricks access via delegated OBO, while
-still keeping a local-only demo scope fallback for development.
-"""
+"""Semantic enterprise tool backend shared by MCP and Databricks apps."""
 
 from __future__ import annotations
 
 import json
 import os
 from contextvars import ContextVar
-from typing import Annotated, Any
+from typing import Any, Callable
 
-from agent_framework import tool
-from pydantic import Field
-
-try:
-    from .config import get_effective_ri_scope_mode, get_secure_deployment_enabled
-    from .auth_context import acquire_databricks_access_token, get_request_user_assertion
-    from .databricks_sql import DatabricksSqlAuthError, DatabricksSqlClient, DatabricksSqlError
-except ImportError:
-    from config import get_effective_ri_scope_mode, get_secure_deployment_enabled
-    from auth_context import acquire_databricks_access_token, get_request_user_assertion
-    from databricks_sql import DatabricksSqlAuthError, DatabricksSqlClient, DatabricksSqlError
+from .databricks_sql import DatabricksSqlAuthError, DatabricksSqlClient, DatabricksSqlError
+from .enterprise_auth import acquire_databricks_access_token, get_request_user_assertion
 
 _DEFAULT_DEMO_TERRITORY = "GreatLakes-ENT-Named-1"
 _DEFAULT_DATABRICKS_CATALOG = "veeam_demo"
@@ -37,16 +22,31 @@ _REQUEST_DATABRICKS_CLIENT_TOKEN: ContextVar[str | None] = ContextVar(
 )
 
 
-def _scope_mode() -> str:
+def get_secure_deployment_enabled() -> bool:
+    value = os.environ.get("SECURE_DEPLOYMENT", "false").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def get_effective_ri_scope_mode() -> str:
+    if get_secure_deployment_enabled():
+        return "user"
+    return os.environ.get("RI_SCOPE_MODE", "user").strip().lower() or "user"
+
+
+def scope_mode() -> str:
     return get_effective_ri_scope_mode()
 
 
-def _demo_territory() -> str:
+def demo_territory() -> str:
     return os.environ.get("RI_DEMO_TERRITORY", _DEFAULT_DEMO_TERRITORY).strip() or _DEFAULT_DEMO_TERRITORY
 
 
-def _catalog_name() -> str:
+def catalog_name() -> str:
     return os.environ.get("DATABRICKS_CATALOG", _DEFAULT_DATABRICKS_CATALOG).strip() or _DEFAULT_DATABRICKS_CATALOG
+
+
+def json_payload(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 def _escape_sql(value: str) -> str:
@@ -64,11 +64,11 @@ def _segment_from_territory(territory: str) -> str:
     return "UNKNOWN"
 
 
-def _request_is_user_scoped() -> bool:
+def request_is_user_scoped() -> bool:
     return bool(get_request_user_assertion())
 
 
-def _resolve_territory(territory_override: str | None = None, *, allow_override: bool = False) -> str:
+def resolve_territory(territory_override: str | None = None, *, allow_override: bool = False) -> str:
     override = (territory_override or "").strip()
     if get_secure_deployment_enabled():
         raise ValueError(
@@ -76,17 +76,17 @@ def _resolve_territory(territory_override: str | None = None, *, allow_override:
             "The planner always uses the signed-in user's Databricks access."
         )
     if override:
-        if _request_is_user_scoped():
+        if request_is_user_scoped():
             raise ValueError(
                 "Territory override is disabled in authenticated planner sessions. "
                 "The planner uses the signed-in user's Databricks access."
             )
         if allow_override:
             return override
-    return _demo_territory()
+    return demo_territory()
 
 
-def _build_databricks_client(access_token: str | None = None) -> DatabricksSqlClient:
+def build_databricks_client(access_token: str | None = None) -> DatabricksSqlClient:
     return DatabricksSqlClient(access_token=access_token)
 
 
@@ -100,7 +100,7 @@ async def _get_request_databricks_client(access_token: str | None) -> Databricks
     if client is not None:
         await client.close()
 
-    client = _build_databricks_client(access_token)
+    client = build_databricks_client(access_token)
     _REQUEST_DATABRICKS_CLIENT.set(client)
     _REQUEST_DATABRICKS_CLIENT_TOKEN.set(normalized_token)
     return client
@@ -114,14 +114,10 @@ async def close_request_databricks_client() -> None:
         await client.close()
 
 
-async def _run_query(statement: str) -> list[dict[str, Any]]:
+async def run_query(statement: str) -> list[dict[str, Any]]:
     access_token = acquire_databricks_access_token()
-    use_request_client = _request_is_user_scoped()
-    client = (
-        await _get_request_databricks_client(access_token)
-        if use_request_client
-        else _build_databricks_client(access_token)
-    )
+    use_request_client = request_is_user_scoped()
+    client = await _get_request_databricks_client(access_token) if use_request_client else build_databricks_client(access_token)
     try:
         return await client.query_sql(statement)
     except DatabricksSqlAuthError as exc:
@@ -135,18 +131,14 @@ async def _run_query(statement: str) -> list[dict[str, Any]]:
             await client.close()
 
 
-def _json_payload(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, default=str)
-
-
-def _coerce_int(value: Any, default: int) -> int:
+def coerce_int(value: Any, default: int) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):
         return default
 
 
-def _summarize_scope(rows: list[dict[str, Any]]) -> tuple[str | None, list[str], str]:
+def summarize_scope(rows: list[dict[str, Any]]) -> tuple[str | None, list[str], str]:
     territories = sorted(
         {
             str(row.get("sales_team", "")).strip()
@@ -161,16 +153,8 @@ def _summarize_scope(rows: list[dict[str, Any]]) -> tuple[str | None, list[str],
     return None, territories, "MIXED"
 
 
-@tool(
-    name="get_scoped_accounts",
-    description=(
-        "Load the signed-in seller's accessible account list from Databricks secure views. "
-        "Returns the accessible territory summary, segment, total accounts, unique global "
-        "ultimate parents, and enriched account rows."
-    ),
-)
-async def get_scoped_accounts() -> str:
-    catalog = _catalog_name()
+async def get_scoped_accounts_payload() -> dict[str, Any]:
+    catalog = catalog_name()
     statement = f"""
 SELECT
   account_id,
@@ -190,15 +174,15 @@ SELECT
   last_seller_touch_date
 FROM {catalog}.ri_secure.accounts
 """.strip()
-    if _scope_mode() == "demo":
-        territory = _resolve_territory()
+    if scope_mode() == "demo":
+        territory = resolve_territory()
         statement = f"{statement}\nWHERE sales_team = '{_escape_sql(territory)}'"
     statement = f"{statement}\nORDER BY sales_team, global_ultimate, name"
-    rows = await _run_query(statement)
-    territory, territories, segment = _summarize_scope(rows)
+    rows = await run_query(statement)
+    territory, territories, segment = summarize_scope(rows)
     unique_parents = sorted({str(row.get("global_ultimate", "")) for row in rows if row.get("global_ultimate")})
-    payload = {
-        "scope_mode": _scope_mode(),
+    return {
+        "scope_mode": scope_mode(),
         "territory": territory,
         "territories": territories,
         "segment": segment,
@@ -206,49 +190,38 @@ FROM {catalog}.ri_secure.accounts
         "unique_global_ultimates": len(unique_parents),
         "accounts": rows,
     }
-    return _json_payload(payload)
 
 
-@tool(
-    name="lookup_rep",
-    description=(
-        "Look up a seller territory by rep name. Intended for local development and demo testing only."
-    ),
-)
-async def lookup_rep(
-    rep_name: Annotated[str, Field(description="Full or partial seller name")] = "",
-) -> str:
+async def lookup_rep_payload(rep_name: str = "") -> dict[str, Any]:
     name = rep_name.strip()
     if not name:
-        return _json_payload({"error": "rep_name is required."})
-    if _request_is_user_scoped():
-        return _json_payload(
-            {
-                "error": (
-                    "Rep lookup is disabled in authenticated planner sessions. "
-                    "The planner uses the signed-in user's Databricks access instead."
-                )
-            }
-        )
+        return {"error": "rep_name is required."}
+    if request_is_user_scoped():
+        return {
+            "error": (
+                "Rep lookup is disabled in authenticated planner sessions. "
+                "The planner uses the signed-in user's Databricks access instead."
+            )
+        }
 
     statement = f"""
 SELECT rep_key, rep_name, territory
-FROM {_catalog_name()}.ri_secure.reps
+FROM {catalog_name()}.ri_secure.reps
 WHERE LOWER(rep_name) LIKE '%{_escape_sql(name.lower())}%'
 ORDER BY rep_name
 """.strip()
-    rows = await _run_query(statement)
-    return _json_payload({"matches": rows})
+    rows = await run_query(statement)
+    return {"matches": rows}
 
 
-def _top_opportunities_statement(
+def top_opportunities_statement(
     territory: str | None,
     *,
     limit: int,
     offset: int,
     filter_mode: str | None,
 ) -> str:
-    catalog = _catalog_name()
+    catalog = catalog_name()
     filters: list[str] = []
     if territory:
         filters.append(f"o.sales_team = '{_escape_sql(territory)}'")
@@ -324,46 +297,33 @@ OFFSET {offset}
 """.strip()
 
 
-@tool(
-    name="get_top_opportunities",
-    description=(
-        "Load top accounts for the signed-in seller's accessible scope. Supports optional "
-        "pagination, local-only territory override, and filter modes such as new_logo_only "
-        "or velocity_candidates."
-    ),
-)
-async def get_top_opportunities(
-    limit: Annotated[int, Field(description="Number of accounts to return", ge=1, le=25)] = 5,
-    offset: Annotated[int, Field(description="Offset for pagination", ge=0)] = 0,
-    territory_override: Annotated[
-        str | None,
-        Field(description="Local-only territory override for testing"),
-    ] = None,
-    filter_mode: Annotated[
-        str | None,
-        Field(description="Optional filter mode: velocity_candidates or new_logo_only"),
-    ] = None,
-) -> str:
+async def get_top_opportunities_payload(
+    *,
+    limit: int = 5,
+    offset: int = 0,
+    territory_override: str | None = None,
+    filter_mode: str | None = None,
+) -> dict[str, Any]:
     territory: str | None = None
-    if _scope_mode() == "demo" or territory_override:
-        territory = _resolve_territory(territory_override, allow_override=True)
-    safe_limit = max(1, min(_coerce_int(limit, 5), 25))
-    safe_offset = max(0, _coerce_int(offset, 0))
-    statement = _top_opportunities_statement(
+    if scope_mode() == "demo" or territory_override:
+        territory = resolve_territory(territory_override, allow_override=True)
+    safe_limit = max(1, min(coerce_int(limit, 5), 25))
+    safe_offset = max(0, coerce_int(offset, 0))
+    statement = top_opportunities_statement(
         territory,
         limit=safe_limit,
         offset=safe_offset,
         filter_mode=filter_mode,
     )
-    rows = await _run_query(statement)
+    rows = await run_query(statement)
     filtered_rows = [
         row
         for row in rows
         if row.get("xf_score_previous_day") not in (None, 0, 0.0, "0", "0.0")
     ]
-    inferred_territory, territories, segment = _summarize_scope(filtered_rows)
-    payload = {
-        "scope_mode": _scope_mode(),
+    inferred_territory, territories, segment = summarize_scope(filtered_rows)
+    return {
+        "scope_mode": scope_mode(),
         "territory": territory or inferred_territory,
         "territories": territories,
         "segment": segment,
@@ -372,21 +332,12 @@ async def get_top_opportunities(
         "offset": safe_offset,
         "accounts": filtered_rows,
     }
-    return _json_payload(payload)
 
 
-@tool(
-    name="get_account_contacts",
-    description=(
-        "Load contacts for a given account_id from the Databricks secure contact view."
-    ),
-)
-async def get_account_contacts(
-    account_id: Annotated[str, Field(description="Account ID from get_top_opportunities")],
-) -> str:
+async def get_account_contacts_payload(account_id: str) -> dict[str, Any]:
     value = account_id.strip()
     if not value:
-        return _json_payload({"error": "account_id is required."})
+        return {"error": "account_id is required."}
     statement = f"""
 SELECT
   account_id,
@@ -401,9 +352,9 @@ SELECT
   contact_stage,
   last_activity_date,
   do_not_call
-FROM {_catalog_name()}.ri_secure.contacts
+FROM {catalog_name()}.ri_secure.contacts
 WHERE account_id = '{_escape_sql(value)}'
 ORDER BY name
 """.strip()
-    rows = await _run_query(statement)
-    return _json_payload({"account_id": value, "contacts": rows})
+    rows = await run_query(statement)
+    return {"account_id": value, "contacts": rows}

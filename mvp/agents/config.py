@@ -3,8 +3,8 @@ Configuration helpers for the Azure Container Apps agent-service runtime.
 
 The Daily Account Planner now runs as a stateful agent service surfaced to
 Microsoft 365 Copilot through a thin custom-engine forwarder. Azure OpenAI
-stays the planner model runtime, while Databricks access is handled separately
-through delegated OBO.
+stays the planner model runtime, while enterprise data access is handled
+through the MCP boundary.
 """
 
 from __future__ import annotations
@@ -233,3 +233,10 @@ def get_account_pulse_replay_fixture_set() -> str:
 def get_account_pulse_internal_aggregator_enabled() -> bool:
     value = os.environ.get("ACCOUNT_PULSE_ENABLE_INTERNAL_AGGREGATOR", "true").strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def get_mcp_base_url() -> str:
+    value = os.environ.get("MCP_BASE_URL", "").strip()
+    if not value:
+        raise ValueError("MCP_BASE_URL is required.")
+    return value.rstrip("/")

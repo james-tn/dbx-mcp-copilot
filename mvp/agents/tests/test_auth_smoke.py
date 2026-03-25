@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from auth_smoke import AUTH_SMOKE_INSTRUCTIONS, CURRENT_USER_SQL, DatabricksAuthSmokeAgent
+from mcp_server.auth_smoke import AUTH_SMOKE_INSTRUCTIONS, CURRENT_USER_SQL, DatabricksAuthSmokeAgent
 
 
 class _FakeClient:
