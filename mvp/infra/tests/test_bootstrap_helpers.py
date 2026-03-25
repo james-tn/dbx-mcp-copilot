@@ -10,6 +10,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from infra.bootstrap_helpers import (  # noqa: E402
+    backup_pre_mcpdev_files,
     build_runtime_env,
     compute_input_signature,
     derive_demo_users,
@@ -82,6 +83,22 @@ def test_build_runtime_env_open_derives_environment_specific_app_prefix(tmp_path
     runtime = build_runtime_env("open", runtime_example, input_file, runtime_file)
 
     assert runtime["APP_NAME_PREFIX"] == "daily-account-planner-veempoc"
+
+
+def test_backup_pre_mcpdev_files_copies_existing_runtime_files_once(tmp_path: Path) -> None:
+    for name in (".env", ".env.secure", ".env.inputs", ".env.secure.inputs"):
+        (tmp_path / name).write_text(f"{name}=value\n", encoding="utf-8")
+
+    backups = backup_pre_mcpdev_files(tmp_path)
+
+    assert sorted(target for _, target in backups) == sorted(
+        str(tmp_path / f"{name}.pre-mcpdev")
+        for name in (".env", ".env.secure", ".env.inputs", ".env.secure.inputs")
+    )
+    assert (tmp_path / ".env.pre-mcpdev").read_text(encoding="utf-8") == ".env=value\n"
+
+    second_backups = backup_pre_mcpdev_files(tmp_path)
+    assert second_backups == []
 
 
 def test_build_runtime_env_preserves_existing_generated_values_for_same_inputs(tmp_path: Path) -> None:

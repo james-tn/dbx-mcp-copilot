@@ -122,6 +122,33 @@ class FakeClient:
         return self.reply
 
 
+class FakeStreamingClient(FakeClient):
+    def __init__(self, reply: str = "planner reply") -> None:
+        super().__init__(reply=reply)
+        self.stream_calls: list[dict[str, str]] = []
+
+    async def collect_streamed_turn(
+        self,
+        *,
+        session_id: str,
+        text: str,
+        access_token: str,
+        event_handler=None,
+    ) -> dict[str, str]:
+        self.stream_calls.append(
+            {
+                "session_id": session_id,
+                "text": text,
+                "access_token": access_token,
+            }
+        )
+        if event_handler is not None:
+            await event_handler({"event": "ack"})
+            await event_handler({"event": "text_delta", "delta": self.reply})
+            await event_handler({"event": "final", "reply": self.reply})
+        return {"reply": self.reply}
+
+
 class ContinueConversationSpy:
     __signature__ = inspect.Signature(
         parameters=[
@@ -169,6 +196,59 @@ class DeferredDeliveryAdapter:
             }
         )
         return await callback(self.context)
+
+
+def test_wrapper_runtime_forward_message_prefers_streaming_client() -> None:
+    client = FakeStreamingClient(reply="streamed reply")
+    runtime = WrapperRuntime(
+        client,
+        long_running_messages_enabled=True,
+        ack_threshold_seconds=0.5,
+    )
+
+    reply = asyncio.run(
+        runtime.forward_message(
+            session_id="conversation-1",
+            text="hello",
+            planner_access_token="planner-token",
+        )
+    )
+
+    assert reply == "streamed reply"
+    assert client.stream_calls == [
+        {
+            "session_id": "conversation-1",
+            "text": "hello",
+            "access_token": "planner-token",
+        }
+    ]
+    assert client.calls == []
+
+
+def test_wrapper_runtime_forward_message_falls_back_to_send_turn() -> None:
+    client = FakeClient(reply="fallback reply")
+    runtime = WrapperRuntime(
+        client,
+        long_running_messages_enabled=True,
+        ack_threshold_seconds=0.5,
+    )
+
+    reply = asyncio.run(
+        runtime.forward_message(
+            session_id="conversation-1",
+            text="hello",
+            planner_access_token="planner-token",
+        )
+    )
+
+    assert reply == "fallback reply"
+    assert client.calls == [
+        {
+            "session_id": "conversation-1",
+            "text": "hello",
+            "access_token": "planner-token",
+        }
+    ]
 
 
 def test_compat_agent_application_uses_activity_reference_and_positional_adapter_call() -> None:

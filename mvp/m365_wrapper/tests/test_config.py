@@ -9,6 +9,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from m365_wrapper.config import (
     build_auth_handlers,
+    build_connection_manager,
+    get_wrapper_incremental_delivery_enabled,
     get_wrapper_debug_allowed_upns,
     get_wrapper_debug_chat_enabled,
     get_wrapper_debug_expected_audience,
@@ -71,3 +73,27 @@ def test_wrapper_debug_chat_settings(monkeypatch) -> None:
         "daichim@m365cpi89838450.onmicrosoft.com",
     }
     assert get_wrapper_debug_expected_audience() == "api://botid-bot-app-id"
+
+
+def test_build_connection_manager_supports_user_managed_identity(monkeypatch) -> None:
+    monkeypatch.setenv("AZURE_TENANT_ID", "tenant-id")
+    monkeypatch.setenv("BOT_APP_ID", "bot-app-id")
+    monkeypatch.setenv("BOT_AUTH_TYPE", "user_managed_identity")
+    monkeypatch.delenv("BOT_APP_PASSWORD", raising=False)
+
+    manager = build_connection_manager()
+    config = manager.get_default_connection_configuration()
+
+    assert str(config.AUTH_TYPE).lower().endswith("user_managed_identity")
+    assert config.CLIENT_ID == "bot-app-id"
+    assert config.CLIENT_SECRET is None
+
+
+def test_wrapper_incremental_delivery_flag_defaults_off(monkeypatch) -> None:
+    monkeypatch.delenv("WRAPPER_ENABLE_INCREMENTAL_DELIVERY", raising=False)
+    assert get_wrapper_incremental_delivery_enabled() is False
+
+
+def test_wrapper_incremental_delivery_flag_parses_true(monkeypatch) -> None:
+    monkeypatch.setenv("WRAPPER_ENABLE_INCREMENTAL_DELIVERY", "true")
+    assert get_wrapper_incremental_delivery_enabled() is True
