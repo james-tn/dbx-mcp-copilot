@@ -744,3 +744,53 @@ def test_validate_seed_output_checks_base_tables_and_view_existence(monkeypatch,
 
     config = databricks_seed.load_seed_config()
     asyncio.run(databricks_seed._validate_seed_output(FakeClient(), config))
+
+
+def test_validate_catalog_namespace_support_requires_unity_catalog(monkeypatch, tmp_path: Path) -> None:
+    sql_file = tmp_path / "seed.sql"
+    sql_file.write_text("SELECT 1;", encoding="utf-8")
+
+    monkeypatch.setenv("DATABRICKS_SEED_SQL_FILE", str(sql_file))
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_AUTH_MODE", "managed_identity")
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID", "mi-client")
+    monkeypatch.setenv("DATABRICKS_HOST", "https://example.azuredatabricks.net")
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh-1")
+    monkeypatch.setenv("DATABRICKS_CATALOG", "workspace_catalog")
+
+    class FakeClient:
+        async def execute(self, statement: str):
+            if statement == "SHOW CATALOGS":
+                return [{"catalog": "spark_catalog"}]
+            return []
+
+    config = databricks_seed.load_seed_config()
+
+    with pytest.raises(databricks_seed.DatabricksSeedError, match="Unity Catalog-capable SQL warehouse"):
+        asyncio.run(databricks_seed._validate_catalog_namespace_support(FakeClient(), config))
+
+
+def test_validate_catalog_namespace_support_requires_configured_catalog_visibility(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    sql_file = tmp_path / "seed.sql"
+    sql_file.write_text("SELECT 1;", encoding="utf-8")
+
+    monkeypatch.setenv("DATABRICKS_SEED_SQL_FILE", str(sql_file))
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_AUTH_MODE", "managed_identity")
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID", "mi-client")
+    monkeypatch.setenv("DATABRICKS_HOST", "https://example.azuredatabricks.net")
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh-1")
+    monkeypatch.setenv("DATABRICKS_CATALOG", "workspace_catalog")
+    monkeypatch.setenv("DATABRICKS_SKIP_CATALOG_CREATE", "true")
+
+    class FakeClient:
+        async def execute(self, statement: str):
+            if statement == "SHOW CATALOGS":
+                return [{"catalog": "other_catalog"}]
+            return []
+
+    config = databricks_seed.load_seed_config()
+
+    with pytest.raises(databricks_seed.DatabricksSeedError, match="not visible from the SQL warehouse"):
+        asyncio.run(databricks_seed._validate_catalog_namespace_support(FakeClient(), config))

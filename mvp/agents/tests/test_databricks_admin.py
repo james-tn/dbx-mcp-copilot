@@ -8,6 +8,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import databricks_admin
 from databricks_admin import (
     DatabricksAdminClient,
     DatabricksAdminPermissionError,
@@ -224,6 +225,74 @@ def test_ensure_workspace_user_entitlements_patches_missing_values() -> None:
             }
         ],
     }
+
+
+def test_ensure_workspace_user_entitlements_retries_when_scim_id_is_stale(monkeypatch) -> None:
+    credential = _FakeCredential()
+    http_client = _FakeAsyncHttpClient(
+        [
+            {
+                "payload": {
+                    "Resources": [
+                        {
+                            "id": "user-1",
+                            "userName": "seller@example.com",
+                            "entitlements": [{"value": "workspace-access"}],
+                        }
+                    ]
+                }
+            },
+            {
+                "status_code": 404,
+                "payload": {"detail": "User with id user-1 not found."},
+            },
+            {
+                "payload": {
+                    "Resources": [
+                        {
+                            "id": "user-2",
+                            "userName": "seller@example.com",
+                            "entitlements": [{"value": "workspace-access"}],
+                        }
+                    ]
+                }
+            },
+            {"payload": {}},
+        ]
+    )
+    client = DatabricksAdminClient(
+        settings=DatabricksAdminSettings(
+            host="https://example.databricks.net",
+            token_scope="scope",
+            azure_management_scope="https://management.core.windows.net//.default",
+            azure_workspace_resource_id="/subscriptions/123/resourceGroups/rg/providers/Microsoft.Databricks/workspaces/ws",
+            timeout_seconds=5.0,
+            pat=None,
+        ),
+        credential=credential,
+        http_client=http_client,
+    )
+
+    async def _fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(databricks_admin.asyncio, "sleep", _fake_sleep)
+
+    result = asyncio.run(
+        client.ensure_workspace_user_entitlements(
+            "seller@example.com",
+            required_entitlements=("workspace-access", "databricks-sql-access"),
+        )
+    )
+
+    assert result == {
+        "status": "patched",
+        "applied": ["databricks-sql-access"],
+        "required": ["databricks-sql-access", "workspace-access"],
+    }
+    assert [call["method"] for call in http_client.calls] == ["GET", "PATCH", "GET", "PATCH"]
+    assert http_client.calls[1]["url"].endswith("/api/2.0/preview/scim/v2/Users/user-1")
+    assert http_client.calls[3]["url"].endswith("/api/2.0/preview/scim/v2/Users/user-2")
 
 
 def test_ensure_sql_warehouse_permission_falls_back_to_put_on_method_error() -> None:

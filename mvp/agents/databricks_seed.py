@@ -42,6 +42,7 @@ _DEFAULT_STATE_TABLE = "bootstrap_state"
 _DEFAULT_AUTH_MODE = "managed_identity"
 _DEFAULT_WORKSPACE_USER_REQUIRED_ENTITLEMENTS = ("workspace-access", "databricks-sql-access")
 _DEFAULT_BOOTSTRAP_REQUIRED_ENTITLEMENTS = ("workspace-access", "databricks-sql-access")
+_LEGACY_METASTORE_CATALOG = "spark_catalog"
 
 
 class DatabricksSeedError(RuntimeError):
@@ -423,6 +424,34 @@ async def _ensure_catalog_exists(client: DatabricksSqlClient, config: Databricks
     await client.execute(f"CREATE CATALOG IF NOT EXISTS {config.catalog}")
 
 
+async def _validate_catalog_namespace_support(
+    client: DatabricksSqlClient,
+    config: DatabricksSeedConfig,
+) -> None:
+    try:
+        rows = await client.execute("SHOW CATALOGS")
+    except DatabricksSqlError as exc:
+        if _is_single_part_namespace_error(str(exc)):
+            raise DatabricksSeedError(_build_unity_catalog_error_message(config)) from exc
+        raise
+
+    available_catalogs = _extract_catalog_names(rows)
+    if available_catalogs == {_LEGACY_METASTORE_CATALOG}:
+        raise DatabricksSeedError(_build_unity_catalog_error_message(config))
+
+    normalized_configured_catalog = config.catalog.strip().lower()
+    if (
+        config.skip_catalog_create
+        and available_catalogs
+        and normalized_configured_catalog not in available_catalogs
+    ):
+        raise DatabricksSeedError(
+            f"Configured Databricks catalog '{config.catalog}' is not visible from the SQL warehouse used for secure seeding. "
+            f"Available catalogs: {', '.join(sorted(available_catalogs))}. Verify DATABRICKS_CATALOG, the workspace metastore "
+            "attachment, and the SQL warehouse permissions before rerunning the seed."
+        )
+
+
 async def _ensure_state_storage(client: DatabricksSqlClient, config: DatabricksSeedConfig) -> None:
     await client.execute(f"CREATE SCHEMA IF NOT EXISTS {config.catalog}.{config.state_schema}")
     await client.execute(
@@ -569,6 +598,7 @@ async def run_secure_seed() -> dict[str, Any]:
             config,
             resolved_warehouse_id,
         )
+        await _validate_catalog_namespace_support(client, config)
         if not config.skip_catalog_create:
             await _ensure_catalog_exists(client, config)
         await _ensure_state_storage(client, config)
@@ -609,6 +639,8 @@ async def run_secure_seed() -> dict[str, Any]:
             "warehouse_id": resolved_warehouse_id,
         }
     except DatabricksSqlError as exc:
+        if _is_single_part_namespace_error(str(exc)):
+            raise DatabricksSeedError(_build_unity_catalog_error_message(config)) from exc
         raise DatabricksSeedError(str(exc)) from exc
     except DatabricksAdminError as exc:
         raise DatabricksSeedError(str(exc)) from exc
@@ -619,6 +651,36 @@ async def run_secure_seed() -> dict[str, Any]:
 
 def main() -> None:
     print(json.dumps(asyncio.run(run_secure_seed()), indent=2, sort_keys=True))
+
+
+def _extract_catalog_names(rows: list[dict[str, Any]]) -> set[str]:
+    catalog_names: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in ("catalog", "catalog_name", "name"):
+            raw_value = row.get(key)
+            if isinstance(raw_value, str) and raw_value.strip():
+                catalog_names.add(raw_value.strip().lower())
+                break
+    return catalog_names
+
+
+def _is_single_part_namespace_error(error_message: str) -> bool:
+    normalized = error_message.lower()
+    return (
+        "requires_single_part_namespace" in normalized
+        or ("spark_catalog" in normalized and "single-part namespace" in normalized)
+    )
+
+
+def _build_unity_catalog_error_message(config: DatabricksSeedConfig) -> str:
+    return (
+        f"Secure Databricks seed requires a Unity Catalog-capable SQL warehouse, but the current workspace or warehouse "
+        f"is resolving '{config.catalog}' against legacy spark_catalog semantics. Verify the workspace is attached to a "
+        "Unity Catalog metastore, the selected SQL warehouse can see the configured catalog, and DATABRICKS_CATALOG points "
+        "to a real catalog before rerunning the seed."
+    )
 
 
 if __name__ == "__main__":

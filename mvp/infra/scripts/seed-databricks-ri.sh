@@ -157,6 +157,14 @@ PY
   log_success "Verified secure Databricks seed job identity: type='${identity_type}', assigned='${assigned_identities}'"
 }
 
+print_secure_seed_troubleshooting() {
+  echo "[seed-databricks-ri] ERROR: Troubleshooting hints:" >&2
+  echo "[seed-databricks-ri] ERROR: - If the ACA job log shows 'User with id ... not found' or 'Service Principal with id ... not found', Databricks usually returned a stale SCIM id during principal propagation." >&2
+  echo "[seed-databricks-ri] ERROR: - First retry: wait 1-2 minutes and rerun the seed. Secure bootstrap now retries stale ids, but Databricks propagation can still outlast a single job attempt." >&2
+  echo "[seed-databricks-ri] ERROR: - If it still fails, verify every UPN in DATABRICKS_WORKSPACE_USER_UPNS exists in the Databricks account and is assigned to this workspace." >&2
+  echo "[seed-databricks-ri] ERROR: - In identity-federated workspaces, make sure account-level assignment finished before rerunning the seed." >&2
+}
+
 "$python_bin" "$HELPER_SCRIPT" render-seed-sql \
   --template "$SQL_FILE" \
   --output "$rendered_sql_file" \
@@ -241,6 +249,7 @@ if [[ "$SECURE_MODE" == "true" ]]; then
           --method get \
           --url "https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.App/jobs/${DATABRICKS_SEED_JOB_NAME}/executions/${execution_name}?api-version=${CONTAINERAPPS_JOB_API_VERSION}" \
           -o json >&2 || true
+        print_secure_seed_troubleshooting
         echo "[seed-databricks-ri] ERROR: Follow-up check:" >&2
         echo "az containerapp job identity show -g ${AZURE_RESOURCE_GROUP} -n ${DATABRICKS_SEED_JOB_NAME}" >&2
         exit 1

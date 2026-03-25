@@ -18,6 +18,9 @@ import httpx
 from databricks_network import enable_private_databricks_resolution
 from databricks_sql import DatabricksSqlSettings
 
+_SCIM_PATCH_RETRY_ATTEMPTS = 3
+_SCIM_PATCH_RETRY_BASE_DELAY_SECONDS = 2.0
+
 
 class DatabricksAdminError(RuntimeError):
     """Base error for Databricks admin operations."""
@@ -201,10 +204,6 @@ class DatabricksAdminClient:
                 "Databricks workspace user does not exist for entitlement bootstrap."
             )
 
-        user_id = str(user.get("id", "")).strip()
-        if not user_id:
-            raise DatabricksAdminError("Databricks workspace user id was missing from SCIM response.")
-
         current_entitlements = _extract_entitlements(user)
         missing_entitlements = [
             entitlement
@@ -218,20 +217,13 @@ class DatabricksAdminClient:
                 "required": normalized_required_entitlements,
             }
 
-        await self._request(
-            "PATCH",
-            f"/api/2.0/preview/scim/v2/Users/{quote(user_id, safe='')}",
-            json_payload={
-                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
-                "Operations": [
-                    {
-                        "op": "add",
-                        "path": "entitlements",
-                        "value": [{"value": entitlement} for entitlement in missing_entitlements],
-                    }
-                ],
-            },
-            content_type="application/scim+json",
+        await self._patch_scim_entitlements_with_refresh(
+            resource=user,
+            lookup_value=normalized_user_upn,
+            get_current_resource=self.get_workspace_user,
+            collection_name="Users",
+            resource_label="workspace user",
+            missing_entitlements=missing_entitlements,
         )
         return {
             "status": "patched",
@@ -336,10 +328,6 @@ class DatabricksAdminClient:
                 "Databricks service principal does not exist in workspace for entitlement bootstrap."
             )
 
-        service_principal_id = str(service_principal.get("id", "")).strip()
-        if not service_principal_id:
-            raise DatabricksAdminError("Databricks service principal id was missing from SCIM response.")
-
         current_entitlements = _extract_entitlements(service_principal)
         missing_entitlements = [
             entitlement
@@ -353,26 +341,74 @@ class DatabricksAdminClient:
                 "required": normalized_required_entitlements,
             }
 
-        await self._request(
-            "PATCH",
-            f"/api/2.0/preview/scim/v2/ServicePrincipals/{quote(service_principal_id, safe='')}",
-            json_payload={
-                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
-                "Operations": [
-                    {
-                        "op": "add",
-                        "path": "entitlements",
-                        "value": [{"value": entitlement} for entitlement in missing_entitlements],
-                    }
-                ],
-            },
-            content_type="application/scim+json",
+        await self._patch_scim_entitlements_with_refresh(
+            resource=service_principal,
+            lookup_value=normalized_application_id,
+            get_current_resource=self.get_workspace_service_principal,
+            collection_name="ServicePrincipals",
+            resource_label="workspace service principal",
+            missing_entitlements=missing_entitlements,
         )
         return {
             "status": "patched",
             "applied": missing_entitlements,
             "required": normalized_required_entitlements,
         }
+
+    async def _patch_scim_entitlements_with_refresh(
+        self,
+        *,
+        resource: dict[str, Any],
+        lookup_value: str,
+        get_current_resource,
+        collection_name: str,
+        resource_label: str,
+        missing_entitlements: list[str],
+    ) -> None:
+        patch_payload = _build_entitlement_patch_payload(missing_entitlements)
+        attempted_ids: list[str] = []
+        current_resource = resource
+        last_error: DatabricksAdminError | None = None
+
+        for attempt in range(_SCIM_PATCH_RETRY_ATTEMPTS):
+            resource_id = str(current_resource.get("id", "")).strip()
+            if not resource_id:
+                raise DatabricksAdminError(
+                    f"Databricks {resource_label} id was missing from SCIM response."
+                )
+            attempted_ids.append(resource_id)
+            try:
+                await self._request(
+                    "PATCH",
+                    f"/api/2.0/preview/scim/v2/{collection_name}/{quote(resource_id, safe='')}",
+                    json_payload=patch_payload,
+                    content_type="application/scim+json",
+                )
+                return
+            except DatabricksAdminError as exc:
+                if not _is_stale_scim_id_error(str(exc)):
+                    raise
+                last_error = exc
+                if attempt == _SCIM_PATCH_RETRY_ATTEMPTS - 1:
+                    break
+                await asyncio.sleep(_SCIM_PATCH_RETRY_BASE_DELAY_SECONDS * (attempt + 1))
+                refreshed_resource = await get_current_resource(lookup_value)
+                if refreshed_resource is None:
+                    raise DatabricksAdminError(
+                        f"Databricks {resource_label} '{lookup_value}' could not be re-resolved after "
+                        "a SCIM entitlement PATCH returned 404. Verify the principal is assigned to the "
+                        "workspace, allow identity propagation to complete, and rerun the secure seed."
+                    ) from exc
+                current_resource = refreshed_resource
+
+        distinct_ids = ", ".join(dict.fromkeys(attempted_ids))
+        raise DatabricksAdminError(
+            f"Databricks {resource_label} entitlement bootstrap could not patch SCIM id(s) "
+            f"[{distinct_ids}] for '{lookup_value}'. This usually means Databricks has not finished "
+            "propagating the principal into the workspace, or the principal is not correctly assigned "
+            "to the workspace. Wait briefly, verify workspace assignment and identity-federation sync, "
+            "then rerun the secure seed."
+        ) from last_error
 
     async def ensure_sql_warehouse_permission(
         self,
@@ -461,6 +497,28 @@ def _format_databricks_error(response: httpx.Response) -> str:
             )
 
     return f"Databricks admin API request failed with HTTP {status}: {body_text[:500]}"
+
+
+def _build_entitlement_patch_payload(missing_entitlements: list[str]) -> dict[str, Any]:
+    return {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        "Operations": [
+            {
+                "op": "add",
+                "path": "entitlements",
+                "value": [{"value": entitlement} for entitlement in missing_entitlements],
+            }
+        ],
+    }
+
+
+def _is_stale_scim_id_error(error_message: str) -> bool:
+    normalized = error_message.lower()
+    return (
+        "http 404" in normalized
+        and "with id" in normalized
+        and "not found" in normalized
+    )
 
 
 def _extract_entitlements(resource: dict[str, Any]) -> set[str]:

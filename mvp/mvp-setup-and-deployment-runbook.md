@@ -524,6 +524,23 @@ Practical guidance:
 - if the log query returns nothing, widen the window from `ago(30m)` to
   `ago(24h)` and confirm you are filtering on the right `ContainerAppName`
 
+Databricks secure-seed note:
+
+- if the secure seed job fails with
+  `Databricks admin API request failed with HTTP 404: User with id ... not found`
+  or the equivalent service-principal message, that usually means Databricks
+  returned a stale SCIM id during workspace principal propagation
+- retry once after waiting 1-2 minutes; the secure bootstrap now retries stale
+  SCIM ids inline, but Databricks propagation can still outlast a single job run
+- if the rerun still fails, verify each value in `DATABRICKS_WORKSPACE_USER_UPNS`
+  exists in the Databricks account and is assigned to the target workspace
+- for identity-federated workspaces, confirm the account-to-workspace assignment
+  finished before rerunning the seed job
+- the secure seed entrypoint is
+  [`mvp/infra/scripts/seed-databricks-ri.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/seed-databricks-ri.sh);
+  on failure it prints the ACA Job execution details and managed-identity summary
+  first, then the follow-up checks to run
+
 ## Advanced / Manual Recovery
 
 The new bootstraps are the recommended operator path. The lower-level scripts

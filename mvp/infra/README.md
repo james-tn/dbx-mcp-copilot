@@ -116,6 +116,10 @@ Secure seeding details:
 - secure bootstrap validation checks seeded base tables, entitlements, and
   secure-view existence; seller-scoped secure views are validated later through
   delegated seller tests, not through the bootstrap identity
+- if secure seeding fails with `User with id ... not found`, treat that as a
+  Databricks SCIM propagation / workspace-assignment issue first: wait briefly,
+  rerun the seed, then verify the configured workspace users are assigned to the
+  workspace if the error repeats
 
 Secure app registration details:
 
