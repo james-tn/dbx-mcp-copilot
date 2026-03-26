@@ -236,6 +236,12 @@ def test_customer_databricks_host_enables_customer_backend_without_mode(monkeypa
     assert config.get_customer_backend_enabled() is True
 
 
+def test_customer_databricks_host_adds_https_when_missing(monkeypatch) -> None:
+    monkeypatch.setenv("CUSTOMER_DATABRICKS_HOST", "adb-example.azuredatabricks.net")
+
+    assert config.get_customer_databricks_host() == "https://adb-example.azuredatabricks.net"
+
+
 def test_customer_static_map_helpers_can_load_from_path(monkeypatch, tmp_path: Path) -> None:
     sales_team_path = tmp_path / "sales_team.json"
     rep_lookup_path = tmp_path / "rep_lookup.json"

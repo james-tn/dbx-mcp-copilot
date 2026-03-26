@@ -83,6 +83,15 @@ def _normalize_endpoint(endpoint: str) -> str:
     return (endpoint or _DEFAULT_ENDPOINT).strip()
 
 
+def _normalize_host_with_https(host: str) -> str:
+    normalized = (host or "").strip().rstrip("/")
+    if not normalized:
+        return ""
+    if "://" in normalized:
+        return normalized
+    return f"https://{normalized}"
+
+
 def _get_model() -> str:
     return (
         os.environ.get(
@@ -334,7 +343,7 @@ def get_dap_debug_headers_path() -> str:
 
 
 def get_customer_databricks_host() -> str:
-    return (
+    return _normalize_host_with_https(
         os.environ.get("CUSTOMER_DATABRICKS_HOST", "").strip().rstrip("/")
         or os.environ.get("DATABRICKS_HOST", "").strip().rstrip("/")
     )
