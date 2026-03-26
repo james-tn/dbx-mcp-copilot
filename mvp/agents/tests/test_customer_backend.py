@@ -49,7 +49,7 @@ class _FakeDatabricksClient:
         self.rows_by_statement = list(rows_by_statement)
         self.statements: list[str] = []
 
-    async def query_sql(self, statement: str) -> list[dict]:
+    async def query_sql(self, statement: str, *, query_name: str = "unnamed") -> list[dict]:
         self.statements.append(statement)
         return self.rows_by_statement.pop(0)
 
@@ -63,7 +63,7 @@ class _CapturingDatabricksSqlClient:
         self.statements: list[str] = []
         self.__class__.instances.append(self)
 
-    async def query_sql(self, statement: str) -> list[dict]:
+    async def query_sql(self, statement: str, *, query_name: str = "unnamed") -> list[dict]:
         self.statements.append(statement)
         return [{"account_id": "001"}]
 

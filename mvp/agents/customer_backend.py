@@ -160,6 +160,10 @@ def _nullable_string(value: Any) -> str | None:
     return normalized or None
 
 
+def _emit_backend_log(message: str) -> None:
+    print(message, flush=True)
+
+
 def _coerce_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -400,7 +404,7 @@ class CustomerDatabricksQueryClient:
     def __init__(self, settings: CustomerDatabricksQuerySettings | None = None) -> None:
         self.settings = settings or load_customer_databricks_query_settings()
 
-    async def query_sql(self, statement: str) -> list[dict[str, Any]]:
+    async def query_sql(self, statement: str, *, query_name: str = "unnamed") -> list[dict[str, Any]]:
         if not self.settings.host:
             raise CustomerBackendConfigurationError(
                 "CUSTOMER_DATABRICKS_HOST or DATABRICKS_HOST is required for customer mode."
@@ -411,9 +415,20 @@ class CustomerDatabricksQueryClient:
             default_message="Customer Databricks OBO token acquisition failed.",
         )
         if not access_token and not self.settings.pat:
+            _emit_backend_log(
+                f"[customer-databricks] query={query_name} token_status=missing auth_mode=obo"
+            )
             raise CustomerDataAccessError(
                 "The customer Databricks source is temporarily unavailable because the planner could not acquire a user token."
             )
+
+        auth_mode = "pat" if self.settings.pat else "obo"
+        host_label = self.settings.host.replace("https://", "").replace("http://", "").rstrip("/")
+        warehouse_label = self.settings.warehouse_id or "<auto>"
+        _emit_backend_log(
+            f"[customer-databricks] query={query_name} status=start auth_mode={auth_mode} "
+            f"host={host_label} warehouse_id={warehouse_label}"
+        )
 
         client = DatabricksSqlClient(
             settings=DatabricksSqlSettings(
@@ -431,15 +446,30 @@ class CustomerDatabricksQueryClient:
             access_token=access_token,
         )
         try:
-            return await client.query_sql(statement)
+            rows = await client.query_sql(statement)
+            _emit_backend_log(
+                f"[customer-databricks] query={query_name} status=success row_count={len(rows)}"
+            )
+            return rows
         except DatabricksSqlAuthError as exc:
+            _emit_backend_log(
+                f"[customer-databricks] query={query_name} status=auth_error detail={str(exc)[:300]}"
+            )
             raise CustomerDataAccessError(
                 "The customer Databricks source rejected the signed-in user's access."
             ) from exc
         except DatabricksSqlError as exc:
+            _emit_backend_log(
+                f"[customer-databricks] query={query_name} status=error detail={str(exc)[:300]}"
+            )
             raise CustomerDataAccessError(
                 "The customer Databricks source is temporarily unavailable."
             ) from exc
+        except Exception as exc:
+            _emit_backend_log(
+                f"[customer-databricks] query={query_name} status=unexpected_error detail={type(exc).__name__}: {str(exc)[:300]}"
+            )
+            raise
         finally:
             await client.close()
 
@@ -493,6 +523,9 @@ class SalesTeamResolver:
     async def _resolve_from_databricks(self, user_upn: str) -> list[str]:
         configured_query = get_customer_sales_team_mapping_query()
         if configured_query:
+            _emit_backend_log(
+                f"[customer-backend] sales-team-mapping mode=custom_query user_upn={user_upn}"
+            )
             statement = _render_sql_template(configured_query, {"user_upn": user_upn})
         else:
             source = get_customer_sales_team_mapping_source() or _join_source_parts(
@@ -513,8 +546,11 @@ class SalesTeamResolver:
                 "ORDER BY sales_team"
             )
             statement = _render_sql_template(statement, {"user_upn": user_upn})
+            _emit_backend_log(
+                f"[customer-backend] sales-team-mapping mode=source user_upn={user_upn} source={source}"
+            )
 
-        rows = await self.query_client.query_sql(statement)
+        rows = await self.query_client.query_sql(statement, query_name="sales_team_mapping")
         return [
             _normalize_string(row.get("sales_team"))
             for row in rows
@@ -595,9 +631,12 @@ class ToolBackendRouter:
 
     async def get_scoped_accounts_payload(self) -> dict[str, Any]:
         sales_team = await self.sales_team_resolver.resolve()
-        print(f"[customer-backend] scoped-accounts sales_team={sales_team}")
+        _emit_backend_log(f"[customer-backend] scoped-accounts sales_team={sales_team}")
         static_json_path = get_customer_scope_accounts_static_json_path()
         if static_json_path:
+            _emit_backend_log(
+                f"[customer-backend] scoped-accounts source=static_json path={static_json_path}"
+            )
             rows = _load_static_scoped_accounts(static_json_path, sales_team=sales_team)
         else:
             query = get_customer_scope_accounts_query()
@@ -633,10 +672,19 @@ FROM {source}
 WHERE sales_team = '{{{{sales_team}}}}'
 ORDER BY sales_team, global_ultimate, name
 """.strip()
+                _emit_backend_log(
+                    f"[customer-backend] scoped-accounts source=databricks_source table_or_view={source}"
+                )
+            else:
+                _emit_backend_log("[customer-backend] scoped-accounts source=custom_query")
             rows = await self.databricks_client.query_sql(
                 _render_sql_template(query, {"sales_team": sales_team})
+                ,
+                query_name="scoped_accounts",
             )
-        print(f"[customer-backend] scoped-accounts row_count={len(rows)} sales_team={sales_team}")
+        _emit_backend_log(
+            f"[customer-backend] scoped-accounts row_count={len(rows)} sales_team={sales_team}"
+        )
         unique_parents = sorted(
             {
                 _normalize_string(row.get("global_ultimate"))
@@ -658,6 +706,9 @@ ORDER BY sales_team, global_ultimate, name
         normalized_account_id = _normalize_string(account_id)
         if not normalized_account_id:
             return {"error": "account_id is required."}
+        _emit_backend_log(
+            f"[customer-backend] contacts account_id={normalized_account_id}"
+        )
         query = get_customer_contacts_query()
         if not query:
             source = get_customer_contacts_source() or _join_source_parts(
@@ -687,6 +738,11 @@ FROM {source}
 WHERE domain_account_id = '{{{{account_id}}}}'
 ORDER BY engagement_level, title
 """.strip()
+            _emit_backend_log(
+                f"[customer-backend] contacts source=databricks_source table_or_view={source}"
+            )
+        else:
+            _emit_backend_log("[customer-backend] contacts source=custom_query")
         rows = await self.databricks_client.query_sql(
             _render_sql_template(
                 query,
@@ -694,6 +750,11 @@ ORDER BY engagement_level, title
                     "account_id": normalized_account_id,
                 },
             )
+            ,
+            query_name="account_contacts",
+        )
+        _emit_backend_log(
+            f"[customer-backend] contacts row_count={len(rows)} account_id={normalized_account_id}"
         )
         return {"account_id": normalized_account_id, "contacts": rows}
 
@@ -708,7 +769,7 @@ ORDER BY engagement_level, title
         sales_team = _normalize_string(territory)
         if not sales_team:
             sales_team = await self.sales_team_resolver.resolve()
-        print(
+        _emit_backend_log(
             f"[customer-backend] top-opps sales_team={sales_team} limit={limit} offset={offset} filter_mode={filter_mode}"
         )
         safe_limit = max(1, min(int(limit), 25))
@@ -780,6 +841,11 @@ ORDER BY {order_by}
 LIMIT {{{{limit}}}}
 OFFSET {{{{offset}}}}
 """.strip()
+            _emit_backend_log(
+                f"[customer-backend] top-opps source=databricks_source table_or_view={source} order_by={order_by}"
+            )
+        else:
+            _emit_backend_log("[customer-backend] top-opps source=custom_query")
         rows = await self.databricks_client.query_sql(
             _render_sql_template(
                 query,
@@ -789,13 +855,15 @@ OFFSET {{{{offset}}}}
                     "offset": str(safe_offset),
                 },
             )
+            ,
+            query_name="top_opportunities",
         )
         accounts = [
             row
             for row in rows
             if row.get("xf_score_previous_day") not in (None, 0, 0.0, "0", "0.0")
         ]
-        print(
+        _emit_backend_log(
             f"[customer-backend] top-opps row_count={len(accounts)} sales_team={sales_team}"
         )
 
