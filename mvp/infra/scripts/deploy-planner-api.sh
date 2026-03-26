@@ -568,6 +568,15 @@ if [[ "${DEPLOYMENT_MODE,,}" == "secure" || "${DEPLOYMENT_MODE,,}" == "true" ]];
   SECURE_MODE="true"
 fi
 
+AZURE_OPENAI_AUTO_ROLE_ASSIGN="${AZURE_OPENAI_AUTO_ROLE_ASSIGN:-}"
+if [[ -z "$AZURE_OPENAI_AUTO_ROLE_ASSIGN" ]]; then
+  if [[ "$CUSTOMER_DEPLOYMENT_MODE" == "true" ]]; then
+    AZURE_OPENAI_AUTO_ROLE_ASSIGN="false"
+  else
+    AZURE_OPENAI_AUTO_ROLE_ASSIGN="true"
+  fi
+fi
+
 required_vars=(
   AZURE_SUBSCRIPTION_ID
   AZURE_RESOURCE_GROUP
@@ -817,6 +826,10 @@ assign_openai_managed_identity() {
     --resource-group "$AZURE_RESOURCE_GROUP" \
     --query identity.principalId \
     -o tsv 2>/dev/null || true)"
+
+  if [[ "${AZURE_OPENAI_AUTO_ROLE_ASSIGN,,}" != "true" ]]; then
+    return 0
+  fi
 
   if [[ -n "$principal_id" && -n "$openai_scope" ]]; then
     az role assignment create \
