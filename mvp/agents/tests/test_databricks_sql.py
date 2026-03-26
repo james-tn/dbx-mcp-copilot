@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import databricks_tools
-from databricks_sql import DatabricksSqlClient, DatabricksSqlSettings, _extract_rows
+from databricks_sql import DatabricksSqlClient, DatabricksSqlError, DatabricksSqlSettings, _extract_rows
 
 _JSON_MODULE = json
 
@@ -217,6 +217,42 @@ def test_authorization_header_adds_azure_workspace_headers_for_service_principal
     assert credential.scopes == ["scope", "https://management.core.windows.net//.default"]
 
 
+def test_query_sql_preserves_databricks_error_detail() -> None:
+    client = DatabricksSqlClient(
+        settings=DatabricksSqlSettings(
+            host="https://example.databricks.net",
+            token_scope="scope",
+            azure_management_scope="https://management.core.windows.net//.default",
+            azure_workspace_resource_id=None,
+            warehouse_id="warehouse-1",
+            timeout_seconds=5.0,
+            retry_count=0,
+            poll_attempts=1,
+            poll_interval_seconds=0.0,
+            pat="pat-token",
+        ),
+        http_client=_FakeAsyncHttpClient(
+            [
+                {
+                    "status_code": 404,
+                    "payload": {
+                        "status": {
+                            "error": {
+                                "message": "TABLE_OR_VIEW_NOT_FOUND: missing table",
+                            }
+                        }
+                    },
+                }
+            ]
+        ),
+    )
+
+    with pytest.raises(DatabricksSqlError, match="TABLE_OR_VIEW_NOT_FOUND: missing table"):
+        asyncio.run(client.query_sql("SELECT 1"))
+
+    asyncio.run(client.close())
+
+
 def test_execute_returns_typed_rows() -> None:
     credential = _FakeCredential()
     client = DatabricksSqlClient(
@@ -320,13 +356,33 @@ def test_lookup_rep_returns_authenticated_session_error(monkeypatch) -> None:
 
 
 def test_get_top_opportunities_blocks_override_in_secure_deployment(monkeypatch) -> None:
-    monkeypatch.setattr(databricks_tools, "get_request_user_assertion", lambda: None)
-    monkeypatch.setenv("SECURE_DEPLOYMENT", "true")
+    class _FakeRouter:
+        def __init__(self) -> None:
+            self.calls = []
 
-    with pytest.raises(ValueError, match="secure deployment mode"):
+        async def get_top_opportunities_payload(self, *, limit, offset, filter_mode, territory=None):
+            self.calls.append(
+                {
+                    "limit": limit,
+                    "offset": offset,
+                    "filter_mode": filter_mode,
+                    "territory": territory,
+                }
+            )
+            return {"territory": territory, "accounts": []}
+
+    router = _FakeRouter()
+    monkeypatch.setattr(databricks_tools, "_customer_backend_enabled", lambda: True)
+    monkeypatch.setattr(databricks_tools, "get_customer_tool_backend_router", lambda: router)
+
+    payload = json.loads(
         asyncio.run(
             databricks_tools.get_top_opportunities.func(territory_override="Germany-ENT-Named-5")
         )
+    )
+
+    assert payload["territory"] == "Germany-ENT-Named-5"
+    assert router.calls[0]["territory"] == "Germany-ENT-Named-5"
 
 
 def test_get_scoped_accounts_uses_demo_territory(monkeypatch) -> None:

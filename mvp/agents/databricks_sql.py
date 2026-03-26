@@ -294,7 +294,9 @@ class DatabricksSqlClient:
                     break
                 await asyncio.sleep(0.25)
 
-        raise DatabricksSqlError("Databricks SQL request failed.") from last_error
+        if last_error is not None:
+            raise DatabricksSqlError(str(last_error)) from last_error
+        raise DatabricksSqlError("Databricks SQL request failed.")
 
     async def resolve_warehouse_id(self) -> str:
         if self._resolved_warehouse_id:
