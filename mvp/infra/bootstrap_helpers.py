@@ -74,6 +74,25 @@ RUNTIME_META_KEYS = {
     "BOOTSTRAP_INPUT_SIGNATURE",
 }
 
+NON_PRESERVED_RUNTIME_KEYS = {
+    "CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON",
+    "CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH",
+    "CUSTOMER_SCOPE_ACCOUNTS_QUERY",
+    "CUSTOMER_SCOPE_ACCOUNTS_SOURCE",
+    "CUSTOMER_SCOPE_ACCOUNTS_CATALOG",
+    "CUSTOMER_SCOPE_ACCOUNTS_SCHEMA",
+    "CUSTOMER_SCOPE_ACCOUNTS_TABLE",
+    "CUSTOMER_SALES_TEAM_STATIC_MAP_JSON",
+    "CUSTOMER_SALES_TEAM_STATIC_MAP_JSON_PATH",
+    "CUSTOMER_SALES_TEAM_MAPPING_QUERY",
+    "CUSTOMER_SALES_TEAM_MAPPING_SOURCE",
+    "CUSTOMER_SALES_TEAM_MAPPING_CATALOG",
+    "CUSTOMER_SALES_TEAM_MAPPING_SCHEMA",
+    "CUSTOMER_SALES_TEAM_MAPPING_TABLE",
+    "CUSTOMER_SALES_TEAM_MAPPING_USER_COLUMN",
+    "CUSTOMER_SALES_TEAM_MAPPING_TEAM_COLUMN",
+}
+
 
 def _strip_quotes(value: str) -> str:
     value = value.strip()
@@ -202,7 +221,7 @@ def _preserved_runtime_values(
     operator_owned = _operator_owned_keys(input_values, mode)
     preserved = OrderedDict()
     for key, value in existing_runtime.items():
-        if key in operator_owned or key in RUNTIME_META_KEYS:
+        if key in operator_owned or key in RUNTIME_META_KEYS or key in NON_PRESERVED_RUNTIME_KEYS:
             continue
         preserved[key] = value
     return preserved

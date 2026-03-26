@@ -42,9 +42,6 @@ _DEFAULT_MAX_RETRIES = 6
 _DEFAULT_AZURE_DATABRICKS_SCOPE = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default"
 _DEFAULT_CUSTOMER_TOP_OPPORTUNITIES_SOURCE = "prod_catalog.data_science_account_iq_gold.account_iq_scores"
 _DEFAULT_CUSTOMER_CONTACTS_SOURCE = "prod_catalog.account_iq_gold.aiq_contact"
-_DEFAULT_CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH = (
-    "fixtures/scope_accounts_glent1_ukirlprivent1.json"
-)
 
 
 def _load_json_text_from_path(env_key: str) -> str:
@@ -406,12 +403,7 @@ def get_customer_scope_accounts_source() -> str:
 
 
 def get_customer_scope_accounts_static_json_path() -> str:
-    configured = os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH", "").strip()
-    if configured:
-        return configured
-    if get_secure_deployment_enabled():
-        return _DEFAULT_CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH
-    return ""
+    return os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH", "").strip()
 
 
 def get_customer_scope_accounts_query() -> str:

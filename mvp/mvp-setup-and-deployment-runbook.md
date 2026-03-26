@@ -100,12 +100,12 @@ workspace provisioning and no seed step, also fill these in the input env:
   leave it blank and let the planner resolve one dynamically
 - `CUSTOMER_TOP_OPPORTUNITIES_SOURCE`
 - `CUSTOMER_CONTACTS_SOURCE`
-- `CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH`
-  default: `fixtures/scope_accounts_glent1_ukirlprivent1.json`
-- `CUSTOMER_SALES_TEAM_STATIC_MAP_JSON_PATH`
-  default: `fixtures/customer_sales_team_static_map.json`
 - `CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH`
   default: `fixtures/customer_rep_lookup_static_map.json`
+- optional when the customer `sf_vpower_bronze` tables are not on the workspace
+  default catalog:
+  - `CUSTOMER_SCOPE_ACCOUNTS_CATALOG`
+  - `CUSTOMER_SALES_TEAM_MAPPING_CATALOG`
 
 In that default existing-workspace mode, the Azure bootstrap does not seed or
 mutate Databricks at all. Existing users, grants, warehouse access, and table
@@ -291,8 +291,10 @@ Default existing-Databricks note:
 - the planner then connects directly to those existing sources:
   - `CUSTOMER_TOP_OPPORTUNITIES_SOURCE=prod_catalog.data_science_account_iq_gold.account_iq_scores`
   - `CUSTOMER_CONTACTS_SOURCE=prod_catalog.account_iq_gold.aiq_contact`
-- Account Pulse can use the checked-in static JSON scope file instead of a
-  scoped-account table on day one
+- Account Pulse and sales-team resolution now default to built-in customer
+  Databricks queries against `sf_vpower_bronze`
+- if `sf_vpower_bronze` is not on the workspace default catalog, set
+  `CUSTOMER_SCOPE_ACCOUNTS_CATALOG` and `CUSTOMER_SALES_TEAM_MAPPING_CATALOG`
 - the bootstrap does not create workspace users, warehouse permissions, or Unity
   Catalog grants on that existing customer workspace
 
@@ -300,7 +302,8 @@ Optional mock Databricks note:
 
 - when `ENABLE_MOCK_DATABRICKS_ENVIRONMENT=true`, the bootstrap also runs
   [`seed-databricks-aiq-dev.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/seed-databricks-aiq-dev.sh)
-  to create AIQ-shaped mock tables for parity testing
+  to create AIQ-shaped mock tables plus `sf_vpower_bronze` territory/account
+  tables derived from the customer workbook sample for parity testing
 - the mock seed path targets only the foundation `DATABRICKS_*` workspace
   values and never falls back to `CUSTOMER_DATABRICKS_*`
 - when mock mode is enabled, the bootstrap rewires the planner's active
@@ -623,12 +626,20 @@ For the hosted secure customer path:
 - Next Move defaults to:
   - `CUSTOMER_TOP_OPPORTUNITIES_SOURCE=prod_catalog.data_science_account_iq_gold.account_iq_scores`
   - `CUSTOMER_CONTACTS_SOURCE=prod_catalog.account_iq_gold.aiq_contact`
-- Account Pulse can run from the checked-in static scope JSON:
-  - `CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH=fixtures/scope_accounts_glent1_ukirlprivent1.json`
-- customer static sales-team mapping defaults to:
-  - `CUSTOMER_SALES_TEAM_STATIC_MAP_JSON_PATH=fixtures/customer_sales_team_static_map.json`
+- Account Pulse and sales-team resolution default to the built-in `sf_vpower_bronze`
+  queries in planner code; no hosted static scope JSON is required
+- if the bronze tables require catalog qualification, set:
+  - `CUSTOMER_SCOPE_ACCOUNTS_CATALOG=<catalog>`
+  - `CUSTOMER_SALES_TEAM_MAPPING_CATALOG=<catalog>`
 - customer rep lookup defaults to:
   - `CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH=fixtures/customer_rep_lookup_static_map.json`
+
+Validate the new customer query path directly by user email:
+
+```bash
+ENV_FILE=mvp/.env.secure VALIDATE_USER_UPN=<seller-upn> \
+  bash mvp/infra/scripts/validate-customer-vpower-query.sh
+```
 
 Routine planner-only code updates should leave the deployed wrapper intact:
 
@@ -657,6 +668,17 @@ ENV_FILE=mvp/.env bash mvp/infra/scripts/run-local-planner-chat.sh
 - the local chat app reuses the planner HTTP API and wrapper debug-auth helpers
 - use `.env`, not `.env.secure`, because the secure planner is expected to be
   private from local/operator access
+
+For local simulated customer-scope scenario coverage without Microsoft 365 or live Databricks login:
+
+```bash
+bash mvp/infra/scripts/run-local-simulated-customer-scenarios.sh
+```
+
+- this uses simulated signed-in identity context and local fakes
+- it validates the Account Pulse empty-scope message, dynamic Next Move scope
+  prompt, signed-in-scope top-opps defaulting, and comma-separated territory overrides
+
 - if secure hosted Next Move still reports a Databricks execution/access error,
   verify the existing Databricks grants for the planner's delegated user path before
   republishing the M365 app; wrapper-to-planner routing alone is not sufficient

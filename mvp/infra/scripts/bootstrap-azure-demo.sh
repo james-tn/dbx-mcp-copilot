@@ -346,6 +346,8 @@ PY
     upsert_env_value "CUSTOMER_DATABRICKS_WAREHOUSE_ID" "${DATABRICKS_WAREHOUSE_ID:-}"
     upsert_env_value "CUSTOMER_TOP_OPPORTUNITIES_SOURCE" "${aiq_dev_catalog}.data_science_account_iq_gold.account_iq_scores"
     upsert_env_value "CUSTOMER_CONTACTS_SOURCE" "${aiq_dev_catalog}.account_iq_gold.aiq_contact"
+    upsert_env_value "CUSTOMER_SCOPE_ACCOUNTS_CATALOG" "${aiq_dev_catalog}"
+    upsert_env_value "CUSTOMER_SALES_TEAM_MAPPING_CATALOG" "${aiq_dev_catalog}"
   else
     upsert_env_value "MOCK_DATABRICKS_ENVIRONMENT" "false"
   fi

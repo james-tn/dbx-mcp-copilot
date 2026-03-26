@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
 SQL_TEMPLATE="${SQL_TEMPLATE:-$ROOT_DIR/infra/databricks/seed-databricks-aiq-dev.sql}"
+CUSTOMER_SCOPE_SEED_WORKBOOK="${CUSTOMER_SCOPE_SEED_WORKBOOK:-$ROOT_DIR/customer_input/accont_scope_query_result.csv}"
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a
@@ -32,7 +33,10 @@ fi
 rendered_sql="$(mktemp)"
 trap 'rm -f "$rendered_sql"' EXIT
 
-python3 - <<'PY' "$SQL_TEMPLATE" "$rendered_sql" "$AIQ_DEV_CATALOG" "$AIQ_DEV_SKIP_CATALOG_CREATE"
+export PYTHONPATH="$ROOT_DIR/agents${PYTHONPATH:+:$PYTHONPATH}"
+
+python3 - <<'PY' "$SQL_TEMPLATE" "$rendered_sql" "$AIQ_DEV_CATALOG" "$AIQ_DEV_SKIP_CATALOG_CREATE" "$CUSTOMER_SCOPE_SEED_WORKBOOK"
+from customer_scope_seed import load_scope_workbook_rows, render_mock_customer_seed_sql
 from pathlib import Path
 import sys
 
@@ -40,6 +44,7 @@ template = Path(sys.argv[1]).read_text(encoding="utf-8")
 output = Path(sys.argv[2])
 catalog = sys.argv[3]
 skip_catalog_create = sys.argv[4].strip().lower() in {"1", "true", "yes", "on"}
+workbook_path = Path(sys.argv[5])
 rendered = template.replace("__CATALOG__", catalog)
 if skip_catalog_create:
     rendered = "\n".join(
@@ -47,10 +52,11 @@ if skip_catalog_create:
         for line in rendered.splitlines()
         if line.strip().upper() != f"CREATE CATALOG IF NOT EXISTS {catalog.upper()};"
     )
+scope_rows = load_scope_workbook_rows(workbook_path)
+rendered = f"{rendered.rstrip()}\n\n{render_mock_customer_seed_sql(scope_rows, catalog_placeholder=catalog)}\n"
 output.write_text(rendered, encoding="utf-8")
 PY
 
-export PYTHONPATH="$ROOT_DIR/agents${PYTHONPATH:+:$PYTHONPATH}"
 export SQL_FILE="$rendered_sql"
 
 python3 - <<'PY'

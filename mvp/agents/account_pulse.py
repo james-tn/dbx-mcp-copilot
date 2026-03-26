@@ -160,6 +160,26 @@ def _format_generated_timestamp() -> tuple[str, str]:
     return full_date, f"{hour}:{minute_suffix}"
 
 
+def _build_no_scoped_accounts_message(scoped_accounts_payload: dict[str, Any]) -> str:
+    territories = [
+        str(value).strip()
+        for value in list(scoped_accounts_payload.get("territories", []) or [])
+        if str(value).strip()
+    ]
+    territory = str(scoped_accounts_payload.get("territory") or "").strip()
+    if territory and territory not in territories:
+        territories.insert(0, territory)
+
+    message = (
+        "I can’t generate your morning intelligence briefing because there are no accounts in your current scope."
+    )
+    if territories:
+        territory_list = ", ".join(territories)
+        message += f" Territory scope: {territory_list}."
+    message += " If you expected accounts here, please check your scoped account access and territory mapping."
+    return message
+
+
 def _format_source_link(signal: dict[str, Any]) -> str:
     source_name = (signal.get("source_name") or "Source").strip()
     published_at = (signal.get("published_at") or "").strip()
@@ -439,7 +459,7 @@ def create_account_pulse_agent(
         accounts = list(scoped_accounts_payload.get("accounts", []) or [])
         if not accounts:
             logger.warning("Account Pulse briefing aborted because no scoped accounts were returned.")
-            return "The data source is temporarily unavailable. Please try again in a moment."
+            return _build_no_scoped_accounts_message(scoped_accounts_payload)
         narrowed_accounts = [row for row in accounts if _matches_requested_account(request, row)]
 
         top_opportunities_payload = None

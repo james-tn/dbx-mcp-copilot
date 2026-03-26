@@ -373,7 +373,7 @@ async def get_top_opportunities(
     offset: Annotated[int, Field(description="Offset for pagination", ge=0)] = 0,
     territory: Annotated[
         str | None,
-        Field(description="Optional sales territory to query, such as Germany-ENT-Named-5"),
+        Field(description="Optional sales territory filter, such as Germany-ENT-Named-5, or a comma-separated list"),
     ] = None,
     filter_mode: Annotated[
         str | None,

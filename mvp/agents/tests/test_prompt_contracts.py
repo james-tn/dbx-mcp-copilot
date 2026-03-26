@@ -10,11 +10,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 from account_pulse import (
     ACCOUNT_PULSE_INSTRUCTIONS,
+    _build_no_scoped_accounts_message,
     _build_parent_scan_targets,
     render_account_pulse_briefing_markdown,
 )
 from databricks_tools import get_account_contacts, get_scoped_accounts, get_top_opportunities, lookup_rep
-from next_move import NEXT_MOVE_INSTRUCTIONS
+from next_move import NEXT_MOVE_INSTRUCTIONS, _render_scope_guidance
 
 
 def test_config_no_longer_exposes_direct_execute_sql() -> None:
@@ -31,8 +32,7 @@ def test_next_move_prompt_uses_semantic_tools() -> None:
     assert "SELECT * FROM veeam_demo.ri_secure.opportunities" not in NEXT_MOVE_INSTRUCTIONS
     assert "get_top_opportunities" in NEXT_MOVE_INSTRUCTIONS
     assert "get_account_contacts" in NEXT_MOVE_INSTRUCTIONS
-    assert "What territory should I use?" in NEXT_MOVE_INSTRUCTIONS
-    assert "territory string" in NEXT_MOVE_INSTRUCTIONS
+    assert "{{DYNAMIC_SCOPE_GUIDANCE}}" in NEXT_MOVE_INSTRUCTIONS
 
 
 def test_semantic_tool_names_are_stable() -> None:
@@ -119,3 +119,34 @@ def test_account_pulse_scan_target_builder_can_narrow_to_named_account() -> None
     assert len(scan_targets) == 1
     assert scan_targets[0]["parent_name"] == "Ford Motor Company"
     assert scan_targets[0]["child_accounts"] == ["Ford Pro"]
+
+
+def test_account_pulse_no_scoped_accounts_message_mentions_scope() -> None:
+    message = _build_no_scoped_accounts_message(
+        {
+            "territory": "Germany-ENT-Named-5",
+            "territories": ["Germany-ENT-Named-5"],
+            "accounts": [],
+        }
+    )
+
+    assert "no accounts in your current scope" in message
+    assert "Territory scope: Germany-ENT-Named-5." in message
+    assert "scoped account access and territory mapping" in message
+
+
+def test_next_move_scope_guidance_prefers_detected_territories() -> None:
+    guidance = _render_scope_guidance(["Germany-ENT-Named-5", "UK-COM-Named-3"])
+
+    assert "currently resolves to these territories" in guidance
+    assert "call `get_top_opportunities` with no `territory` argument" in guidance
+    assert "comma-separated list of territories" in guidance
+    assert "all resolved territories" in guidance
+
+
+def test_next_move_scope_guidance_requires_territory_when_none_detected() -> None:
+    guidance = _render_scope_guidance([])
+
+    assert "No territories are currently resolved" in guidance
+    assert "territory is mandatory" in guidance
+    assert "comma-separated list of territories" in guidance

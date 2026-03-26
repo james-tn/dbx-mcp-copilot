@@ -72,6 +72,8 @@ ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/build-and-deploy-wrapper-only.sh
 - this is the default hosted-secure operator model: Azure hosts the planner and
   wrapper on top of an existing Databricks workspace and existing customer data
   sources
+- customer scoped accounts and territory resolution now default to built-in
+  `sf_vpower_bronze` queries in the planner runtime
 - no Databricks provisioning or data seeding is part of the default secure
   customer runbook
 - the secure bootstrap does not mutate the existing customer workspace
@@ -89,7 +91,8 @@ ENABLE_MOCK_DATABRICKS_ENVIRONMENT=true bash mvp/infra/scripts/bootstrap-azure-d
 ```
 
 - that path uses [`seed-databricks-aiq-dev.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/seed-databricks-aiq-dev.sh)
-  to create the AIQ-shaped mock tables used by Next Move parity testing
+  to create the AIQ-shaped mock tables plus `sf_vpower_bronze` mock tables used
+  by the built-in customer scope queries
 - the mock seed path targets only the bootstrap/foundation `DATABRICKS_*`
   workspace values
 - it does not fall back to `CUSTOMER_DATABRICKS_*`, so it cannot accidentally
@@ -109,6 +112,26 @@ ENV_FILE=mvp/.env bash mvp/infra/scripts/run-local-planner-chat.sh
 
 - the local chat app uses the same planner HTTP API and env settings, but it is
   intended for open/local access only
+
+Local simulated customer-scope scenarios:
+
+```bash
+bash mvp/infra/scripts/run-local-simulated-customer-scenarios.sh
+```
+
+- this runs local pytest-backed scenarios with a simulated signed-in seller identity
+- it covers the Account Pulse empty-scope message, dynamic Next Move scope prompt,
+  signed-in-scope top-opps defaulting, and comma-separated territory overrides
+
+Customer vPower query validation:
+
+```bash
+ENV_FILE=mvp/.env.secure VALIDATE_USER_UPN=<seller-upn> \
+  bash mvp/infra/scripts/validate-customer-vpower-query.sh
+```
+
+- this validates email -> territories, scoped-account rows, and top-opps source
+  eligibility directly against the configured customer Databricks workspace
 
 Optional operator overrides:
 

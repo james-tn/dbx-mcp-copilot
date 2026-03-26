@@ -221,9 +221,7 @@ def test_secure_customer_defaults_enable_customer_backend_and_legacy_sources(mon
     assert config.get_customer_backend_mode() == "customer_existing_databricks"
     assert config.get_customer_top_opportunities_source() == "prod_catalog.data_science_account_iq_gold.account_iq_scores"
     assert config.get_customer_contacts_source() == "prod_catalog.account_iq_gold.aiq_contact"
-    assert config.get_customer_scope_accounts_static_json_path().endswith(
-        "fixtures/scope_accounts_glent1_ukirlprivent1.json"
-    )
+    assert config.get_customer_scope_accounts_static_json_path() == ""
 
 
 def test_customer_databricks_host_enables_customer_backend_without_mode(monkeypatch) -> None:

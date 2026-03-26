@@ -1,10 +1,10 @@
 """
 Customer-backend adapters for the Daily Account Planner.
 
-The active hosted customer path now uses direct Databricks for ranked account
-retrieval and contacts, while Account Pulse can also source scoped accounts
-from a checked-in static JSON file. DAP helpers remain in-repo for future use,
-but they are not required by the active secure runtime path.
+The active hosted customer path uses direct Databricks for ranked account
+retrieval, contacts, and customer territory/account scoping. DAP helpers remain
+in-repo for future use, but they are not required by the active secure runtime
+path.
 """
 
 from __future__ import annotations
@@ -134,12 +134,21 @@ class RepLookupConfigurationError(RuntimeError):
     """Raised when hosted rep lookup configuration is invalid."""
 
 
+_CUSTOMER_VPOWER_TERRITORY_MODEL_ID = "0MAcx000000Arz7GAC"
+_CUSTOMER_VPOWER_TERRITORY_TYPE_ID = "0M5cx0000000E2zCAE"
+
+
 def _escape_sql(value: str) -> str:
     return value.replace("'", "''")
 
 
 def _normalize_string(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _is_nullish(value: Any) -> bool:
+    normalized = _normalize_string(value).lower()
+    return normalized in {"", "null"}
 
 
 def _normalize_string_list(value: Any) -> list[str]:
@@ -151,12 +160,25 @@ def _normalize_string_list(value: Any) -> list[str]:
     return [normalized] if normalized else []
 
 
+def _parse_territory_filter_values(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, list):
+        return sorted({_normalize_string(item) for item in value if _normalize_string(item)})
+    raw_value = _normalize_string(value)
+    if not raw_value:
+        return []
+    return sorted({_normalize_string(part) for part in raw_value.split(",") if _normalize_string(part)})
+
+
 def _json_payload(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 def _nullable_string(value: Any) -> str | None:
     normalized = _normalize_string(value)
+    if normalized.lower() == "null":
+        return None
     return normalized or None
 
 
@@ -182,16 +204,55 @@ def _segment_from_territory(territory: str) -> str:
     return "UNKNOWN"
 
 
-def _render_sql_template(template: str, replacements: dict[str, str]) -> str:
+def _summarize_scope(rows: list[dict[str, Any]]) -> tuple[str | None, list[str], str]:
+    territories = sorted(
+        {
+            _normalize_string(row.get("sales_team"))
+            for row in rows
+            if _normalize_string(row.get("sales_team"))
+        }
+    )
+    if not territories:
+        return None, [], "UNKNOWN"
+    if len(territories) == 1:
+        return territories[0], territories, _segment_from_territory(territories[0])
+    return None, territories, "MIXED"
+
+
+def _summarize_territories(territories: list[str]) -> tuple[str | None, list[str], str]:
+    normalized = sorted({_normalize_string(item) for item in territories if _normalize_string(item)})
+    if not normalized:
+        return None, [], "UNKNOWN"
+    if len(normalized) == 1:
+        return normalized[0], normalized, _segment_from_territory(normalized[0])
+    return None, normalized, "MIXED"
+
+
+def _render_sql_template(
+    template: str,
+    replacements: dict[str, str],
+    *,
+    raw_keys: set[str] | None = None,
+) -> str:
     rendered = template
+    raw_key_set = raw_keys or set()
     for key, value in replacements.items():
-        rendered = rendered.replace(f"{{{{{key}}}}}", _escape_sql(value))
+        replacement = value if key in raw_key_set else _escape_sql(value)
+        rendered = rendered.replace(f"{{{{{key}}}}}", replacement)
     return rendered
 
 
 def _join_source_parts(*parts: str) -> str:
     normalized = [part.strip() for part in parts if part and part.strip()]
     return ".".join(normalized)
+
+
+def _source_from_parts(catalog: str, schema: str, table: str) -> str:
+    normalized_schema = schema.strip() if schema else ""
+    normalized_table = table.strip() if table else ""
+    if not normalized_schema or not normalized_table:
+        return ""
+    return _join_source_parts(catalog, normalized_schema, normalized_table)
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -218,11 +279,195 @@ def _resolve_local_data_path(raw_path: str) -> Path:
     return (_mvp_root() / path).resolve()
 
 
-def _normalize_scoped_account_row(row: dict[str, Any]) -> dict[str, Any]:
+def _quote_sql_string_literal(value: str) -> str:
+    return f"'{_escape_sql(value)}'"
+
+
+def _render_sql_string_list(values: list[str]) -> str:
+    return ", ".join(_quote_sql_string_literal(value) for value in values if _normalize_string(value))
+
+
+def _sales_team_filter_clause(territories: list[str], *, column_name: str = "sales_team") -> str:
+    normalized = sorted({_normalize_string(item) for item in territories if _normalize_string(item)})
+    if not normalized:
+        raise CustomerBackendConfigurationError("At least one sales team is required to build the query filter.")
+    if len(normalized) == 1:
+        return f"{column_name} = {_quote_sql_string_literal(normalized[0])}"
+    return f"{column_name} IN ({_render_sql_string_list(normalized)})"
+
+
+def _relation_name(catalog: str, schema: str, table: str) -> str:
+    prefix = f"{catalog.strip()}." if catalog and catalog.strip() else ""
+    return f"{prefix}{schema}.{table if table != 'user' else '`user`'}"
+
+
+def _customer_vpower_catalog(*, prefer_mapping_catalog: bool) -> str:
+    mapping_catalog = get_customer_sales_team_mapping_catalog()
+    scope_catalog = get_customer_scope_accounts_catalog()
+    if prefer_mapping_catalog:
+        return mapping_catalog or scope_catalog
+    return scope_catalog or mapping_catalog
+
+
+def _customer_vpower_relations(*, prefer_mapping_catalog: bool) -> dict[str, str]:
+    catalog = _customer_vpower_catalog(prefer_mapping_catalog=prefer_mapping_catalog)
     return {
-        "account_id": _normalize_string(row.get("account_id") or row.get("legacy_id")),
-        "source_vpower_id": _nullable_string(row.get("source_vpower_id")),
-        "legacy_id": _nullable_string(row.get("legacy_id") or row.get("account_id")),
+        "account": _relation_name(catalog, "sf_vpower_bronze", "account"),
+        "objectterritory2association": _relation_name(catalog, "sf_vpower_bronze", "objectterritory2association"),
+        "territory2": _relation_name(catalog, "sf_vpower_bronze", "territory2"),
+        "userterritory2association": _relation_name(catalog, "sf_vpower_bronze", "userterritory2association"),
+        "user": _relation_name(catalog, "sf_vpower_bronze", "user"),
+    }
+
+
+def _build_builtin_sales_team_mapping_query() -> str:
+    relations = _customer_vpower_relations(prefer_mapping_catalog=True)
+    return f"""
+SELECT DISTINCT
+  t.Name AS sales_team
+FROM {relations["account"]} vpa
+INNER JOIN {relations["objectterritory2association"]} o
+        ON vpa.Id = o.ObjectId
+       AND o.`__END_AT` IS NULL
+       AND o.IsDeleted IS FALSE
+       AND o.vdm_is_hard_deleted IS FALSE
+INNER JOIN {relations["territory2"]} t
+        ON o.Territory2Id = t.Id
+       AND t.`__END_AT` IS NULL
+       AND t.vdm_is_hard_deleted IS FALSE
+       AND t.Territory2ModelId = '{_CUSTOMER_VPOWER_TERRITORY_MODEL_ID}'
+       AND t.Territory2TypeId = '{_CUSTOMER_VPOWER_TERRITORY_TYPE_ID}'
+INNER JOIN {relations["userterritory2association"]} uta
+        ON uta.Territory2Id = t.Id
+       AND uta.vdm_is_hard_deleted IS FALSE
+       AND uta.`__END_AT` IS NULL
+INNER JOIN {relations["user"]} u
+        ON u.Id = uta.UserId
+       AND u.vdm_is_hard_deleted IS FALSE
+       AND u.`__END_AT` IS NULL
+WHERE vpa.`__END_AT` IS NULL
+  AND vpa.IsDeleted IS FALSE
+  AND vpa.vdm_is_hard_deleted IS FALSE
+  AND LOWER(u.Email) = LOWER('{{{{user_upn}}}}')
+ORDER BY sales_team
+""".strip()
+
+
+def _build_builtin_scoped_accounts_query() -> str:
+    relations = _customer_vpower_relations(prefer_mapping_catalog=False)
+    legacy_expression = """
+CASE
+  WHEN vpa.RCA_AccountMigrationExternalId__c IS NULL THEN NULL
+  WHEN TRIM(vpa.RCA_AccountMigrationExternalId__c) = '' THEN NULL
+  WHEN LOWER(TRIM(vpa.RCA_AccountMigrationExternalId__c)) = 'null' THEN NULL
+  ELSE TRIM(vpa.RCA_AccountMigrationExternalId__c)
+END
+""".strip()
+    parent_name_expression = """
+CASE
+  WHEN vpa2.Name IS NULL THEN NULL
+  WHEN TRIM(vpa2.Name) = '' THEN NULL
+  WHEN LOWER(TRIM(vpa2.Name)) = 'null' THEN NULL
+  ELSE vpa2.Name
+END
+""".strip()
+    return f"""
+SELECT DISTINCT
+  COALESCE({legacy_expression}, vpa.Id) AS account_id,
+  vpa.Id AS source_vpower_id,
+  {legacy_expression} AS legacy_id,
+  vpa.Name AS name,
+  COALESCE({parent_name_expression}, vpa.Name) AS global_ultimate,
+  t.Name AS sales_team,
+  CASE
+    WHEN vpa.ParentId IS NOT NULL
+      AND COALESCE({parent_name_expression}, vpa.Name) <> vpa.Name THEN TRUE
+    ELSE FALSE
+  END AS is_subsidiary,
+  CAST(NULL AS STRING) AS duns,
+  CAST(NULL AS STRING) AS industry,
+  CAST(NULL AS STRING) AS sic_or_naics,
+  CAST(NULL AS STRING) AS hq_country,
+  CAST(NULL AS STRING) AS hq_region,
+  CAST(NULL AS STRING) AS customer_or_prospect,
+  CAST(NULL AS STRING) AS current_veeam_products,
+  CAST(NULL AS STRING) AS renewal_date,
+  CAST(NULL AS STRING) AS opportunity_stage,
+  CAST(NULL AS STRING) AS last_seller_touch_date
+FROM {relations["account"]} vpa
+INNER JOIN {relations["objectterritory2association"]} o
+        ON vpa.Id = o.ObjectId
+       AND o.`__END_AT` IS NULL
+       AND o.IsDeleted IS FALSE
+       AND o.vdm_is_hard_deleted IS FALSE
+INNER JOIN {relations["territory2"]} t
+        ON o.Territory2Id = t.Id
+       AND t.`__END_AT` IS NULL
+       AND t.vdm_is_hard_deleted IS FALSE
+       AND t.Territory2ModelId = '{_CUSTOMER_VPOWER_TERRITORY_MODEL_ID}'
+       AND t.Territory2TypeId = '{_CUSTOMER_VPOWER_TERRITORY_TYPE_ID}'
+INNER JOIN {relations["userterritory2association"]} uta
+        ON uta.Territory2Id = t.Id
+       AND uta.vdm_is_hard_deleted IS FALSE
+       AND uta.`__END_AT` IS NULL
+INNER JOIN {relations["user"]} u
+        ON u.Id = uta.UserId
+       AND u.vdm_is_hard_deleted IS FALSE
+       AND u.`__END_AT` IS NULL
+LEFT JOIN {relations["account"]} vpa2
+       ON vpa2.Id = vpa.ParentId
+      AND vpa2.`__END_AT` IS NULL
+      AND vpa2.IsDeleted IS FALSE
+      AND vpa2.vdm_is_hard_deleted IS FALSE
+WHERE vpa.`__END_AT` IS NULL
+  AND vpa.IsDeleted IS FALSE
+  AND vpa.vdm_is_hard_deleted IS FALSE
+  AND LOWER(u.Email) = LOWER('{{{{user_upn}}}}')
+ORDER BY sales_team, global_ultimate, name
+""".strip()
+
+
+def _sort_scoped_account_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["sales_team"].lower(),
+            (row.get("global_ultimate") or "").lower(),
+            row["name"].lower(),
+            row["account_id"].lower(),
+        ),
+    )
+
+
+def _dedupe_scoped_account_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for row in _sort_scoped_account_rows(rows):
+        key = (
+            row["account_id"],
+            row["sales_team"],
+            row["name"],
+            row.get("global_ultimate") or "",
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
+def _normalize_scoped_account_row(row: dict[str, Any]) -> dict[str, Any]:
+    account_id = _normalize_string(
+        row.get("account_id")
+        or row.get("legacy_id")
+        or row.get("legacy_account_id")
+        or row.get("source_vpower_id")
+        or row.get("vpower_account_id")
+    )
+    return {
+        "account_id": account_id,
+        "source_vpower_id": _nullable_string(row.get("source_vpower_id") or row.get("vpower_account_id")),
+        "legacy_id": _nullable_string(row.get("legacy_id") or row.get("legacy_account_id")),
         "name": _normalize_string(row.get("name")),
         "global_ultimate": _nullable_string(row.get("global_ultimate")) or _normalize_string(row.get("name")),
         "sales_team": _normalize_string(row.get("sales_team")),
@@ -240,7 +485,7 @@ def _normalize_scoped_account_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _load_static_scoped_accounts(path_value: str, *, sales_team: str) -> list[dict[str, Any]]:
+def _load_static_scoped_accounts(path_value: str, *, sales_teams: list[str]) -> list[dict[str, Any]]:
     resolved_path = _resolve_local_data_path(path_value)
     if not resolved_path.exists():
         raise CustomerBackendConfigurationError(
@@ -268,17 +513,13 @@ def _load_static_scoped_accounts(path_value: str, *, sales_team: str) -> list[di
         for row in rows
         if isinstance(row, dict)
     ]
+    allowed_sales_teams = {_normalize_string(item) for item in sales_teams if _normalize_string(item)}
     filtered_rows = [
-        row for row in normalized_rows if row["account_id"] and row["name"] and row["sales_team"] == sales_team
+        row
+        for row in normalized_rows
+        if row["account_id"] and row["name"] and row["sales_team"] in allowed_sales_teams
     ]
-    return sorted(
-        filtered_rows,
-        key=lambda row: (
-            row["sales_team"].lower(),
-            (row.get("global_ultimate") or "").lower(),
-            row["name"].lower(),
-        ),
-    )
+    return _dedupe_scoped_account_rows(filtered_rows)
 
 
 @dataclass(frozen=True)
@@ -478,7 +719,7 @@ class SalesTeamResolver:
     def __init__(self, query_client: CustomerDatabricksQueryClient | None = None) -> None:
         self.query_client = query_client or CustomerDatabricksQueryClient()
 
-    async def resolve(self) -> str:
+    async def resolve(self) -> list[str]:
         user_upn = _normalize_string(get_request_user_upn())
         if not user_upn:
             raise SalesTeamResolutionError(
@@ -494,12 +735,7 @@ class SalesTeamResolver:
             raise SalesTeamResolutionError(
                 f"No sales-team mapping is configured for signed-in user '{user_upn}'."
             )
-        if len(normalized) > 1:
-            raise SalesTeamResolutionError(
-                f"Signed-in user '{user_upn}' maps to multiple sales teams ({', '.join(normalized)}). "
-                "The current DAP integration requires a single resolved sales team."
-            )
-        return normalized[0]
+        return normalized
 
     def _resolve_from_static_map(self, user_upn: str) -> list[str] | None:
         raw_json = get_customer_sales_team_static_map_json()
@@ -528,27 +764,31 @@ class SalesTeamResolver:
             )
             statement = _render_sql_template(configured_query, {"user_upn": user_upn})
         else:
-            source = get_customer_sales_team_mapping_source() or _join_source_parts(
+            source = get_customer_sales_team_mapping_source() or _source_from_parts(
                 get_customer_sales_team_mapping_catalog(),
                 get_customer_sales_team_mapping_schema(),
                 get_customer_sales_team_mapping_table(),
             )
-            if not source:
-                raise CustomerBackendConfigurationError(
-                    "Configure CUSTOMER_SALES_TEAM_MAPPING_QUERY, CUSTOMER_SALES_TEAM_MAPPING_SOURCE, "
-                    "or CUSTOMER_SALES_TEAM_STATIC_MAP_JSON for customer mode."
+            if source:
+                statement = (
+                    "SELECT "
+                    f"{get_customer_sales_team_column()} AS sales_team "
+                    f"FROM {source} "
+                    f"WHERE LOWER({get_customer_sales_team_user_column()}) = LOWER('{{{{user_upn}}}}') "
+                    "ORDER BY sales_team"
                 )
-            statement = (
-                "SELECT "
-                f"{get_customer_sales_team_column()} AS sales_team "
-                f"FROM {source} "
-                f"WHERE LOWER({get_customer_sales_team_user_column()}) = LOWER('{{{{user_upn}}}}') "
-                "ORDER BY sales_team"
-            )
-            statement = _render_sql_template(statement, {"user_upn": user_upn})
-            _emit_backend_log(
-                f"[customer-backend] sales-team-mapping mode=source user_upn={user_upn} source={source}"
-            )
+                statement = _render_sql_template(statement, {"user_upn": user_upn})
+                _emit_backend_log(
+                    f"[customer-backend] sales-team-mapping mode=source user_upn={user_upn} source={source}"
+                )
+            else:
+                statement = _render_sql_template(
+                    _build_builtin_sales_team_mapping_query(),
+                    {"user_upn": user_upn},
+                )
+                _emit_backend_log(
+                    f"[customer-backend] sales-team-mapping mode=builtin_vpower_query user_upn={user_upn}"
+                )
 
         rows = await self.query_client.query_sql(statement, query_name="sales_team_mapping")
         return [
@@ -630,30 +870,35 @@ class ToolBackendRouter:
         self.rep_lookup_resolver = rep_lookup_resolver or RepLookupResolver()
 
     async def get_scoped_accounts_payload(self) -> dict[str, Any]:
-        sales_team = await self.sales_team_resolver.resolve()
-        _emit_backend_log(f"[customer-backend] scoped-accounts sales_team={sales_team}")
+        user_upn = _normalize_string(get_request_user_upn())
+        if not user_upn:
+            raise SalesTeamResolutionError(
+                "The signed-in user identity is missing an email/UPN claim, so scoped accounts cannot be resolved."
+            )
+        sales_teams = await self.sales_team_resolver.resolve()
+        _emit_backend_log(
+            f"[customer-backend] scoped-accounts user_upn={user_upn} sales_teams={','.join(sales_teams)}"
+        )
         static_json_path = get_customer_scope_accounts_static_json_path()
         if static_json_path:
             _emit_backend_log(
                 f"[customer-backend] scoped-accounts source=static_json path={static_json_path}"
             )
-            rows = _load_static_scoped_accounts(static_json_path, sales_team=sales_team)
+            rows = _load_static_scoped_accounts(static_json_path, sales_teams=sales_teams)
         else:
             query = get_customer_scope_accounts_query()
             if not query:
-                source = get_customer_scope_accounts_source() or _join_source_parts(
+                source = get_customer_scope_accounts_source() or _source_from_parts(
                     get_customer_scope_accounts_catalog(),
                     get_customer_scope_accounts_schema(),
                     get_customer_scope_accounts_table(),
                 )
-                if not source:
-                    raise CustomerBackendConfigurationError(
-                        "Configure CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH, CUSTOMER_SCOPE_ACCOUNTS_QUERY, "
-                        "or CUSTOMER_SCOPE_ACCOUNTS_SOURCE for customer mode."
-                    )
-                query = f"""
+                if source:
+                    query = f"""
 SELECT
   account_id,
+  source_vpower_id,
+  legacy_id,
   name,
   global_ultimate,
   sales_team,
@@ -669,37 +914,60 @@ SELECT
   opportunity_stage,
   last_seller_touch_date
 FROM {source}
-WHERE sales_team = '{{{{sales_team}}}}'
+WHERE {{{{sales_team_filter}}}}
 ORDER BY sales_team, global_ultimate, name
 """.strip()
-                _emit_backend_log(
-                    f"[customer-backend] scoped-accounts source=databricks_source table_or_view={source}"
-                )
+                    _emit_backend_log(
+                        f"[customer-backend] scoped-accounts source=databricks_source table_or_view={source}"
+                    )
+                else:
+                    query = _build_builtin_scoped_accounts_query()
+                    _emit_backend_log(
+                        "[customer-backend] scoped-accounts source=builtin_vpower_query"
+                    )
             else:
                 _emit_backend_log("[customer-backend] scoped-accounts source=custom_query")
             rows = await self.databricks_client.query_sql(
-                _render_sql_template(query, {"sales_team": sales_team})
-                ,
+                _render_sql_template(
+                    query,
+                    {
+                        "user_upn": user_upn,
+                        "sales_team": sales_teams[0] if sales_teams else "",
+                        "sales_team_list": _render_sql_string_list(sales_teams),
+                        "sales_team_filter": _sales_team_filter_clause(sales_teams),
+                    },
+                    raw_keys={"sales_team_filter", "sales_team_list"},
+                ),
                 query_name="scoped_accounts",
             )
-        _emit_backend_log(
-            f"[customer-backend] scoped-accounts row_count={len(rows)} sales_team={sales_team}"
+        normalized_rows = _dedupe_scoped_account_rows(
+            [
+                _normalize_scoped_account_row(row)
+                for row in rows
+                if isinstance(row, dict)
+            ]
         )
+        _emit_backend_log(
+            f"[customer-backend] scoped-accounts row_count={len(normalized_rows)} sales_teams={','.join(sales_teams)}"
+        )
+        territory, territories, segment = _summarize_scope(normalized_rows)
+        if not territories:
+            territory, territories, segment = _summarize_territories(sales_teams)
         unique_parents = sorted(
             {
                 _normalize_string(row.get("global_ultimate"))
-                for row in rows
+                for row in normalized_rows
                 if _normalize_string(row.get("global_ultimate"))
             }
         )
         return {
             "scope_mode": "customer_existing_databricks",
-            "territory": sales_team,
-            "territories": [sales_team],
-            "segment": _segment_from_territory(sales_team),
-            "total_accounts": len(rows),
+            "territory": territory,
+            "territories": territories,
+            "segment": segment,
+            "total_accounts": len(normalized_rows),
             "unique_global_ultimates": len(unique_parents),
-            "accounts": rows,
+            "accounts": normalized_rows,
         }
 
     async def get_account_contacts_payload(self, account_id: str) -> dict[str, Any]:
@@ -711,7 +979,7 @@ ORDER BY sales_team, global_ultimate, name
         )
         query = get_customer_contacts_query()
         if not query:
-            source = get_customer_contacts_source() or _join_source_parts(
+            source = get_customer_contacts_source() or _source_from_parts(
                 get_customer_contacts_catalog(),
                 get_customer_contacts_schema(),
                 get_customer_contacts_table(),
@@ -749,8 +1017,7 @@ ORDER BY engagement_level, title
                 {
                     "account_id": normalized_account_id,
                 },
-            )
-            ,
+            ),
             query_name="account_contacts",
         )
         _emit_backend_log(
@@ -766,18 +1033,18 @@ ORDER BY engagement_level, title
         filter_mode: str | None,
         territory: str | None = None,
     ) -> dict[str, Any]:
-        sales_team = _normalize_string(territory)
-        if not sales_team:
-            sales_team = await self.sales_team_resolver.resolve()
+        territory_overrides = _parse_territory_filter_values(territory)
+        sales_teams = territory_overrides if territory_overrides else await self.sales_team_resolver.resolve()
+        territory_summary, territories, segment = _summarize_territories(sales_teams)
         _emit_backend_log(
-            f"[customer-backend] top-opps sales_team={sales_team} limit={limit} offset={offset} filter_mode={filter_mode}"
+            f"[customer-backend] top-opps territories={','.join(territories)} limit={limit} offset={offset} filter_mode={filter_mode}"
         )
         safe_limit = max(1, min(int(limit), 25))
         safe_offset = max(0, int(offset))
         mode = _normalize_string(filter_mode).lower()
         query = get_customer_top_opportunities_query()
         if not query:
-            source = get_customer_top_opportunities_source() or _join_source_parts(
+            source = get_customer_top_opportunities_source() or _source_from_parts(
                 get_customer_top_opportunities_catalog(),
                 get_customer_top_opportunities_schema(),
                 get_customer_top_opportunities_table(),
@@ -786,7 +1053,7 @@ ORDER BY engagement_level, title
                 raise CustomerBackendConfigurationError(
                     "Configure CUSTOMER_TOP_OPPORTUNITIES_QUERY or CUSTOMER_TOP_OPPORTUNITIES_SOURCE for customer mode."
                 )
-            filters = ["sales_team = '{{sales_team}}'"]
+            filters = ["{{sales_team_filter}}"]
             if mode == "new_logo_only":
                 filters.append(
                     "("
@@ -850,12 +1117,14 @@ OFFSET {{{{offset}}}}
             _render_sql_template(
                 query,
                 {
-                    "sales_team": sales_team,
+                    "sales_team": territories[0] if territories else "",
+                    "sales_team_list": _render_sql_string_list(territories),
+                    "sales_team_filter": _sales_team_filter_clause(territories),
                     "limit": str(safe_limit),
                     "offset": str(safe_offset),
                 },
-            )
-            ,
+                raw_keys={"sales_team_filter", "sales_team_list"},
+            ),
             query_name="top_opportunities",
         )
         accounts = [
@@ -864,14 +1133,14 @@ OFFSET {{{{offset}}}}
             if row.get("xf_score_previous_day") not in (None, 0, 0.0, "0", "0.0")
         ]
         _emit_backend_log(
-            f"[customer-backend] top-opps row_count={len(accounts)} sales_team={sales_team}"
+            f"[customer-backend] top-opps row_count={len(accounts)} territories={','.join(territories)}"
         )
 
         return {
             "scope_mode": "customer_existing_databricks",
-            "territory": sales_team,
-            "territories": [sales_team],
-            "segment": _segment_from_territory(sales_team),
+            "territory": territory_summary,
+            "territories": territories,
+            "segment": segment,
             "filter_mode": filter_mode,
             "limit": safe_limit,
             "offset": safe_offset,
@@ -932,9 +1201,11 @@ def build_backend_investigation_matrix() -> list[dict[str, Any]]:
             "tool": "get_scoped_accounts",
             "backend_source": "direct customer Databricks",
             "auth_model": "planner-side Databricks OBO",
-            "required_inputs": ["sales_team"],
+            "required_inputs": ["user_upn"],
             "required_fields": [
                 "account_id",
+                "source_vpower_id",
+                "legacy_id",
                 "name",
                 "global_ultimate",
                 "sales_team",
@@ -944,7 +1215,7 @@ def build_backend_investigation_matrix() -> list[dict[str, Any]]:
                 "opportunity_stage",
                 "last_seller_touch_date",
             ],
-            "fallback_behavior": "prefer static JSON path, then direct customer Databricks",
+            "fallback_behavior": "built-in customer vPower Databricks query, with optional explicit override config",
             "config_keys": [
                 "CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH",
                 "CUSTOMER_SCOPE_ACCOUNTS_QUERY",
@@ -956,7 +1227,7 @@ def build_backend_investigation_matrix() -> list[dict[str, Any]]:
                 "CUSTOMER_DATABRICKS_WAREHOUSE_ID",
             ],
             "open_questions": [
-                "Should the static scope JSON remain the long-term Account Pulse source, or move to Databricks later?",
+                "Does the customer query guarantee that u.Email matches the Entra UPN used by planner OBO?",
             ],
         },
         {

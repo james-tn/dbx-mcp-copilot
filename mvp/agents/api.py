@@ -104,7 +104,7 @@ class PlannerRuntime:
             owner_id=owner_id,
             channel="direct_api",
             session_id=session_id,
-            agent_session=self.agent.create_session(),
+            agent_session=self.agent.create_request_scoped_session(),
         )
         return self.session_store.public_view(state)
 
@@ -138,7 +138,7 @@ class PlannerRuntime:
             )
             self.session_store.append_turn(state, "user", text)
             try:
-                result = await self.agent.run(_message_history_for_state(state))
+                result = await self.agent.run(_message_history_for_state(state), session=state.agent_session)
                 routed_agent = extract_routed_agent_from_workflow_result(result.raw_result)
                 reply = result.text
                 self.session_store.append_turn(state, "assistant", reply)

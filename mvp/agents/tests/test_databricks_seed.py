@@ -93,6 +93,19 @@ def test_load_seed_config_uses_customer_sources_for_access_grants(monkeypatch, t
     )
 
 
+def test_load_seed_config_includes_vpower_sources_when_scope_catalog_is_set(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DATABRICKS_SEED_SQL_FILE", str(tmp_path / "seed.sql"))
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_AUTH_MODE", "managed_identity")
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID", "mi-client")
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh-1")
+    monkeypatch.setenv("DATABRICKS_CATALOG", "workspace_catalog")
+
+    config = databricks_seed.load_seed_config()
+
+    assert "workspace_catalog.sf_vpower_bronze.account" in config.source_objects
+    assert "workspace_catalog.sf_vpower_bronze.user" in config.source_objects
+
+
 def test_resolve_bootstrap_warehouse_id_creates_when_missing(monkeypatch) -> None:
     monkeypatch.setenv("INFRA_NAME_PREFIX", "dailyacctplannersec")
     monkeypatch.setenv("DATABRICKS_AUTO_CREATE_WAREHOUSE", "true")
@@ -348,20 +361,15 @@ def test_run_secure_seed_honors_skip_catalog_create(monkeypatch, tmp_path: Path)
             executed.append(" ".join(statement.split()))
             if "SELECT seed_version" in statement:
                 return [{"seed_version": "stale"}]
-            if "SELECT 'accounts'" in statement:
+            if "SELECT 'account_iq_scores'" in statement:
                 return [
-                    {"object_name": "accounts", "row_count": 1},
-                    {"object_name": "reps", "row_count": 1},
-                    {"object_name": "opportunities", "row_count": 1},
-                    {"object_name": "contacts", "row_count": 1},
-                    {"object_name": "entitlements", "row_count": 2},
-                ]
-            if "SHOW TABLES IN workspace_catalog.ri_secure" in statement:
-                return [
-                    {"tableName": "accounts"},
-                    {"tableName": "reps"},
-                    {"tableName": "opportunities"},
-                    {"tableName": "contacts"},
+                    {"object_name": "account_iq_scores", "row_count": 7},
+                    {"object_name": "aiq_contact", "row_count": 12},
+                    {"object_name": "vpower_account", "row_count": 101},
+                    {"object_name": "objectterritory2association", "row_count": 100},
+                    {"object_name": "territory2", "row_count": 64},
+                    {"object_name": "userterritory2association", "row_count": 64},
+                    {"object_name": "user", "row_count": 58},
                 ]
             return []
 
@@ -598,20 +606,15 @@ def test_run_secure_seed_retries_warehouse_acl_with_multiple_bootstrap_principal
             executed.append(" ".join(statement.split()))
             if "SELECT seed_version" in statement:
                 return [{"seed_version": "stale"}]
-            if "SELECT 'accounts'" in statement:
+            if "SELECT 'account_iq_scores'" in statement:
                 return [
-                    {"object_name": "accounts", "row_count": 1},
-                    {"object_name": "reps", "row_count": 1},
-                    {"object_name": "opportunities", "row_count": 1},
-                    {"object_name": "contacts", "row_count": 1},
-                    {"object_name": "entitlements", "row_count": 2},
-                ]
-            if "SHOW TABLES IN veeam_demo.ri_secure" in statement:
-                return [
-                    {"tableName": "accounts"},
-                    {"tableName": "reps"},
-                    {"tableName": "opportunities"},
-                    {"tableName": "contacts"},
+                    {"object_name": "account_iq_scores", "row_count": 7},
+                    {"object_name": "aiq_contact", "row_count": 12},
+                    {"object_name": "vpower_account", "row_count": 101},
+                    {"object_name": "objectterritory2association", "row_count": 100},
+                    {"object_name": "territory2", "row_count": 64},
+                    {"object_name": "userterritory2association", "row_count": 64},
+                    {"object_name": "user", "row_count": 58},
                 ]
             return []
 
@@ -741,20 +744,15 @@ def test_run_secure_seed_continues_when_warehouse_permissions_endpoint_missing(
         async def execute(self, statement: str):
             if "SELECT seed_version" in statement:
                 return [{"seed_version": "stale"}]
-            if "SELECT 'accounts'" in statement:
+            if "SELECT 'account_iq_scores'" in statement:
                 return [
-                    {"object_name": "accounts", "row_count": 1},
-                    {"object_name": "reps", "row_count": 1},
-                    {"object_name": "opportunities", "row_count": 1},
-                    {"object_name": "contacts", "row_count": 1},
-                    {"object_name": "entitlements", "row_count": 2},
-                ]
-            if "SHOW TABLES IN veeam_demo.ri_secure" in statement:
-                return [
-                    {"tableName": "accounts"},
-                    {"tableName": "reps"},
-                    {"tableName": "opportunities"},
-                    {"tableName": "contacts"},
+                    {"object_name": "account_iq_scores", "row_count": 7},
+                    {"object_name": "aiq_contact", "row_count": 12},
+                    {"object_name": "vpower_account", "row_count": 101},
+                    {"object_name": "objectterritory2association", "row_count": 100},
+                    {"object_name": "territory2", "row_count": 64},
+                    {"object_name": "userterritory2association", "row_count": 64},
+                    {"object_name": "user", "row_count": 58},
                 ]
             return []
 
@@ -864,20 +862,15 @@ def test_validate_seed_output_checks_base_tables_and_view_existence(monkeypatch,
             self.settings = settings
 
         async def execute(self, statement: str):
-            if "SELECT 'accounts'" in statement:
+            if "SELECT 'account_iq_scores'" in statement:
                 return [
-                    {"object_name": "accounts", "row_count": 1},
-                    {"object_name": "reps", "row_count": 1},
-                    {"object_name": "opportunities", "row_count": 1},
-                    {"object_name": "contacts", "row_count": 1},
-                    {"object_name": "entitlements", "row_count": 2},
-                ]
-            if "SHOW TABLES IN workspace_catalog.ri_secure" in statement:
-                return [
-                    {"tableName": "accounts"},
-                    {"tableName": "reps"},
-                    {"tableName": "opportunities"},
-                    {"tableName": "contacts"},
+                    {"object_name": "account_iq_scores", "row_count": 7},
+                    {"object_name": "aiq_contact", "row_count": 12},
+                    {"object_name": "vpower_account", "row_count": 101},
+                    {"object_name": "objectterritory2association", "row_count": 100},
+                    {"object_name": "territory2", "row_count": 64},
+                    {"object_name": "userterritory2association", "row_count": 64},
+                    {"object_name": "user", "row_count": 58},
                 ]
             return []
 

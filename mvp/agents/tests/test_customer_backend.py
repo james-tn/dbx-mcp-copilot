@@ -81,7 +81,7 @@ def test_sales_team_resolver_uses_static_map(monkeypatch) -> None:
 
     resolver = customer_backend.SalesTeamResolver(query_client=_FakeDatabricksClient([]))
 
-    assert asyncio.run(resolver.resolve()) == "ENT-APAC-01"
+    assert asyncio.run(resolver.resolve()) == ["ENT-APAC-01"]
 
 
 def test_customer_dap_client_uses_authorization_header_for_obo(monkeypatch) -> None:
@@ -203,6 +203,55 @@ def test_tool_backend_router_uses_direct_databricks_top_opportunities_source(mon
     assert "FROM prod_catalog.data_science_account_iq_gold.account_iq_scores" in databricks_client.statements[0]
 
 
+def test_top_opportunities_allows_comma_separated_territory_override(monkeypatch) -> None:
+    monkeypatch.setattr(customer_backend, "get_request_user_upn", lambda: "seller@example.com")
+    monkeypatch.setattr(
+        customer_backend,
+        "get_customer_sales_team_static_map_json",
+        lambda: json.dumps({"seller@example.com": "GreatLakes-ENT-Named-1"}),
+    )
+    monkeypatch.setattr(customer_backend, "get_customer_top_opportunities_query", lambda: "")
+    monkeypatch.setattr(customer_backend, "get_customer_top_opportunities_source", lambda: "prod_catalog.data_science_account_iq_gold.account_iq_scores")
+
+    databricks_client = _FakeDatabricksClient(
+        [[
+            {
+                "account_id": "001GL0001",
+                "account_name": "Ford Motor Company",
+                "company_name": "Ford Motor Company",
+                "sales_team": "Germany-ENT-Named-5",
+                "xf_score_previous_day": 0.9,
+            },
+            {
+                "account_id": "001UK0001",
+                "account_name": "adidas AG",
+                "company_name": "adidas AG",
+                "sales_team": "UK-COM-Named-3",
+                "xf_score_previous_day": 0.8,
+            },
+        ]]
+    )
+
+    router = customer_backend.ToolBackendRouter(
+        databricks_client=databricks_client,
+        sales_team_resolver=customer_backend.SalesTeamResolver(databricks_client),
+    )
+
+    payload = asyncio.run(
+        router.get_top_opportunities_payload(
+            limit=5,
+            offset=0,
+            filter_mode=None,
+            territory="Germany-ENT-Named-5, UK-COM-Named-3",
+        )
+    )
+
+    assert payload["territory"] is None
+    assert payload["territories"] == ["Germany-ENT-Named-5", "UK-COM-Named-3"]
+    assert payload["segment"] == "MIXED"
+    assert "sales_team IN ('Germany-ENT-Named-5', 'UK-COM-Named-3')" in databricks_client.statements[0]
+
+
 def test_sales_team_resolver_can_build_source_from_catalog_schema_table(monkeypatch) -> None:
     monkeypatch.setattr(customer_backend, "get_request_user_upn", lambda: "seller@example.com")
     monkeypatch.setattr(customer_backend, "get_customer_sales_team_static_map_json", lambda: "")
@@ -217,7 +266,7 @@ def test_sales_team_resolver_can_build_source_from_catalog_schema_table(monkeypa
     query_client = _FakeDatabricksClient([[{"sales_team": "ENT-APAC-01"}]])
     resolver = customer_backend.SalesTeamResolver(query_client=query_client)
 
-    assert asyncio.run(resolver.resolve()) == "ENT-APAC-01"
+    assert asyncio.run(resolver.resolve()) == ["ENT-APAC-01"]
     assert "FROM demo_catalog.ri.seller_mapping" in query_client.statements[0]
 
 
@@ -277,7 +326,7 @@ def test_scoped_accounts_can_build_source_from_catalog_schema_table(monkeypatch)
     monkeypatch.setattr(customer_backend, "get_customer_scope_accounts_table", lambda: "accounts")
 
     databricks_client = _FakeDatabricksClient(
-        [[{"account_id": "001", "name": "Contoso", "global_ultimate": "Contoso", "sales_team": "GreatLakes-ENT-Named-1"}]]
+        [[{"account_id": "001", "source_vpower_id": "001cx", "legacy_id": "001", "name": "Contoso", "global_ultimate": "Contoso", "sales_team": "GreatLakes-ENT-Named-1"}]]
     )
     router = customer_backend.ToolBackendRouter(
         dap_client=customer_backend.CustomerDapClient(
@@ -301,6 +350,7 @@ def test_scoped_accounts_can_build_source_from_catalog_schema_table(monkeypatch)
 
     assert payload["total_accounts"] == 1
     assert "FROM demo_catalog.ri_secure.accounts" in databricks_client.statements[0]
+    assert "sales_team = 'GreatLakes-ENT-Named-1'" in databricks_client.statements[0]
 
 
 def test_scoped_accounts_prefers_static_json_path(monkeypatch, tmp_path: Path) -> None:
@@ -370,6 +420,63 @@ def test_scoped_accounts_prefers_static_json_path(monkeypatch, tmp_path: Path) -
     assert databricks_client.statements == []
 
 
+def test_scoped_accounts_use_builtin_vpower_query_by_default(monkeypatch) -> None:
+    monkeypatch.setattr(customer_backend, "get_request_user_upn", lambda: "seller@example.com")
+    monkeypatch.setattr(customer_backend, "get_customer_sales_team_static_map_json", lambda: "")
+    monkeypatch.setattr(customer_backend, "get_customer_sales_team_mapping_query", lambda: "")
+    monkeypatch.setattr(customer_backend, "get_customer_sales_team_mapping_source", lambda: "")
+    monkeypatch.setattr(customer_backend, "get_customer_sales_team_mapping_catalog", lambda: "workspace_catalog")
+    monkeypatch.setattr(customer_backend, "get_customer_scope_accounts_static_json_path", lambda: "")
+    monkeypatch.setattr(customer_backend, "get_customer_scope_accounts_query", lambda: "")
+    monkeypatch.setattr(customer_backend, "get_customer_scope_accounts_source", lambda: "")
+    monkeypatch.setattr(customer_backend, "get_customer_scope_accounts_catalog", lambda: "workspace_catalog")
+
+    databricks_client = _FakeDatabricksClient(
+        [
+            [
+                {"sales_team": "Germany-ENT-Named-5"},
+                {"sales_team": "GreatLakes-ENT-Named-1"},
+            ],
+            [
+                {
+                    "account_id": "0017V00001TkckpQAB",
+                    "source_vpower_id": "001cx00000PN3J4AAL",
+                    "legacy_id": "0017V00001TkckpQAB",
+                    "name": "Contoso Child",
+                    "global_ultimate": "null",
+                    "sales_team": "Germany-ENT-Named-5",
+                    "is_subsidiary": True,
+                },
+                {
+                    "account_id": "001GL0001",
+                    "source_vpower_id": "001cx00000GL0001",
+                    "legacy_id": None,
+                    "name": "Ford Motor Company",
+                    "global_ultimate": "Ford Motor Company",
+                    "sales_team": "GreatLakes-ENT-Named-1",
+                    "is_subsidiary": False,
+                },
+            ],
+        ]
+    )
+    router = customer_backend.ToolBackendRouter(
+        databricks_client=databricks_client,
+        sales_team_resolver=customer_backend.SalesTeamResolver(databricks_client),
+    )
+
+    payload = asyncio.run(router.get_scoped_accounts_payload())
+
+    assert "workspace_catalog.sf_vpower_bronze.account" in databricks_client.statements[0]
+    assert "LOWER(u.Email) = LOWER('seller@example.com')" in databricks_client.statements[0]
+    assert "workspace_catalog.sf_vpower_bronze.account" in databricks_client.statements[1]
+    assert payload["territory"] is None
+    assert payload["territories"] == ["Germany-ENT-Named-5", "GreatLakes-ENT-Named-1"]
+    assert payload["segment"] == "MIXED"
+    assert payload["accounts"][0]["global_ultimate"] in {"Contoso Child", "Ford Motor Company"}
+    contoso = next(row for row in payload["accounts"] if row["name"] == "Contoso Child")
+    assert contoso["global_ultimate"] == "Contoso Child"
+
+
 def test_top_opportunities_prefers_explicit_territory_and_direct_databricks_source(monkeypatch) -> None:
     monkeypatch.setattr(customer_backend, "get_request_user_upn", lambda: "seller@example.com")
     monkeypatch.setattr(
@@ -399,6 +506,37 @@ def test_top_opportunities_prefers_explicit_territory_and_direct_databricks_sour
     assert payload["accounts"][0]["xf_score_previous_day"] == 90.0
     assert "FROM prod_catalog.data_science_account_iq_gold.account_iq_scores" in databricks_client.statements[0]
     assert "sales_team = 'Germany-ENT-Named-5'" in databricks_client.statements[0]
+
+
+def test_top_opportunities_unions_multi_territory_scope(monkeypatch) -> None:
+    monkeypatch.setattr(customer_backend, "get_request_user_upn", lambda: "seller@example.com")
+    monkeypatch.setattr(
+        customer_backend,
+        "get_customer_sales_team_static_map_json",
+        lambda: json.dumps(
+            {"seller@example.com": ["Germany-ENT-Named-5", "GreatLakes-ENT-Named-1"]}
+        ),
+    )
+    monkeypatch.setattr(customer_backend, "get_customer_top_opportunities_query", lambda: "")
+    monkeypatch.setattr(customer_backend, "get_customer_top_opportunities_source", lambda: "")
+    monkeypatch.setattr(customer_backend, "get_customer_top_opportunities_catalog", lambda: "prod_catalog")
+    monkeypatch.setattr(customer_backend, "get_customer_top_opportunities_schema", lambda: "data_science_account_iq_gold")
+    monkeypatch.setattr(customer_backend, "get_customer_top_opportunities_table", lambda: "account_iq_scores")
+
+    databricks_client = _FakeDatabricksClient(
+        [[{"account_id": "001", "account_name": "Contoso", "company_name": "Contoso", "sales_team": "Germany-ENT-Named-5", "xf_score_previous_day": 90.0}]]
+    )
+    router = customer_backend.ToolBackendRouter(
+        databricks_client=databricks_client,
+        sales_team_resolver=customer_backend.SalesTeamResolver(databricks_client),
+    )
+
+    payload = asyncio.run(router.get_top_opportunities_payload(limit=5, offset=0, filter_mode=None))
+
+    assert payload["territory"] is None
+    assert payload["territories"] == ["Germany-ENT-Named-5", "GreatLakes-ENT-Named-1"]
+    assert payload["segment"] == "MIXED"
+    assert "sales_team IN ('Germany-ENT-Named-5', 'GreatLakes-ENT-Named-1')" in databricks_client.statements[0]
 
 
 def test_account_contacts_uses_domain_account_id(monkeypatch) -> None:

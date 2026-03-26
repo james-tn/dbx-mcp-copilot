@@ -21,6 +21,7 @@ from databricks_admin import (
     DatabricksAdminError,
     DatabricksAdminSettings,
 )
+from customer_scope_seed import default_scope_workbook_path, load_scope_workbook_rows, render_mock_customer_seed_sql
 from databricks_sql import DatabricksSqlClient, DatabricksSqlError, DatabricksSqlSettings, load_settings
 from infra.bootstrap_helpers import derive_demo_users, render_seed_sql_template
 
@@ -176,9 +177,24 @@ def _load_source_objects() -> tuple[str, ...]:
     if configured:
         candidates = configured.split(",")
     else:
+        scope_catalog = (
+            os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_CATALOG", "").strip()
+            or os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_CATALOG", "").strip()
+            or os.environ.get("DATABRICKS_CATALOG", "").strip()
+        )
+        vpower_sources = []
+        if scope_catalog:
+            vpower_sources = [
+                f"{scope_catalog}.sf_vpower_bronze.account",
+                f"{scope_catalog}.sf_vpower_bronze.objectterritory2association",
+                f"{scope_catalog}.sf_vpower_bronze.territory2",
+                f"{scope_catalog}.sf_vpower_bronze.userterritory2association",
+                f"{scope_catalog}.sf_vpower_bronze.user",
+            ]
         candidates = [
             os.environ.get("CUSTOMER_TOP_OPPORTUNITIES_SOURCE", "").strip(),
             os.environ.get("CUSTOMER_CONTACTS_SOURCE", "").strip(),
+            *vpower_sources,
         ]
 
     source_objects: list[str] = []
@@ -335,6 +351,9 @@ def _render_seed_script(config: DatabricksSeedConfig) -> list[str]:
 
     script = config.sql_file.read_text(encoding="utf-8")
     script = render_seed_sql_template(script, config.seller_a_upn, config.seller_b_upn)
+    scope_workbook = os.environ.get("CUSTOMER_SCOPE_SEED_WORKBOOK", "").strip()
+    scope_rows = load_scope_workbook_rows(scope_workbook or default_scope_workbook_path())
+    script = f"{script.rstrip()}\n\n{render_mock_customer_seed_sql(scope_rows)}\n"
     if config.catalog != "veeam_demo":
         script = script.replace("veeam_demo", config.catalog)
     statements = _split_statements(script)
@@ -610,35 +629,33 @@ async def _record_seed_success(client: DatabricksSqlClient, config: DatabricksSe
 async def _validate_seed_output(client: DatabricksSqlClient, config: DatabricksSeedConfig) -> None:
     rows = await client.execute(
         f"""
-        SELECT 'accounts' AS object_name, COUNT(*) AS row_count FROM {config.catalog}.ri.accounts
-        UNION ALL SELECT 'reps', COUNT(*) FROM {config.catalog}.ri.reps
-        UNION ALL SELECT 'opportunities', COUNT(*) FROM {config.catalog}.ri.opportunities
-        UNION ALL SELECT 'contacts', COUNT(*) FROM {config.catalog}.ri.contacts
-        UNION ALL SELECT 'entitlements', COUNT(*) FROM {config.catalog}.ri_security.user_territory_entitlements
+        SELECT 'account_iq_scores' AS object_name, COUNT(*) AS row_count FROM {config.catalog}.data_science_account_iq_gold.account_iq_scores
+        UNION ALL SELECT 'aiq_contact', COUNT(*) FROM {config.catalog}.account_iq_gold.aiq_contact
+        UNION ALL SELECT 'vpower_account', COUNT(*) FROM {config.catalog}.sf_vpower_bronze.account
+        UNION ALL SELECT 'objectterritory2association', COUNT(*) FROM {config.catalog}.sf_vpower_bronze.objectterritory2association
+        UNION ALL SELECT 'territory2', COUNT(*) FROM {config.catalog}.sf_vpower_bronze.territory2
+        UNION ALL SELECT 'userterritory2association', COUNT(*) FROM {config.catalog}.sf_vpower_bronze.userterritory2association
+        UNION ALL SELECT 'user', COUNT(*) FROM {config.catalog}.sf_vpower_bronze.`user`
         """
     )
     counts = {str(row.get("object_name")): int(row.get("row_count") or 0) for row in rows}
     missing = [
         name
-        for name in ("accounts", "reps", "opportunities", "contacts", "entitlements")
+        for name in (
+            "account_iq_scores",
+            "aiq_contact",
+            "vpower_account",
+            "objectterritory2association",
+            "territory2",
+            "userterritory2association",
+            "user",
+        )
         if counts.get(name, 0) <= 0
     ]
     if missing:
         raise DatabricksSeedError(
-            "Seed completed but base tables or entitlements are missing expected data: "
+            "Seed completed but the AIQ or customer-scope mock tables are missing expected data: "
             + ", ".join(sorted(missing))
-        )
-
-    view_rows = await client.execute(f"SHOW TABLES IN {config.catalog}.ri_secure")
-    available_views = {
-        str(row.get("tableName", "") or row.get("table_name", "")).strip().lower()
-        for row in view_rows
-    }
-    required_views = {"accounts", "reps", "opportunities", "contacts"}
-    missing_views = sorted(view_name for view_name in required_views if view_name not in available_views)
-    if missing_views:
-        raise DatabricksSeedError(
-            "Seed completed but secure views are missing: " + ", ".join(missing_views)
         )
 
 

@@ -18,11 +18,11 @@ import agent_framework_orchestrations._handoff as _handoff_module
 
 try:
     from .account_pulse import create_account_pulse_agent
-    from .next_move import create_next_move_agent
+    from .next_move import build_next_move_instructions_for_request, create_next_move_agent
     from .resilience import run_with_rate_limit_retry
 except ImportError:
     from account_pulse import create_account_pulse_agent
-    from next_move import create_next_move_agent
+    from next_move import build_next_move_instructions_for_request, create_next_move_agent
     from resilience import run_with_rate_limit_retry
 
 PLANNER_INSTRUCTIONS = """You are the Daily Account Planner for Veeam field sellers.
@@ -84,7 +84,7 @@ NEXT_MOVE_HANDOFF_DESCRIPTION = (
 
 @dataclass
 class PlannerWorkflowSession:
-    workflow: Any
+    workflow: Any | None
 
 
 @dataclass
@@ -183,6 +183,9 @@ class PlannerWorkflowAgent:
     def create_session(self) -> PlannerWorkflowSession:
         return PlannerWorkflowSession(workflow=create_runtime_planner_workflow(self._responses_client))
 
+    def create_request_scoped_session(self) -> PlannerWorkflowSession:
+        return PlannerWorkflowSession(workflow=None)
+
     async def run(
         self,
         messages: str | list[Message] | None = None,
@@ -191,9 +194,12 @@ class PlannerWorkflowAgent:
         **kwargs: Any,
     ) -> PlannerWorkflowResponse:
         active_session = session or self.create_session()
+        workflow = active_session.workflow
+        if workflow is None:
+            workflow = await create_runtime_planner_workflow_async(self._responses_client)
         result = await run_with_rate_limit_retry(
             "planner-workflow",
-            lambda: active_session.workflow.run(message=messages, **kwargs),
+            lambda: workflow.run(message=messages, **kwargs),
         )
         reply = extract_reply_from_workflow_result(result)
         return PlannerWorkflowResponse(text=reply, raw_result=result)
@@ -258,6 +264,48 @@ def create_runtime_planner_workflow(
     planner = create_runtime_planner_router_agent(responses_client)
     account_pulse = create_account_pulse_agent(responses_client)
     next_move = create_next_move_agent(responses_client)
+
+    return (
+        HandoffBuilder(
+            name="daily_account_planner_handoff",
+            description="Daily Account Planner handoff workflow for Account Pulse and Next Move.",
+        )
+        .participants([planner, account_pulse, next_move])
+        .add_handoff(
+            planner,
+            [account_pulse],
+            description=ACCOUNT_PULSE_HANDOFF_DESCRIPTION,
+        )
+        .add_handoff(
+            planner,
+            [next_move],
+            description=NEXT_MOVE_HANDOFF_DESCRIPTION,
+        )
+        .add_handoff(
+            account_pulse,
+            [planner],
+            description="Return to the Daily Account Planner when the seller shifts out of briefing mode.",
+        )
+        .add_handoff(
+            next_move,
+            [planner],
+            description="Return to the Daily Account Planner when the seller shifts out of focus or outreach mode.",
+        )
+        .with_start_agent(planner)
+        .build()
+    )
+
+
+async def create_runtime_planner_workflow_async(
+    responses_client: AzureOpenAIResponsesClient,
+) -> Any:
+    _apply_handoff_store_workaround()
+    planner = create_runtime_planner_router_agent(responses_client)
+    account_pulse = create_account_pulse_agent(responses_client)
+    next_move = create_next_move_agent(
+        responses_client,
+        instructions=await build_next_move_instructions_for_request(),
+    )
 
     return (
         HandoffBuilder(
