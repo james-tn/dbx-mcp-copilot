@@ -82,7 +82,7 @@ fail_step() {
   exit 1
 }
 
-if [[ -n "${DATABRICKS_RESOURCE_GROUP:-}" && -n "${DATABRICKS_WORKSPACE_NAME:-}" ]]; then
+if [[ "$CUSTOMER_DEPLOYMENT_MODE" != "true" && -n "${DATABRICKS_RESOURCE_GROUP:-}" && -n "${DATABRICKS_WORKSPACE_NAME:-}" ]]; then
   resolved_workspace_url="$(az databricks workspace show \
     --resource-group "$DATABRICKS_RESOURCE_GROUP" \
     --name "$DATABRICKS_WORKSPACE_NAME" \
