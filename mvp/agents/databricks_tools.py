@@ -17,12 +17,28 @@ from agent_framework import tool
 from pydantic import Field
 
 try:
-    from .config import get_effective_ri_scope_mode, get_secure_deployment_enabled
+    from .config import (
+        get_customer_backend_enabled,
+        get_effective_ri_scope_mode,
+        get_secure_deployment_enabled,
+    )
     from .auth_context import acquire_databricks_access_token, get_request_user_assertion
+    from .customer_backend import (
+        CustomerBackendConfigurationError,
+        CustomerDataAccessError,
+        SalesTeamResolutionError,
+        get_customer_tool_backend_router,
+    )
     from .databricks_sql import DatabricksSqlAuthError, DatabricksSqlClient, DatabricksSqlError
 except ImportError:
-    from config import get_effective_ri_scope_mode, get_secure_deployment_enabled
+    from config import get_customer_backend_enabled, get_effective_ri_scope_mode, get_secure_deployment_enabled
     from auth_context import acquire_databricks_access_token, get_request_user_assertion
+    from customer_backend import (
+        CustomerBackendConfigurationError,
+        CustomerDataAccessError,
+        SalesTeamResolutionError,
+        get_customer_tool_backend_router,
+    )
     from databricks_sql import DatabricksSqlAuthError, DatabricksSqlClient, DatabricksSqlError
 
 _DEFAULT_DEMO_TERRITORY = "GreatLakes-ENT-Named-1"
@@ -39,6 +55,10 @@ _REQUEST_DATABRICKS_CLIENT_TOKEN: ContextVar[str | None] = ContextVar(
 
 def _scope_mode() -> str:
     return get_effective_ri_scope_mode()
+
+
+def _customer_backend_enabled() -> bool:
+    return get_customer_backend_enabled()
 
 
 def _demo_territory() -> str:
@@ -112,6 +132,8 @@ async def close_request_databricks_client() -> None:
     _REQUEST_DATABRICKS_CLIENT_TOKEN.set(None)
     if client is not None:
         await client.close()
+    if _customer_backend_enabled():
+        await get_customer_tool_backend_router().close()
 
 
 async def _run_query(statement: str) -> list[dict[str, Any]]:
@@ -170,6 +192,13 @@ def _summarize_scope(rows: list[dict[str, Any]]) -> tuple[str | None, list[str],
     ),
 )
 async def get_scoped_accounts() -> str:
+    if _customer_backend_enabled():
+        try:
+            payload = await get_customer_tool_backend_router().get_scoped_accounts_payload()
+        except (CustomerBackendConfigurationError, CustomerDataAccessError, SalesTeamResolutionError) as exc:
+            return _json_payload({"error": str(exc)})
+        return _json_payload(payload)
+
     catalog = _catalog_name()
     statement = f"""
 SELECT
@@ -212,12 +241,19 @@ FROM {catalog}.ri_secure.accounts
 @tool(
     name="lookup_rep",
     description=(
-        "Look up a seller territory by rep name. Intended for local development and demo testing only."
+        "Look up a seller territory by rep name. Supports exact or partial name matches."
     ),
 )
 async def lookup_rep(
     rep_name: Annotated[str, Field(description="Full or partial seller name")] = "",
 ) -> str:
+    if _customer_backend_enabled():
+        try:
+            payload = get_customer_tool_backend_router().lookup_rep_payload(rep_name)
+        except CustomerBackendConfigurationError as exc:
+            return _json_payload({"error": str(exc)})
+        return _json_payload(payload)
+
     name = rep_name.strip()
     if not name:
         return _json_payload({"error": "rep_name is required."})
@@ -335,15 +371,31 @@ OFFSET {offset}
 async def get_top_opportunities(
     limit: Annotated[int, Field(description="Number of accounts to return", ge=1, le=25)] = 5,
     offset: Annotated[int, Field(description="Offset for pagination", ge=0)] = 0,
-    territory_override: Annotated[
+    territory: Annotated[
         str | None,
-        Field(description="Local-only territory override for testing"),
+        Field(description="Optional sales territory to query, such as Germany-ENT-Named-5"),
     ] = None,
     filter_mode: Annotated[
         str | None,
         Field(description="Optional filter mode: velocity_candidates or new_logo_only"),
     ] = None,
+    territory_override: Annotated[
+        str | None,
+        Field(description="Deprecated local compatibility alias for territory"),
+    ] = None,
 ) -> str:
+    if _customer_backend_enabled():
+        try:
+            payload = await get_customer_tool_backend_router().get_top_opportunities_payload(
+                limit=max(1, min(_coerce_int(limit, 5), 25)),
+                offset=max(0, _coerce_int(offset, 0)),
+                filter_mode=filter_mode,
+                territory=territory or territory_override,
+            )
+        except (CustomerBackendConfigurationError, CustomerDataAccessError, SalesTeamResolutionError) as exc:
+            return _json_payload({"error": str(exc)})
+        return _json_payload(payload)
+
     territory: str | None = None
     if _scope_mode() == "demo" or territory_override:
         territory = _resolve_territory(territory_override, allow_override=True)
@@ -384,6 +436,13 @@ async def get_top_opportunities(
 async def get_account_contacts(
     account_id: Annotated[str, Field(description="Account ID from get_top_opportunities")],
 ) -> str:
+    if _customer_backend_enabled():
+        try:
+            payload = await get_customer_tool_backend_router().get_account_contacts_payload(account_id)
+        except (CustomerBackendConfigurationError, CustomerDataAccessError, SalesTeamResolutionError) as exc:
+            return _json_payload({"error": str(exc)})
+        return _json_payload(payload)
+
     value = account_id.strip()
     if not value:
         return _json_payload({"error": "account_id is required."})

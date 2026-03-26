@@ -1,0 +1,12 @@
+command:
+  - uvicorn
+  - app:app
+  - --host
+  - 0.0.0.0
+  - --port
+  - "8000"
+env:
+  - name: DAP_SIMULATOR_EXPECTED_AUDIENCE
+    value: 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d
+  - name: DAP_SIMULATOR_LOCAL_DEV_BYPASS_AUTH
+    value: "false"

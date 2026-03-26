@@ -39,6 +39,29 @@ _DEFAULT_MODEL = "gpt-5.3-chat"
 _DEFAULT_API_VERSION = "2025-04-01-preview"
 _DEFAULT_TIMEOUT_SECONDS = 120.0
 _DEFAULT_MAX_RETRIES = 6
+_DEFAULT_AZURE_DATABRICKS_SCOPE = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default"
+_DEFAULT_CUSTOMER_TOP_OPPORTUNITIES_SOURCE = "prod_catalog.data_science_account_iq_gold.account_iq_scores"
+_DEFAULT_CUSTOMER_CONTACTS_SOURCE = "prod_catalog.account_iq_gold.aiq_contact"
+_DEFAULT_CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH = (
+    "fixtures/scope_accounts_glent1_ukirlprivent1.json"
+)
+
+
+def _load_json_text_from_path(env_key: str) -> str:
+    configured = os.environ.get(env_key, "").strip()
+    if not configured:
+        return ""
+
+    path = Path(configured).expanduser()
+    candidate_paths = [path] if path.is_absolute() else [
+        (Path.cwd() / path).resolve(),
+        (Path(__file__).resolve().parent / path).resolve(),
+        (Path(__file__).resolve().parent.parent / path).resolve(),
+    ]
+    for candidate in candidate_paths:
+        if candidate.exists():
+            return candidate.read_text(encoding="utf-8").strip()
+    return ""
 
 
 def _should_use_default_credential() -> bool:
@@ -233,3 +256,235 @@ def get_account_pulse_replay_fixture_set() -> str:
 def get_account_pulse_internal_aggregator_enabled() -> bool:
     value = os.environ.get("ACCOUNT_PULSE_ENABLE_INTERNAL_AGGREGATOR", "true").strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def get_customer_backend_mode() -> str:
+    value = os.environ.get("CUSTOMER_BACKEND_MODE", "").strip().lower()
+    if value in {"customer_existing_databricks", "demo_seeded"}:
+        return value
+    customer_host = os.environ.get("CUSTOMER_DATABRICKS_HOST", "").strip()
+    if customer_host:
+        return "customer_existing_databricks"
+    mock_enabled = os.environ.get("MOCK_DATABRICKS_ENVIRONMENT", "").strip().lower()
+    if mock_enabled in {"1", "true", "yes", "on"}:
+        return "demo_seeded"
+    if get_secure_deployment_enabled():
+        return "customer_existing_databricks"
+    return "demo_seeded"
+
+
+def get_customer_backend_enabled() -> bool:
+    if get_secure_deployment_enabled():
+        return True
+    return get_customer_backend_mode() == "customer_existing_databricks"
+
+
+def get_dap_api_base_url() -> str:
+    return os.environ.get("DAP_API_BASE_URL", "").strip().rstrip("/")
+
+
+def get_dap_api_client_id() -> str:
+    return os.environ.get("DAP_API_CLIENT_ID", "").strip()
+
+
+def get_dap_api_scope() -> str:
+    configured = os.environ.get("DAP_API_SCOPE", "").strip()
+    if configured:
+        return configured
+    client_id = get_dap_api_client_id()
+    if client_id:
+        return f"api://{client_id}/.default"
+    return ""
+
+
+def get_dap_api_expected_audience() -> str:
+    configured = os.environ.get("DAP_API_EXPECTED_AUDIENCE", "").strip()
+    if configured:
+        return configured
+    client_id = get_dap_api_client_id()
+    if client_id:
+        return f"api://{client_id}"
+    return ""
+
+
+def get_dap_api_auth_mode() -> str:
+    value = os.environ.get("DAP_API_AUTH_MODE", "obo").strip().lower()
+    if value in {"obo", "forward_user_token"}:
+        return value
+    return "obo"
+
+
+def get_dap_api_token_header_mode() -> str:
+    value = os.environ.get("DAP_API_TOKEN_HEADER_MODE", "authorization").strip().lower()
+    if value in {"authorization", "x_forwarded_access_token", "both"}:
+        return value
+    return "authorization"
+
+
+def get_dap_healthcheck_path() -> str:
+    return os.environ.get("DAP_HEALTHCHECK_PATH", "/api/v1/healthcheck").strip() or "/api/v1/healthcheck"
+
+
+def get_dap_accounts_query_path() -> str:
+    return os.environ.get("DAP_ACCOUNTS_QUERY_PATH", "/api/v1/accounts/query").strip() or "/api/v1/accounts/query"
+
+
+def get_dap_debug_headers_path() -> str:
+    return os.environ.get("DAP_DEBUG_HEADERS_PATH", "/api/v1/debug/headers").strip() or "/api/v1/debug/headers"
+
+
+def get_customer_databricks_host() -> str:
+    return (
+        os.environ.get("CUSTOMER_DATABRICKS_HOST", "").strip().rstrip("/")
+        or os.environ.get("DATABRICKS_HOST", "").strip().rstrip("/")
+    )
+
+
+def get_customer_databricks_scope() -> str:
+    return (
+        os.environ.get("CUSTOMER_DATABRICKS_OBO_SCOPE", "").strip()
+        or os.environ.get("DATABRICKS_OBO_SCOPE", "").strip()
+        or _DEFAULT_AZURE_DATABRICKS_SCOPE
+    )
+
+
+def get_customer_databricks_warehouse_id() -> str:
+    return (
+        os.environ.get("CUSTOMER_DATABRICKS_WAREHOUSE_ID", "").strip()
+        or os.environ.get("DATABRICKS_WAREHOUSE_ID", "").strip()
+    )
+
+
+def get_customer_databricks_resource_id() -> str:
+    return (
+        os.environ.get("CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID", "").strip()
+        or os.environ.get("DATABRICKS_AZURE_RESOURCE_ID", "").strip()
+    )
+
+
+def get_customer_databricks_pat() -> str:
+    return (
+        os.environ.get("CUSTOMER_DATABRICKS_PAT", "").strip()
+        or os.environ.get("DATABRICKS_PAT", "").strip()
+    )
+
+
+def get_customer_sales_team_static_map_json() -> str:
+    configured = os.environ.get("CUSTOMER_SALES_TEAM_STATIC_MAP_JSON", "").strip()
+    if configured:
+        return configured
+    return _load_json_text_from_path("CUSTOMER_SALES_TEAM_STATIC_MAP_JSON_PATH")
+
+
+def get_customer_sales_team_mapping_source() -> str:
+    return os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_SOURCE", "").strip()
+
+
+def get_customer_sales_team_mapping_query() -> str:
+    return os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_QUERY", "").strip()
+
+
+def get_customer_sales_team_user_column() -> str:
+    return os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_USER_COLUMN", "user_upn").strip() or "user_upn"
+
+
+def get_customer_sales_team_column() -> str:
+    return os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_TEAM_COLUMN", "sales_team").strip() or "sales_team"
+
+
+def get_customer_scope_accounts_source() -> str:
+    return os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_SOURCE", "").strip()
+
+
+def get_customer_scope_accounts_static_json_path() -> str:
+    configured = os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH", "").strip()
+    if configured:
+        return configured
+    if get_secure_deployment_enabled():
+        return _DEFAULT_CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH
+    return ""
+
+
+def get_customer_scope_accounts_query() -> str:
+    return os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_QUERY", "").strip()
+
+
+def get_customer_scope_accounts_catalog() -> str:
+    return os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_CATALOG", "").strip()
+
+
+def get_customer_scope_accounts_schema() -> str:
+    return os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_SCHEMA", "").strip()
+
+
+def get_customer_scope_accounts_table() -> str:
+    return os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_TABLE", "").strip()
+
+
+def get_customer_contacts_source() -> str:
+    configured = os.environ.get("CUSTOMER_CONTACTS_SOURCE", "").strip()
+    if configured:
+        return configured
+    if get_secure_deployment_enabled():
+        return _DEFAULT_CUSTOMER_CONTACTS_SOURCE
+    return ""
+
+
+def get_customer_contacts_query() -> str:
+    return os.environ.get("CUSTOMER_CONTACTS_QUERY", "").strip()
+
+
+def get_customer_contacts_catalog() -> str:
+    return os.environ.get("CUSTOMER_CONTACTS_CATALOG", "").strip()
+
+
+def get_customer_contacts_schema() -> str:
+    return os.environ.get("CUSTOMER_CONTACTS_SCHEMA", "").strip()
+
+
+def get_customer_contacts_table() -> str:
+    return os.environ.get("CUSTOMER_CONTACTS_TABLE", "").strip()
+
+
+def get_customer_top_opportunities_source() -> str:
+    configured = os.environ.get("CUSTOMER_TOP_OPPORTUNITIES_SOURCE", "").strip()
+    if configured:
+        return configured
+    if get_secure_deployment_enabled():
+        return _DEFAULT_CUSTOMER_TOP_OPPORTUNITIES_SOURCE
+    return ""
+
+
+def get_customer_top_opportunities_query() -> str:
+    return os.environ.get("CUSTOMER_TOP_OPPORTUNITIES_QUERY", "").strip()
+
+
+def get_customer_top_opportunities_catalog() -> str:
+    return os.environ.get("CUSTOMER_TOP_OPPORTUNITIES_CATALOG", "").strip()
+
+
+def get_customer_top_opportunities_schema() -> str:
+    return os.environ.get("CUSTOMER_TOP_OPPORTUNITIES_SCHEMA", "").strip()
+
+
+def get_customer_top_opportunities_table() -> str:
+    return os.environ.get("CUSTOMER_TOP_OPPORTUNITIES_TABLE", "").strip()
+
+
+def get_customer_rep_lookup_static_map_json() -> str:
+    configured = os.environ.get("CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON", "").strip()
+    if configured:
+        return configured
+    return _load_json_text_from_path("CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH")
+
+
+def get_customer_sales_team_mapping_catalog() -> str:
+    return os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_CATALOG", "").strip()
+
+
+def get_customer_sales_team_mapping_schema() -> str:
+    return os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_SCHEMA", "").strip()
+
+
+def get_customer_sales_team_mapping_table() -> str:
+    return os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_TABLE", "").strip()

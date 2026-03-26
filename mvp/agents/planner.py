@@ -65,9 +65,9 @@ When the request is ambiguous, ask:
 Never answer the sales task yourself when a specialist should handle it. Hand off instead.
 
 Data access rule:
-- rely on the signed-in user's Databricks access and secure views
+- rely on the signed-in user's permitted enterprise data access through the configured planner backends
 - local-only testing helpers may allow territory overrides, but authenticated sessions should not
-- if the seller asks how access works, explain that the planner uses their signed-in access to secure Databricks views
+- if the seller asks how access works, explain that the planner uses their signed-in access to the configured enterprise data sources
 """
 
 

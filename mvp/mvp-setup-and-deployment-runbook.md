@@ -2,9 +2,21 @@
 
 ## Purpose
 
-This runbook is the recommended operator path for bringing up the full demo
-environment in Azure and Microsoft 365 with seed data and the two-user access
-control demo.
+This runbook is the recommended operator path for Azure and Microsoft 365
+deployment of the planner stack.
+
+Default operator model:
+
+- Azure hosts the planner and wrapper on top of an existing Databricks
+  workspace and existing customer data sources
+- Databricks provisioning and data seeding are not part of the default runbook
+
+Optional mock operator model:
+
+- if you explicitly want a mock Databricks environment for testing or parity
+  validation, enable the mock Databricks path during bootstrap
+- that path provisions the Azure demo foundation and runs the AIQ-shaped mock
+  seed
 
 The recommended flow is now two steps:
 
@@ -77,6 +89,27 @@ Open mode:
 - `INFRA_NAME_PREFIX`
 - `SELLER_A_UPN`
 - `SELLER_B_UPN`
+
+If you are deploying against an existing production Databricks workspace with no
+workspace provisioning and no seed step, also fill these in the input env:
+
+- `CUSTOMER_DATABRICKS_HOST`
+- `CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID` when the Azure Databricks workspace
+  requires the workspace resource header
+- `CUSTOMER_DATABRICKS_WAREHOUSE_ID` if you want to pin a warehouse; otherwise
+  leave it blank and let the planner resolve one dynamically
+- `CUSTOMER_TOP_OPPORTUNITIES_SOURCE`
+- `CUSTOMER_CONTACTS_SOURCE`
+- `CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH`
+  default: `fixtures/scope_accounts_glent1_ukirlprivent1.json`
+- `CUSTOMER_SALES_TEAM_STATIC_MAP_JSON_PATH`
+  default: `fixtures/customer_sales_team_static_map.json`
+- `CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH`
+  default: `fixtures/customer_rep_lookup_static_map.json`
+
+In that default existing-workspace mode, the Azure bootstrap does not seed or
+mutate Databricks at all. Existing users, grants, warehouse access, and table
+permissions must already be present on the customer workspace.
 
 3. Sign in to Azure:
 
@@ -184,6 +217,20 @@ Everything else is derived or backfilled into the generated runtime env,
 including app IDs, secrets, image refs, container app URLs, Databricks
 workspace values, bot metadata, and derived internal resource names.
 
+Production existing-Databricks note:
+
+- the planner can only query the customer AIQ tables after Databricks grants the
+  signed-in user path it uses
+- in hosted secure mode, the planner reaches Databricks over private networking,
+  but Databricks must still authorize the delegated user/OBO path to use SQL
+  warehouses and read:
+  - `prod_catalog.data_science_account_iq_gold.account_iq_scores`
+  - `prod_catalog.account_iq_gold.aiq_contact`
+- if this grant is missing, the planner returns a backend execution/access
+  failure even though M365, wrapper routing, and private networking are healthy
+- the bootstrap does not attempt to create those permissions on an existing
+  customer workspace
+
 Starter Azure OpenAI default:
 
 - both open and secure mode now default to `gpt-5.2-chat` with
@@ -208,11 +255,13 @@ scripts in this order:
 
 1. foundation deploy
 2. Entra app registrations and secrets
-3. planner deployment
-4. Databricks seed
-5. wrapper deployment
-6. Azure Bot resource
-7. bot OAuth connection
+3. Databricks runtime selection for existing-workspace or mock-seeded mode
+4. planner deployment
+5. optional AIQ mock Databricks seed and foundation-workspace access bootstrap
+   when explicitly enabled
+6. wrapper deployment
+7. Azure Bot resource
+8. bot OAuth connection
 
 Expected Azure-side outputs include:
 
@@ -221,11 +270,10 @@ Expected Azure-side outputs include:
 - planner container app
 - wrapper container app
 - Azure OpenAI and AI Foundry resources
-- Databricks workspace
+- optional Databricks workspace when you intentionally use the mock path
 - ACR image refs written into the runtime env
 - planner API app registration
 - bot / wrapper app registration
-- secure seed job in secure mode
 - Azure Bot resource and OAuth connection
 
 Secure ACR exception:
@@ -236,19 +284,28 @@ Secure ACR exception:
 - the secure networking model still applies to Databricks, private endpoints,
   private DNS, and the in-network seed path
 
-Secure Databricks catalog note:
+Default existing-Databricks note:
 
-- the secure bootstrap defaults `DATABRICKS_SKIP_CATALOG_CREATE=true`
-- the Azure script reuses the Databricks workspace catalog for secure seed data
-  instead of trying to create a fresh managed catalog like `veeam_demo`
-- this avoids metastore failures on tenants where Databricks catalog creation
-  requires an explicit storage root
+- the default secure customer path expects you to supply the existing Databricks
+  connection values in the runtime env
+- the planner then connects directly to those existing sources:
+  - `CUSTOMER_TOP_OPPORTUNITIES_SOURCE=prod_catalog.data_science_account_iq_gold.account_iq_scores`
+  - `CUSTOMER_CONTACTS_SOURCE=prod_catalog.account_iq_gold.aiq_contact`
+- Account Pulse can use the checked-in static JSON scope file instead of a
+  scoped-account table on day one
+- the bootstrap does not create workspace users, warehouse permissions, or Unity
+  Catalog grants on that existing customer workspace
 
-Open Databricks catalog note:
+Optional mock Databricks note:
 
-- open mode now auto-detects the workspace catalog available in the fresh
-  Databricks SQL warehouse and reuses it when the legacy `veeam_demo` catalog
-  path is not available
+- when `ENABLE_MOCK_DATABRICKS_ENVIRONMENT=true`, the bootstrap also runs
+  [`seed-databricks-aiq-dev.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/seed-databricks-aiq-dev.sh)
+  to create AIQ-shaped mock tables for parity testing
+- the mock seed path targets only the foundation `DATABRICKS_*` workspace
+  values and never falls back to `CUSTOMER_DATABRICKS_*`
+- when mock mode is enabled, the bootstrap rewires the planner's active
+  `CUSTOMER_*` Databricks settings to the seeded foundation workspace before
+  planner deployment
 
 ## What The M365 Script Creates
 
@@ -338,15 +395,11 @@ Those are now operator-selected instead of repo-hard-coded.
 
 The bootstrap uses them to drive:
 
-- Databricks workspace-user bootstrap
-- security entitlements in
-  [`mvp/infra/databricks/seed-databricks-ri.sql`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/databricks/seed-databricks-ri.sql)
-- grants on the secure catalog objects
 - wrapper debug allow-list defaults
 - seller validation scripts
 
-The seed assigns different territories to the two sellers so the demo can show
-distinct results for seller A versus seller B.
+If you intentionally enable the optional mock Databricks path, those users can
+still be used to exercise different seller views during testing.
 
 ## Common Failure Cases And Recovery
 
@@ -524,22 +577,16 @@ Practical guidance:
 - if the log query returns nothing, widen the window from `ago(30m)` to
   `ago(24h)` and confirm you are filtering on the right `ContainerAppName`
 
-Databricks secure-seed note:
+Optional mock Databricks note:
 
-- if the secure seed job fails with
-  `Databricks admin API request failed with HTTP 404: User with id ... not found`
-  or the equivalent service-principal message, that usually means Databricks
-  returned a stale SCIM id during workspace principal propagation
-- retry once after waiting 1-2 minutes; the secure bootstrap now retries stale
-  SCIM ids inline, but Databricks propagation can still outlast a single job run
-- if the rerun still fails, verify each value in `DATABRICKS_WORKSPACE_USER_UPNS`
-  exists in the Databricks account and is assigned to the target workspace
-- for identity-federated workspaces, confirm the account-to-workspace assignment
-  finished before rerunning the seed job
-- the secure seed entrypoint is
-  [`mvp/infra/scripts/seed-databricks-ri.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/seed-databricks-ri.sh);
-  on failure it prints the ACA Job execution details and managed-identity summary
-  first, then the follow-up checks to run
+- the default secure customer path does not run Databricks seed jobs
+- if you intentionally enabled `ENABLE_MOCK_DATABRICKS_ENVIRONMENT=true`, use
+  [`mvp/infra/scripts/seed-databricks-aiq-dev.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/seed-databricks-aiq-dev.sh)
+  to refresh the AIQ-shaped mock tables
+- if the mock seed fails, first verify the foundation `DATABRICKS_HOST`,
+  `DATABRICKS_WAREHOUSE_ID`, and `AIQ_DEV_CATALOG` values in the runtime env
+- the Databricks access bootstrap helper is for the mock/foundation workspace
+  path only, not for an existing customer workspace
 
 ## Advanced / Manual Recovery
 
@@ -551,11 +598,65 @@ remain available for recovery and debugging:
 - [`mvp/infra/scripts/complete-m365-catalog-publish.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/complete-m365-catalog-publish.sh)
 - [`mvp/infra/scripts/deploy-foundation.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/deploy-foundation.sh)
 - [`mvp/infra/scripts/setup-custom-engine-app-registrations.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/setup-custom-engine-app-registrations.sh)
+- [`mvp/infra/scripts/build-and-deploy-planner-only.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/build-and-deploy-planner-only.sh)
+- [`mvp/infra/scripts/build-and-deploy-wrapper-only.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/build-and-deploy-wrapper-only.sh)
+- [`mvp/infra/scripts/bootstrap-databricks-access.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/bootstrap-databricks-access.sh)
 - [`mvp/infra/scripts/deploy-planner-api.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/deploy-planner-api.sh)
-- [`mvp/infra/scripts/seed-databricks-ri.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/seed-databricks-ri.sh)
+- [`mvp/infra/scripts/seed-databricks-aiq-dev.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/seed-databricks-aiq-dev.sh)
 - [`mvp/infra/scripts/deploy-m365-wrapper.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/deploy-m365-wrapper.sh)
 - [`mvp/infra/scripts/create-azure-bot-resource.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/create-azure-bot-resource.sh)
 - [`mvp/infra/scripts/setup-bot-oauth-connection.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/setup-bot-oauth-connection.sh)
 - [`mvp/scripts/build-m365-app-package.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/scripts/build-m365-app-package.sh)
 - [`mvp/scripts/publish-m365-app-package-graph.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/scripts/publish-m365-app-package-graph.sh)
 - [`mvp/scripts/install-m365-app-for-self-graph.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/scripts/install-m365-app-for-self-graph.sh)
+
+## Secure Customer Planner Updates
+
+For the hosted secure customer path:
+
+- use [`.env.secure.example`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure.example) as the only hosted env template
+- set the existing Databricks values in [`mvp/.env.secure.inputs`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure.inputs) before bootstrap, or in [`.env.secure`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure) before planner-only redeploys
+- set `CUSTOMER_DATABRICKS_HOST` at deployment time
+- set `CUSTOMER_DATABRICKS_WAREHOUSE_ID` only if you want to pin a specific SQL warehouse; blank is allowed
+- keep `CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID` when the target Azure Databricks workspace requires the workspace resource header, but do not treat it as mandatory
+- leave `CUSTOMER_DATABRICKS_OBO_SCOPE` at the default Azure Databricks delegated scope unless the customer explicitly requires a different resource
+- Next Move defaults to:
+  - `CUSTOMER_TOP_OPPORTUNITIES_SOURCE=prod_catalog.data_science_account_iq_gold.account_iq_scores`
+  - `CUSTOMER_CONTACTS_SOURCE=prod_catalog.account_iq_gold.aiq_contact`
+- Account Pulse can run from the checked-in static scope JSON:
+  - `CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH=fixtures/scope_accounts_glent1_ukirlprivent1.json`
+- customer static sales-team mapping defaults to:
+  - `CUSTOMER_SALES_TEAM_STATIC_MAP_JSON_PATH=fixtures/customer_sales_team_static_map.json`
+- customer rep lookup defaults to:
+  - `CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH=fixtures/customer_rep_lookup_static_map.json`
+
+Routine planner-only code updates should leave the deployed wrapper intact:
+
+```bash
+ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/build-and-deploy-planner-only.sh
+```
+
+Routine wrapper-only code updates should leave the planner intact:
+
+```bash
+ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/build-and-deploy-wrapper-only.sh
+```
+
+Use the full stack deploy only when you intentionally need planner plus wrapper:
+
+```bash
+ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/deploy-customer-stack.sh
+```
+
+For local planner testing without Microsoft 365:
+
+```bash
+ENV_FILE=mvp/.env bash mvp/infra/scripts/run-local-planner-chat.sh
+```
+
+- the local chat app reuses the planner HTTP API and wrapper debug-auth helpers
+- use `.env`, not `.env.secure`, because the secure planner is expected to be
+  private from local/operator access
+- if secure hosted Next Move still reports a Databricks execution/access error,
+  verify the existing Databricks grants for the planner's delegated user path before
+  republishing the M365 app; wrapper-to-planner routing alone is not sufficient

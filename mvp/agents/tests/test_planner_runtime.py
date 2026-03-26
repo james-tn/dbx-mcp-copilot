@@ -82,7 +82,7 @@ def test_runtime_planner_instructions_route_by_handoff() -> None:
     assert "Account Pulse" in RUNTIME_PLANNER_INSTRUCTIONS
     assert "Next Move" in RUNTIME_PLANNER_INSTRUCTIONS
     assert "Hand off instead." in RUNTIME_PLANNER_INSTRUCTIONS
-    assert "signed-in user's Databricks access" in RUNTIME_PLANNER_INSTRUCTIONS
+    assert "signed-in user's permitted enterprise data access" in RUNTIME_PLANNER_INSTRUCTIONS
     assert "semantic Databricks tools directly" not in RUNTIME_PLANNER_INSTRUCTIONS
 
 

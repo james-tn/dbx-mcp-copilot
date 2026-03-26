@@ -65,6 +65,10 @@ class DatabricksOboError(RuntimeError):
     """Raised when delegated Databricks token acquisition fails."""
 
 
+class DownstreamOboError(RuntimeError):
+    """Raised when delegated downstream token acquisition fails."""
+
+
 @dataclass(frozen=True)
 class AuthSettings:
     azure_tenant_id: str
@@ -180,6 +184,11 @@ def get_request_user_id() -> str | None:
     return claims.user_id if claims else None
 
 
+def get_request_user_upn() -> str | None:
+    claims = get_request_claims()
+    return claims.upn if claims else None
+
+
 def acquire_databricks_access_token(user_assertion: str | None = None) -> str | None:
     assertion = (user_assertion or get_request_user_assertion() or "").strip()
     if not assertion:
@@ -205,3 +214,32 @@ def acquire_databricks_access_token(user_assertion: str | None = None) -> str | 
     if user_assertion is None:
         _REQUEST_DATABRICKS_ACCESS_TOKEN.set(access_token)
     return access_token
+
+
+def acquire_downstream_access_token(
+    scope: str,
+    *,
+    user_assertion: str | None = None,
+    error_type: type[Exception] = DownstreamOboError,
+    default_message: str = "Downstream OBO token acquisition failed.",
+) -> str | None:
+    normalized_scope = (scope or "").strip()
+    if not normalized_scope:
+        return None
+
+    assertion = (user_assertion or get_request_user_assertion() or "").strip()
+    if not assertion:
+        return None
+
+    try:
+        app = get_confidential_app()
+    except AuthConfigurationError as exc:
+        raise error_type(str(exc)) from exc
+
+    return acquire_obo_access_token(
+        app,
+        user_assertion=assertion,
+        scopes=[normalized_scope],
+        error_type=error_type,
+        default_message=default_message,
+    )

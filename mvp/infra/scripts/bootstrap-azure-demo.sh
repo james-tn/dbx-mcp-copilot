@@ -6,6 +6,7 @@ HELPER_SCRIPT="$ROOT_DIR/infra/bootstrap_helpers.py"
 MODE="${1:-secure}"
 REQUIRE_ADMIN_CONSENT="${REQUIRE_ADMIN_CONSENT:-true}"
 SPLIT_RESPONSIBILITY_MODE="${SPLIT_RESPONSIBILITY_MODE:-false}"
+ENABLE_MOCK_DATABRICKS_ENVIRONMENT="${ENABLE_MOCK_DATABRICKS_ENVIRONMENT:-false}"
 
 if [[ "$MODE" != "open" && "$MODE" != "secure" ]]; then
   echo "Usage: bash mvp/infra/scripts/bootstrap-azure-demo.sh <open|secure>" >&2
@@ -34,6 +35,7 @@ fi
 source "$ROOT_DIR/infra/scripts/bootstrap-status-lib.sh"
 STATUS_FILE="$(bootstrap_status_file_for_mode "$ROOT_DIR" "$MODE")"
 ENTRA_ADMIN_CONSENT_PENDING="false"
+MOCK_DATABRICKS_PUBLIC_ACCESS_TEMP_OPENED="false"
 
 source_env() {
   if [[ -f "$RUNTIME_FILE" ]]; then
@@ -81,6 +83,60 @@ log_step() {
 log_success() {
   echo "[bootstrap-azure-demo] OK: $*"
 }
+
+set_databricks_public_network_access() {
+  local desired_state="$1"
+  local normalized_desired="$desired_state"
+  if [[ "$normalized_desired" != "Enabled" && "$normalized_desired" != "Disabled" ]]; then
+    echo "Databricks public network access state must be Enabled or Disabled." >&2
+    return 1
+  fi
+
+  az databricks workspace update \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --name "$DATABRICKS_WORKSPACE_NAME" \
+    --public-network-access "$normalized_desired" \
+    >/dev/null
+
+  for _ in {1..60}; do
+    current_state="$(az databricks workspace show \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      --name "$DATABRICKS_WORKSPACE_NAME" \
+      --query publicNetworkAccess \
+      -o tsv 2>/dev/null || true)"
+    if [[ "$current_state" == "$normalized_desired" ]]; then
+      return 0
+    fi
+    sleep 5
+  done
+
+  echo "Timed out waiting for Databricks public network access to become $normalized_desired." >&2
+  return 1
+}
+
+enable_mock_databricks_public_access() {
+  set_databricks_public_network_access "Enabled"
+  MOCK_DATABRICKS_PUBLIC_ACCESS_TEMP_OPENED="true"
+}
+
+disable_mock_databricks_public_access() {
+  set_databricks_public_network_access "Disabled"
+  MOCK_DATABRICKS_PUBLIC_ACCESS_TEMP_OPENED="false"
+}
+
+cleanup_mock_databricks_public_access() {
+  if [[ "$MOCK_DATABRICKS_PUBLIC_ACCESS_TEMP_OPENED" != "true" ]]; then
+    return 0
+  fi
+
+  echo "[bootstrap-azure-demo] WARN: closing temporary Databricks public access during cleanup."
+  set +e
+  set_databricks_public_network_access "Disabled"
+  set -e
+  MOCK_DATABRICKS_PUBLIC_ACCESS_TEMP_OPENED="false"
+}
+
+trap cleanup_mock_databricks_public_access EXIT
 
 handoff_and_exit() {
   local role_name="$1"
@@ -190,16 +246,16 @@ refresh_runtime_from_existing_foundation() {
   local openai_endpoint=""
 
   upsert_env_value "SECURE_DEPLOYMENT" "$([[ "$MODE" == "secure" ]] && printf 'true' || printf 'false')"
-  upsert_env_value "ACA_ENVIRONMENT_NAME" "$ACA_ENVIRONMENT_NAME"
-  upsert_env_value "AZURE_OPENAI_ACCOUNT_NAME" "$AZURE_OPENAI_ACCOUNT_NAME"
-  upsert_env_value "AZURE_AI_FOUNDRY_ACCOUNT_NAME" "$AZURE_AI_FOUNDRY_ACCOUNT_NAME"
-  upsert_env_value "AZURE_AI_FOUNDRY_PROJECT_NAME" "$AZURE_AI_FOUNDRY_PROJECT_NAME"
-  upsert_env_value "DATABRICKS_WORKSPACE_NAME" "$DATABRICKS_WORKSPACE_NAME"
+  upsert_env_value "ACA_ENVIRONMENT_NAME" "${ACA_ENVIRONMENT_NAME:-}"
+  upsert_env_value "AZURE_OPENAI_ACCOUNT_NAME" "${AZURE_OPENAI_ACCOUNT_NAME:-}"
+  upsert_env_value "AZURE_AI_FOUNDRY_ACCOUNT_NAME" "${AZURE_AI_FOUNDRY_ACCOUNT_NAME:-}"
+  upsert_env_value "AZURE_AI_FOUNDRY_PROJECT_NAME" "${AZURE_AI_FOUNDRY_PROJECT_NAME:-}"
+  upsert_env_value "DATABRICKS_WORKSPACE_NAME" "${DATABRICKS_WORKSPACE_NAME:-}"
   upsert_env_value "DATABRICKS_RESOURCE_GROUP" "$AZURE_RESOURCE_GROUP"
-  upsert_env_value "SECURE_VNET_NAME" "$SECURE_VNET_NAME"
-  upsert_env_value "KEYVAULT_NAME" "$KEYVAULT_NAME"
-  upsert_env_value "ACR_NAME" "$ACR_NAME"
-  upsert_env_value "LOG_ANALYTICS_NAME" "$LOG_ANALYTICS_NAME"
+  upsert_env_value "SECURE_VNET_NAME" "${SECURE_VNET_NAME:-}"
+  upsert_env_value "KEYVAULT_NAME" "${KEYVAULT_NAME:-}"
+  upsert_env_value "ACR_NAME" "${ACR_NAME:-}"
+  upsert_env_value "LOG_ANALYTICS_NAME" "${LOG_ANALYTICS_NAME:-}"
 
   if [[ "$MODE" == "secure" ]]; then
     upsert_if_value "SECURE_ACA_SUBNET_ID" "$(az network vnet subnet show \
@@ -253,6 +309,45 @@ refresh_runtime_from_existing_foundation() {
     -o tsv 2>/dev/null || true)"
   if [[ -n "$openai_endpoint" ]]; then
     upsert_env_value "AZURE_OPENAI_ENDPOINT" "$openai_endpoint"
+  fi
+}
+
+configure_customer_databricks_runtime() {
+  if [[ "${ENABLE_MOCK_DATABRICKS_ENVIRONMENT,,}" == "true" || "${ENABLE_MOCK_DATABRICKS_ENVIRONMENT}" == "1" ]]; then
+    local aiq_dev_catalog="${AIQ_DEV_CATALOG:-}"
+    local workspace_id=""
+    if [[ -z "$aiq_dev_catalog" && "$MODE" == "secure" ]]; then
+      workspace_id="$(az databricks workspace show \
+        --resource-group "$AZURE_RESOURCE_GROUP" \
+        --name "$DATABRICKS_WORKSPACE_NAME" \
+        --query workspaceId \
+        -o tsv 2>/dev/null || true)"
+      if [[ -n "$workspace_id" ]]; then
+        aiq_dev_catalog="$(
+          python3 - <<'PY' "$DATABRICKS_WORKSPACE_NAME" "$workspace_id"
+import re
+import sys
+
+workspace_name = sys.argv[1].strip()
+workspace_id = sys.argv[2].strip()
+normalized_name = re.sub(r"[^0-9A-Za-z_]", "_", workspace_name)
+print(f"{normalized_name}_{workspace_id}" if normalized_name and workspace_id else "")
+PY
+        )"
+      fi
+    fi
+    aiq_dev_catalog="${aiq_dev_catalog:-dev_catalog}"
+    upsert_env_value "MOCK_DATABRICKS_ENVIRONMENT" "true"
+    upsert_env_value "AIQ_DEV_CATALOG" "$aiq_dev_catalog"
+    upsert_env_value "AIQ_DEV_SKIP_CATALOG_CREATE" "$([[ "$MODE" == "secure" ]] && printf 'true' || printf 'false')"
+    upsert_env_value "CUSTOMER_DATABRICKS_HOST" "${DATABRICKS_HOST:-}"
+    upsert_env_value "CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID" "${DATABRICKS_AZURE_RESOURCE_ID:-}"
+    upsert_env_value "CUSTOMER_DATABRICKS_OBO_SCOPE" "${DATABRICKS_OBO_SCOPE:-2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default}"
+    upsert_env_value "CUSTOMER_DATABRICKS_WAREHOUSE_ID" "${DATABRICKS_WAREHOUSE_ID:-}"
+    upsert_env_value "CUSTOMER_TOP_OPPORTUNITIES_SOURCE" "${aiq_dev_catalog}.data_science_account_iq_gold.account_iq_scores"
+    upsert_env_value "CUSTOMER_CONTACTS_SOURCE" "${aiq_dev_catalog}.account_iq_gold.aiq_contact"
+  else
+    upsert_env_value "MOCK_DATABRICKS_ENVIRONMENT" "false"
   fi
 }
 
@@ -481,15 +576,6 @@ validate_azure_outputs() {
     exit 1
   fi
 
-  if [[ "$MODE" == "secure" ]]; then
-    if ! az resource show \
-      --resource-group "$AZURE_RESOURCE_GROUP" \
-      --name "$DATABRICKS_SEED_JOB_NAME" \
-      --resource-type "Microsoft.App/jobs" >/dev/null 2>&1; then
-      echo "Secure Databricks seed job '$DATABRICKS_SEED_JOB_NAME' was not found." >&2
-      exit 1
-    fi
-  fi
 }
 
 run_entra_app_registration_step() {
@@ -544,27 +630,46 @@ if ! run_bootstrap_step "Create or update Entra app registrations" run_entra_app
   exit 1
 fi
 run_bootstrap_step "Reload runtime env after Entra app registration setup" source_env
+run_bootstrap_step "Configure Databricks runtime selection" configure_customer_databricks_runtime
+run_bootstrap_step "Reload runtime env after Databricks runtime selection" source_env
 
 if entra_admin_consent_is_pending; then
   ENTRA_ADMIN_CONSENT_PENDING="true"
 fi
 
-run_bootstrap_step "Deploy planner API and secure seed job resources" \
+run_bootstrap_step "Deploy planner API" \
   env ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \
   bash "$ROOT_DIR/infra/scripts/deploy-planner-api.sh"
 run_bootstrap_step "Reload runtime env after planner deployment" source_env
 
-run_bootstrap_step "Run Databricks seed" \
-  env ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \
-  bash "$ROOT_DIR/infra/scripts/seed-databricks-ri.sh"
-run_bootstrap_step "Reload runtime env after Databricks seed" source_env
-
-if [[ "$MODE" == "open" ]]; then
-  run_bootstrap_step "Validate open-mode Databricks direct query" \
+if [[ "${ENABLE_MOCK_DATABRICKS_ENVIRONMENT,,}" == "true" || "${ENABLE_MOCK_DATABRICKS_ENVIRONMENT}" == "1" ]]; then
+  if [[ "$MODE" == "secure" ]]; then
+    run_bootstrap_step "Enable temporary Databricks public access for mock seeding" enable_mock_databricks_public_access
+  fi
+  run_bootstrap_step "Run AIQ mock Databricks seed" \
+    env ENV_FILE="$RUNTIME_FILE" DEPLOYMENT_MODE="$MODE" \
+    bash "$ROOT_DIR/infra/scripts/seed-databricks-aiq-dev.sh"
+  run_bootstrap_step "Reload runtime env after AIQ mock Databricks seed" source_env
+  run_bootstrap_step "Bootstrap Databricks access on mock foundation workspace" \
     env ENV_FILE="$RUNTIME_FILE" \
-    bash "$ROOT_DIR/infra/scripts/validate-databricks-direct-query.sh"
+    bash "$ROOT_DIR/infra/scripts/bootstrap-databricks-access.sh" foundation
+  run_bootstrap_step "Validate AIQ mock Databricks tables" \
+    env ENV_FILE="$RUNTIME_FILE" \
+    bash "$ROOT_DIR/infra/scripts/validate-databricks-aiq-dev.sh"
+  if [[ "$MODE" == "secure" ]]; then
+    run_bootstrap_step "Disable Databricks public access after mock seeding" disable_mock_databricks_public_access
+    run_bootstrap_step "Validate secure network posture after mock seeding" \
+      env ENV_FILE="$RUNTIME_FILE" \
+      bash "$ROOT_DIR/infra/scripts/validate-network.sh"
+  fi
 else
-  echo "Skipping local direct Databricks validation for secure mode because the workspace may stay private from the operator machine."
+  echo "Skipping Databricks provisioning, seeding, and permission changes. Existing-workspace mode is read-only from the planner bootstrap."
+fi
+
+if [[ "${ENABLE_MOCK_DATABRICKS_ENVIRONMENT,,}" == "true" || "${ENABLE_MOCK_DATABRICKS_ENVIRONMENT}" == "1" ]]; then
+  echo "AIQ mock Databricks validation completed through the AIQ-shaped table validator."
+else
+  echo "Skipping local direct Databricks validation because the active runbook path does not rely on a locally reachable seeded workspace."
 fi
 
 run_bootstrap_step "Deploy M365 wrapper" \

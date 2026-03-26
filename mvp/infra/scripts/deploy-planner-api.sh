@@ -13,6 +13,26 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+env_file_declares_key() {
+  local key="$1"
+  [[ -f "$ENV_FILE" ]] && rg -q "^${key}=" "$ENV_FILE"
+}
+
+# Hosted deployments should default to Entra ID for Azure OpenAI unless the
+# runtime env file explicitly opts into API-key auth.
+if ! env_file_declares_key "AZURE_OPENAI_API_KEY"; then
+  unset AZURE_OPENAI_API_KEY || true
+fi
+
+CUSTOMER_DEPLOYMENT_MODE="false"
+if [[ "${SECURE_DEPLOYMENT:-false}" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee]?[Ss]|[Oo][Nn])$ || "${DEPLOYMENT_MODE,,}" == "secure" || "${DEPLOYMENT_MODE,,}" == "true" || -n "${CUSTOMER_DATABRICKS_HOST:-}" ]]; then
+  CUSTOMER_DEPLOYMENT_MODE="true"
+  DATABRICKS_HOST="${CUSTOMER_DATABRICKS_HOST:-${DATABRICKS_HOST:-}}"
+  DATABRICKS_WAREHOUSE_ID="${CUSTOMER_DATABRICKS_WAREHOUSE_ID:-${DATABRICKS_WAREHOUSE_ID:-}}"
+  DATABRICKS_OBO_SCOPE="${CUSTOMER_DATABRICKS_OBO_SCOPE:-${DATABRICKS_OBO_SCOPE:-}}"
+  DATABRICKS_AZURE_RESOURCE_ID="${CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID:-${DATABRICKS_AZURE_RESOURCE_ID:-}}"
+fi
+
 configured_databricks_host="${DATABRICKS_HOST:-}"
 
 upsert_env_value() {
@@ -541,7 +561,6 @@ derive_demo_user_csv() {
 }
 
 PLANNER_ACA_APP_NAME="${PLANNER_ACA_APP_NAME:-${ACA_APP_NAME:-daily-account-planner-service}}"
-PLANNER_SEED_COMMAND="${PLANNER_SEED_COMMAND:-python seed_entrypoint.py}"
 AZURE_OPENAI_DEPLOYMENT="${AZURE_OPENAI_DEPLOYMENT:-${AZURE_OPENAI_MODEL:-}}"
 BOOTSTRAP_MANAGED_IDENTITY_NAME="${DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_NAME:-${PLANNER_ACA_APP_NAME}-seed-mi}"
 SECURE_MODE="false"
@@ -571,6 +590,19 @@ for var_name in "${required_vars[@]}"; do
   fi
 done
 
+if [[ "$CUSTOMER_DEPLOYMENT_MODE" == "true" ]]; then
+  customer_required_vars=(
+    CUSTOMER_DATABRICKS_HOST
+  )
+
+  for var_name in "${customer_required_vars[@]}"; do
+    if [[ -z "${!var_name:-}" ]]; then
+      echo "$var_name is required for secure customer planner deployment." >&2
+      exit 1
+    fi
+  done
+fi
+
 az account set --subscription "$AZURE_SUBSCRIPTION_ID"
 az group create --name "$AZURE_RESOURCE_GROUP" --location "$AZURE_LOCATION" >/dev/null
 
@@ -592,13 +624,16 @@ upsert_env_value "DATABRICKS_WAREHOUSE_TYPE" "$DATABRICKS_WAREHOUSE_TYPE"
 upsert_env_value "DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS" "$DATABRICKS_WAREHOUSE_ENABLE_SERVERLESS"
 
 effective_databricks_catalog="${DATABRICKS_CATALOG:-veeam_demo}"
+if [[ "$CUSTOMER_DEPLOYMENT_MODE" == "true" ]]; then
+  effective_databricks_catalog="${DATABRICKS_CATALOG:-customer_existing_databricks}"
+fi
 effective_skip_catalog_create="${DATABRICKS_SKIP_CATALOG_CREATE:-}"
 if [[ -z "$effective_skip_catalog_create" && "$SECURE_MODE" == "true" ]]; then
   effective_skip_catalog_create="true"
 fi
 effective_skip_catalog_create="${effective_skip_catalog_create:-false}"
 upsert_env_value "DATABRICKS_SKIP_CATALOG_CREATE" "$effective_skip_catalog_create"
-if [[ "$SECURE_MODE" == "true" && -n "${DATABRICKS_RESOURCE_GROUP:-}" && -n "${DATABRICKS_WORKSPACE_NAME:-}" && "$effective_skip_catalog_create" == "true" ]]; then
+if [[ "$CUSTOMER_DEPLOYMENT_MODE" != "true" && "$SECURE_MODE" == "true" && -n "${DATABRICKS_RESOURCE_GROUP:-}" && -n "${DATABRICKS_WORKSPACE_NAME:-}" && "$effective_skip_catalog_create" == "true" ]]; then
   databricks_workspace_id="$(
     az databricks workspace show \
     --resource-group "$DATABRICKS_RESOURCE_GROUP" \
@@ -613,6 +648,7 @@ fi
 
 upsert_env_value "DATABRICKS_HOST" "$DATABRICKS_HOST"
 upsert_env_value "DATABRICKS_CATALOG" "$effective_databricks_catalog"
+upsert_env_value "DATABRICKS_WAREHOUSE_ID" "${DATABRICKS_WAREHOUSE_ID:-}"
 if [[ "$SECURE_MODE" == "true" ]]; then
   if [[ "$workspace_host_changed" == "true" ]]; then
     DATABRICKS_WAREHOUSE_ID=""
@@ -695,6 +731,45 @@ common_env_vars=(
   "ACCOUNT_PULSE_SOURCE_MODE=${ACCOUNT_PULSE_SOURCE_MODE:-live}"
   "ACCOUNT_PULSE_REPLAY_FIXTURE_SET=${ACCOUNT_PULSE_REPLAY_FIXTURE_SET:-small_parent_set}"
   "ACCOUNT_PULSE_ENABLE_INTERNAL_AGGREGATOR=${ACCOUNT_PULSE_ENABLE_INTERNAL_AGGREGATOR:-true}"
+  "DAP_API_BASE_URL=${DAP_API_BASE_URL:-}"
+  "DAP_API_SCOPE=${DAP_API_SCOPE:-}"
+  "DAP_API_EXPECTED_AUDIENCE=${DAP_API_EXPECTED_AUDIENCE:-}"
+  "DAP_API_AUTH_MODE=${DAP_API_AUTH_MODE:-obo}"
+  "DAP_API_TOKEN_HEADER_MODE=${DAP_API_TOKEN_HEADER_MODE:-authorization}"
+  "DAP_HEALTHCHECK_PATH=${DAP_HEALTHCHECK_PATH:-/api/v1/healthcheck}"
+  "DAP_ACCOUNTS_QUERY_PATH=${DAP_ACCOUNTS_QUERY_PATH:-/api/v1/accounts/query}"
+  "DAP_DEBUG_HEADERS_PATH=${DAP_DEBUG_HEADERS_PATH:-/api/v1/debug/headers}"
+  "CUSTOMER_DATABRICKS_HOST=${CUSTOMER_DATABRICKS_HOST:-}"
+  "CUSTOMER_DATABRICKS_WAREHOUSE_ID=${CUSTOMER_DATABRICKS_WAREHOUSE_ID:-}"
+  "CUSTOMER_DATABRICKS_OBO_SCOPE=${CUSTOMER_DATABRICKS_OBO_SCOPE:-}"
+  "CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID=${CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID:-}"
+  "CUSTOMER_TOP_OPPORTUNITIES_SOURCE=${CUSTOMER_TOP_OPPORTUNITIES_SOURCE:-}"
+  "CUSTOMER_TOP_OPPORTUNITIES_QUERY=${CUSTOMER_TOP_OPPORTUNITIES_QUERY:-}"
+  "CUSTOMER_TOP_OPPORTUNITIES_CATALOG=${CUSTOMER_TOP_OPPORTUNITIES_CATALOG:-}"
+  "CUSTOMER_TOP_OPPORTUNITIES_SCHEMA=${CUSTOMER_TOP_OPPORTUNITIES_SCHEMA:-}"
+  "CUSTOMER_TOP_OPPORTUNITIES_TABLE=${CUSTOMER_TOP_OPPORTUNITIES_TABLE:-}"
+  "CUSTOMER_SCOPE_ACCOUNTS_SOURCE=${CUSTOMER_SCOPE_ACCOUNTS_SOURCE:-}"
+  "CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH=${CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH:-}"
+  "CUSTOMER_SCOPE_ACCOUNTS_QUERY=${CUSTOMER_SCOPE_ACCOUNTS_QUERY:-}"
+  "CUSTOMER_SCOPE_ACCOUNTS_CATALOG=${CUSTOMER_SCOPE_ACCOUNTS_CATALOG:-}"
+  "CUSTOMER_SCOPE_ACCOUNTS_SCHEMA=${CUSTOMER_SCOPE_ACCOUNTS_SCHEMA:-}"
+  "CUSTOMER_SCOPE_ACCOUNTS_TABLE=${CUSTOMER_SCOPE_ACCOUNTS_TABLE:-}"
+  "CUSTOMER_CONTACTS_SOURCE=${CUSTOMER_CONTACTS_SOURCE:-}"
+  "CUSTOMER_CONTACTS_QUERY=${CUSTOMER_CONTACTS_QUERY:-}"
+  "CUSTOMER_CONTACTS_CATALOG=${CUSTOMER_CONTACTS_CATALOG:-}"
+  "CUSTOMER_CONTACTS_SCHEMA=${CUSTOMER_CONTACTS_SCHEMA:-}"
+  "CUSTOMER_CONTACTS_TABLE=${CUSTOMER_CONTACTS_TABLE:-}"
+  "CUSTOMER_SALES_TEAM_MAPPING_SOURCE=${CUSTOMER_SALES_TEAM_MAPPING_SOURCE:-}"
+  "CUSTOMER_SALES_TEAM_MAPPING_QUERY=${CUSTOMER_SALES_TEAM_MAPPING_QUERY:-}"
+  "CUSTOMER_SALES_TEAM_MAPPING_CATALOG=${CUSTOMER_SALES_TEAM_MAPPING_CATALOG:-}"
+  "CUSTOMER_SALES_TEAM_MAPPING_SCHEMA=${CUSTOMER_SALES_TEAM_MAPPING_SCHEMA:-}"
+  "CUSTOMER_SALES_TEAM_MAPPING_TABLE=${CUSTOMER_SALES_TEAM_MAPPING_TABLE:-}"
+  "CUSTOMER_SALES_TEAM_MAPPING_USER_COLUMN=${CUSTOMER_SALES_TEAM_MAPPING_USER_COLUMN:-user_upn}"
+  "CUSTOMER_SALES_TEAM_MAPPING_TEAM_COLUMN=${CUSTOMER_SALES_TEAM_MAPPING_TEAM_COLUMN:-sales_team}"
+  "CUSTOMER_SALES_TEAM_STATIC_MAP_JSON_PATH=${CUSTOMER_SALES_TEAM_STATIC_MAP_JSON_PATH:-}"
+  "CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH=${CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH:-}"
+  "CUSTOMER_SALES_TEAM_STATIC_MAP_JSON=${CUSTOMER_SALES_TEAM_STATIC_MAP_JSON:-}"
+  "CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON=${CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON:-}"
 )
 
 secret_env_vars=(
@@ -714,83 +789,10 @@ if [[ "$SECURE_MODE" != "true" && -n "${AZURE_OPENAI_API_KEY:-}" ]]; then
   )
 fi
 
-seed_job_env_vars=()
 bootstrap_identity_resource_id=""
 bootstrap_identity_client_id=""
 bootstrap_identity_principal_id=""
 demo_workspace_user_upns="$(derive_demo_user_csv)"
-if [[ "$SECURE_MODE" == "true" ]]; then
-  if [[ -z "${DATABRICKS_RESOURCE_GROUP:-}" || -z "${DATABRICKS_WORKSPACE_NAME:-}" ]]; then
-    echo "DATABRICKS_RESOURCE_GROUP and DATABRICKS_WORKSPACE_NAME are required when DEPLOYMENT_MODE=secure." >&2
-    exit 1
-  fi
-  databricks_workspace_resource_id="$(az databricks workspace show \
-    --resource-group "$DATABRICKS_RESOURCE_GROUP" \
-    --name "$DATABRICKS_WORKSPACE_NAME" \
-    --query id \
-    -o tsv)"
-  if [[ -z "$databricks_workspace_resource_id" ]]; then
-    echo "Could not resolve the Databricks workspace Azure resource ID." >&2
-    exit 1
-  fi
-  bootstrap_auth_mode="${DATABRICKS_BOOTSTRAP_AUTH_MODE:-managed_identity}"
-  if [[ "$bootstrap_auth_mode" == "managed_identity" ]]; then
-    bootstrap_identity_json=""
-    if [[ -n "${DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_RESOURCE_ID:-}" ]]; then
-      log_step "Using configured bootstrap managed identity '${DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_RESOURCE_ID}'"
-      bootstrap_identity_json="$(az identity show --ids "$DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_RESOURCE_ID" -o json)"
-      log_success "Resolved configured bootstrap managed identity"
-    else
-      bootstrap_identity_json="$(ensure_user_assigned_identity "$AZURE_RESOURCE_GROUP" "$BOOTSTRAP_MANAGED_IDENTITY_NAME")"
-    fi
-    bootstrap_identity_resource_id="$(python - <<'PY' "$bootstrap_identity_json"
-import json, sys
-print(json.loads(sys.argv[1])["id"])
-PY
-)"
-    bootstrap_identity_client_id="$(python - <<'PY' "$bootstrap_identity_json"
-import json, sys
-print(json.loads(sys.argv[1])["clientId"])
-PY
-)"
-    bootstrap_identity_principal_id="$(python - <<'PY' "$bootstrap_identity_json"
-import json, sys
-print(json.loads(sys.argv[1])["principalId"])
-PY
-)"
-    ensure_role_assignment_for_object_id \
-      "$bootstrap_identity_principal_id" \
-      "ServicePrincipal" \
-      "Contributor" \
-      "$databricks_workspace_resource_id" \
-      "Ensure bootstrap managed identity has Contributor on Databricks workspace"
-  else
-    log_warn "Secure Databricks bootstrap is using azure_service_principal mode. Ensure the planner app has Contributor on the Databricks workspace if secure seed needs Azure resource operations."
-  fi
-  seed_job_env_vars=(
-    "DATABRICKS_BOOTSTRAP_WAREHOUSE_ID=${DATABRICKS_BOOTSTRAP_WAREHOUSE_ID:-${DATABRICKS_WAREHOUSE_ID:-}}"
-    "DATABRICKS_BOOTSTRAP_AUTH_MODE=${bootstrap_auth_mode}"
-    "DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID=${DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID:-$bootstrap_identity_client_id}"
-    "DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_PRINCIPAL_ID=${DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_PRINCIPAL_ID:-$bootstrap_identity_principal_id}"
-    "DATABRICKS_SEED_VERSION=${DATABRICKS_SEED_VERSION:-2026-03-secure-bootstrap-v2}"
-    "DATABRICKS_AZURE_RESOURCE_ID=$databricks_workspace_resource_id"
-    "DATABRICKS_WORKSPACE_USER_UPNS=$demo_workspace_user_upns"
-    "SELLER_A_UPN=${SELLER_A_UPN:-}"
-    "SELLER_B_UPN=${SELLER_B_UPN:-}"
-  )
-  if [[ -n "${DATABRICKS_BOOTSTRAP_PRINCIPAL_NAME:-}" ]]; then
-    seed_job_env_vars+=(
-      "DATABRICKS_BOOTSTRAP_PRINCIPAL_NAME=${DATABRICKS_BOOTSTRAP_PRINCIPAL_NAME}"
-    )
-  fi
-  if [[ "$bootstrap_auth_mode" == "azure_service_principal" ]]; then
-    seed_job_env_vars+=(
-      "ARM_TENANT_ID=$AZURE_TENANT_ID"
-      "ARM_CLIENT_ID=$PLANNER_API_CLIENT_ID"
-      "ARM_CLIENT_SECRET=secretref:planner-api-client-secret"
-    )
-  fi
-fi
 
 remove_env_args=(
   --remove-env-vars
@@ -880,45 +882,3 @@ if [[ "$SECURE_MODE" != "true" ]]; then
 fi
 echo "Daily Account Planner planner service deployed to: $base_url"
 echo "Set PLANNER_API_BASE_URL=$base_url in $ENV_FILE for validation."
-
-if [[ "$SECURE_MODE" == "true" && -n "$bootstrap_identity_resource_id" ]]; then
-  log_step "Assigning bootstrap managed identity to planner container app '$PLANNER_ACA_APP_NAME'"
-  az containerapp identity assign \
-    --name "$PLANNER_ACA_APP_NAME" \
-    --resource-group "$AZURE_RESOURCE_GROUP" \
-    --user-assigned "$bootstrap_identity_resource_id" \
-    >/dev/null
-  verify_arm_resource_user_assigned_identity \
-    "https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.App/containerApps/${PLANNER_ACA_APP_NAME}?api-version=2025-07-01" \
-    "$bootstrap_identity_resource_id" \
-    "planner container app '$PLANNER_ACA_APP_NAME'"
-  log_success "Assigned bootstrap managed identity to planner container app '$PLANNER_ACA_APP_NAME'"
-fi
-
-if [[ "$SECURE_MODE" == "true" ]]; then
-  seed_job_name="${DATABRICKS_SEED_JOB_NAME:-${PLANNER_ACA_APP_NAME}-seed}"
-  log_step "Creating or updating secure Databricks seed job '$seed_job_name'"
-  create_or_update_seed_job_via_rest "$seed_job_name"
-  log_success "Created or updated secure Databricks seed job '$seed_job_name'"
-  if [[ -n "$bootstrap_identity_resource_id" ]]; then
-    log_step "Assigning bootstrap managed identity to secure Databricks seed job '$seed_job_name'"
-    if ! az containerapp job identity assign \
-      --name "$seed_job_name" \
-      --resource-group "$AZURE_RESOURCE_GROUP" \
-      --user-assigned "$bootstrap_identity_resource_id" \
-      >/dev/null; then
-      fail_step "Failed to assign bootstrap managed identity '$bootstrap_identity_resource_id' to secure Databricks seed job '$seed_job_name'."
-    fi
-    verify_arm_resource_user_assigned_identity \
-      "https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.App/jobs/${seed_job_name}?api-version=${CONTAINERAPPS_JOB_API_VERSION}" \
-      "$bootstrap_identity_resource_id" \
-      "secure Databricks seed job '$seed_job_name'"
-    log_success "Assigned bootstrap managed identity to secure Databricks seed job '$seed_job_name'"
-  else
-    fail_step "Secure Databricks mode expected a bootstrap managed identity, but none was resolved."
-  fi
-  log_step "Waiting for secure Databricks seed job '$seed_job_name' to become available"
-  wait_for_containerapp_job "$AZURE_RESOURCE_GROUP" "$seed_job_name" "${DATABRICKS_SEED_JOB_CREATE_TIMEOUT_SECONDS:-300}"
-  log_success "Secure Databricks seed job '$seed_job_name' is available"
-  echo "Secure Databricks seed job configured: $seed_job_name"
-fi

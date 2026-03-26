@@ -93,7 +93,7 @@ Close with:
 3. Never confuse companies with similar names.
 4. Flag single-source stories: "Developing — reported by [source], not yet confirmed."
 5. No invented financial data.
-6. If the seller asks how data access works, explain that the planner uses the signed-in user's Databricks access and secure views.
+6. If the seller asks how data access works, explain that the planner uses the signed-in user's permitted enterprise data access through the configured sources.
 
 ## Filing Handling
 
@@ -420,6 +420,22 @@ def create_account_pulse_agent(
         started = time.perf_counter()
         logger.info("Account Pulse briefing started.", extra={"request_text": request[:120]})
         scoped_accounts_payload = json.loads(await scoped_accounts_func())
+        print(
+            "[account-pulse] scope-payload "
+            f"keys={sorted(scoped_accounts_payload.keys())} "
+            f"error={str(scoped_accounts_payload.get('error') or '').strip()!r} "
+            f"account_count={len(list(scoped_accounts_payload.get('accounts', []) or []))}"
+        )
+        scoped_accounts_error = str(scoped_accounts_payload.get("error") or "").strip()
+        if scoped_accounts_error:
+            logger.warning(
+                "Account Pulse scope load returned a backend error.",
+                extra={"scope_error": scoped_accounts_error, "request_text": request[:120]},
+            )
+            return (
+                "I’m unable to generate your Account Pulse briefing right now because scoped account access failed. "
+                f"Backend detail: {scoped_accounts_error}"
+            )
         accounts = list(scoped_accounts_payload.get("accounts", []) or [])
         if not accounts:
             logger.warning("Account Pulse briefing aborted because no scoped accounts were returned.")
@@ -437,11 +453,20 @@ def create_account_pulse_agent(
             request_text=request,
             top_opportunities_payload=top_opportunities_payload,
         )
+        print(
+            f"[account-pulse] scan-targets count={len(scan_targets)} selected_accounts={selected_account_count}"
+        )
         if not scan_targets:
             logger.info("Account Pulse briefing found no matching scan targets.")
             return "I couldn't find a matching account in your current scope. Try the parent or account name shown in your briefing."
 
         scan_bundle = json.loads(await scan_parents_parallel_func(scan_targets=scan_targets))
+        print(
+            "[account-pulse] scan-bundle "
+            f"completed={scan_bundle.get('scan_targets_completed', 0)} "
+            f"failed={scan_bundle.get('scan_targets_failed', 0)} "
+            f"signals={len(scan_bundle.get('signals', []) or [])}"
+        )
         logger.info(
             "Account Pulse scan completed.",
             extra={

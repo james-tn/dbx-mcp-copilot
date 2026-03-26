@@ -285,9 +285,7 @@ def build_runtime_env(
     runtime["WRAPPER_ENABLE_DEBUG_CHAT"] = (
         runtime.get("WRAPPER_ENABLE_DEBUG_CHAT", "").strip() or defaults["WRAPPER_ENABLE_DEBUG_CHAT"]
     )
-    runtime["DATABRICKS_SEED_JOB_NAME"] = (
-        runtime.get("DATABRICKS_SEED_JOB_NAME", "").strip() or _sanitize_name(prefix, "-dbx-seed", 60)
-    )
+    runtime["MOCK_DATABRICKS_ENVIRONMENT"] = runtime.get("MOCK_DATABRICKS_ENVIRONMENT", "").strip() or "false"
     runtime["BOOTSTRAP_INPUT_SIGNATURE"] = compute_input_signature(runtime, mode)
 
     return runtime

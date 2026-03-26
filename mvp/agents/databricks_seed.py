@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from azure.identity import ClientSecretCredential, ManagedIdentityCredential
+from azure.identity import AzureCliCredential, ClientSecretCredential, ManagedIdentityCredential
 
 from databricks_admin import (
     DatabricksAdminClient,
@@ -35,7 +35,7 @@ def _resolve_root_dir() -> Path:
 
 
 _ROOT_DIR = _resolve_root_dir()
-_DEFAULT_SQL_FILE = _ROOT_DIR / "infra" / "databricks" / "seed-databricks-ri.sql"
+_DEFAULT_SQL_FILE = _ROOT_DIR / "infra" / "databricks" / "seed-databricks-aiq-dev.sql"
 _DEFAULT_SEED_VERSION = "2026-03-secure-bootstrap-v2"
 _DEFAULT_STATE_SCHEMA = "ri_ops"
 _DEFAULT_STATE_TABLE = "bootstrap_state"
@@ -68,6 +68,7 @@ class DatabricksSeedConfig:
     managed_identity_principal_id: str | None
     bootstrap_principal_names: tuple[str, ...]
     warehouse_id: str | None
+    source_objects: tuple[str, ...]
 
     @property
     def state_table_fqn(self) -> str:
@@ -79,9 +80,9 @@ def load_seed_config() -> DatabricksSeedConfig:
     sql_file = Path(sql_file_value).expanduser() if sql_file_value else _DEFAULT_SQL_FILE
 
     auth_mode = os.environ.get("DATABRICKS_BOOTSTRAP_AUTH_MODE", _DEFAULT_AUTH_MODE).strip().lower() or _DEFAULT_AUTH_MODE
-    if auth_mode not in {"azure_service_principal", "managed_identity"}:
+    if auth_mode not in {"azure_service_principal", "managed_identity", "azure_cli"}:
         raise DatabricksSeedError(
-            "DATABRICKS_BOOTSTRAP_AUTH_MODE must be azure_service_principal or managed_identity."
+            "DATABRICKS_BOOTSTRAP_AUTH_MODE must be azure_service_principal, managed_identity, or azure_cli."
         )
 
     arm_tenant_id = os.environ.get("ARM_TENANT_ID", "").strip() or None
@@ -119,7 +120,7 @@ def load_seed_config() -> DatabricksSeedConfig:
         if normalized and normalized not in bootstrap_principal_names:
             bootstrap_principal_names.append(normalized)
 
-    if not bootstrap_principal_names:
+    if auth_mode != "azure_cli" and not bootstrap_principal_names:
         raise DatabricksSeedError(
             "At least one Databricks bootstrap principal identifier is required for secure seeding."
         )
@@ -143,6 +144,7 @@ def load_seed_config() -> DatabricksSeedConfig:
         or os.environ.get("DATABRICKS_WAREHOUSE_ID", "").strip()
         or None
     )
+    source_objects = _load_source_objects()
     return DatabricksSeedConfig(
         sql_file=sql_file,
         catalog=os.environ.get("DATABRICKS_CATALOG", "veeam_demo").strip() or "veeam_demo",
@@ -161,11 +163,30 @@ def load_seed_config() -> DatabricksSeedConfig:
         managed_identity_principal_id=managed_identity_principal_id,
         bootstrap_principal_names=tuple(bootstrap_principal_names),
         warehouse_id=warehouse_id,
+        source_objects=source_objects,
     )
 
 
 def _as_bool(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_source_objects() -> tuple[str, ...]:
+    configured = os.environ.get("DATABRICKS_ACCESS_GRANT_SOURCES", "").strip()
+    if configured:
+        candidates = configured.split(",")
+    else:
+        candidates = [
+            os.environ.get("CUSTOMER_TOP_OPPORTUNITIES_SOURCE", "").strip(),
+            os.environ.get("CUSTOMER_CONTACTS_SOURCE", "").strip(),
+        ]
+
+    source_objects: list[str] = []
+    for candidate in candidates:
+        normalized = str(candidate or "").strip()
+        if normalized and normalized not in source_objects:
+            source_objects.append(normalized)
+    return tuple(source_objects)
 
 
 async def _resolve_bootstrap_warehouse_id(
@@ -271,6 +292,35 @@ def _split_statements(script: str) -> list[str]:
 
 def _quote_sql_string(value: str) -> str:
     return value.replace("'", "''")
+
+
+def _quote_sql_principal(value: str) -> str:
+    return f"`{value.replace('`', '``')}`"
+
+
+def _parse_source_object(source: str) -> tuple[str, str, str]:
+    parts = [item.strip() for item in source.split(".") if item.strip()]
+    if len(parts) != 3:
+        raise DatabricksSeedError(
+            f"Databricks source object '{source}' must use catalog.schema.table format."
+        )
+    return parts[0], parts[1], parts[2]
+
+
+def _build_manual_grant_sql(config: DatabricksSeedConfig) -> list[str]:
+    statements: list[str] = []
+    for source in config.source_objects:
+        catalog, schema, table = _parse_source_object(source)
+        for user_upn in config.workspace_user_upns:
+            principal = _quote_sql_principal(user_upn)
+            statements.extend(
+                [
+                    f"GRANT USE CATALOG ON CATALOG {catalog} TO {principal};",
+                    f"GRANT USE SCHEMA ON SCHEMA {catalog}.{schema} TO {principal};",
+                    f"GRANT SELECT ON TABLE {catalog}.{schema}.{table} TO {principal};",
+                ]
+            )
+    return statements
 
 
 def _is_catalog_create_statement(statement: str, catalog: str) -> bool:
@@ -420,6 +470,53 @@ async def _ensure_sql_warehouse_access(
     )
 
 
+async def _ensure_source_object_permissions(
+    client: DatabricksSqlClient,
+    config: DatabricksSeedConfig,
+) -> dict[str, Any]:
+    if not config.source_objects:
+        return {
+            "status": "skipped",
+            "reason": "no_source_objects",
+            "source_objects": [],
+            "granted_principals": [],
+        }
+
+    granted_pairs: list[dict[str, str]] = []
+    errors: list[str] = []
+    for source in config.source_objects:
+        catalog, schema, table = _parse_source_object(source)
+        for user_upn in config.workspace_user_upns:
+            principal = _quote_sql_principal(user_upn)
+            statements = (
+                f"GRANT USE CATALOG ON CATALOG {catalog} TO {principal}",
+                f"GRANT USE SCHEMA ON SCHEMA {catalog}.{schema} TO {principal}",
+                f"GRANT SELECT ON TABLE {catalog}.{schema}.{table} TO {principal}",
+            )
+            try:
+                for statement in statements:
+                    await client.execute(statement)
+                granted_pairs.append({"source": source, "principal": user_upn})
+            except DatabricksSqlError as exc:
+                errors.append(f"{source} -> {user_upn}: {exc}")
+
+    if errors:
+        manual_sql = "\n".join(_build_manual_grant_sql(config))
+        raise DatabricksSeedError(
+            "Failed to grant Databricks Unity Catalog access for one or more planner seller principals. "
+            "Run the following SQL as a Databricks catalog or metastore admin, then rerun the bootstrap:\n"
+            f"{manual_sql}\n"
+            f"Errors: {'; '.join(errors)}"
+        )
+
+    return {
+        "status": "applied",
+        "source_objects": list(config.source_objects),
+        "granted_principals": list(config.workspace_user_upns),
+        "grant_count": len(granted_pairs),
+    }
+
+
 async def _ensure_catalog_exists(client: DatabricksSqlClient, config: DatabricksSeedConfig) -> None:
     await client.execute(f"CREATE CATALOG IF NOT EXISTS {config.catalog}")
 
@@ -546,6 +643,8 @@ async def _validate_seed_output(client: DatabricksSqlClient, config: DatabricksS
 
 
 def _build_bootstrap_credential(config: DatabricksSeedConfig):
+    if config.auth_mode == "azure_cli":
+        return AzureCliCredential()
     if config.auth_mode == "managed_identity":
         return ManagedIdentityCredential(client_id=config.managed_identity_client_id)
     return ClientSecretCredential(
@@ -603,6 +702,7 @@ async def run_secure_seed() -> dict[str, Any]:
             await _ensure_catalog_exists(client, config)
         await _ensure_state_storage(client, config)
         if await _seed_already_current(client, config):
+            source_permission_result = await _ensure_source_object_permissions(client, config)
             return {
                 "auth_mode": config.auth_mode,
                 "catalog": config.catalog,
@@ -611,6 +711,7 @@ async def run_secure_seed() -> dict[str, Any]:
                 "bootstrap_service_principal_result": bootstrap_service_principal_result,
                 "bootstrap_service_principal_entitlement_result": bootstrap_service_principal_entitlement_result,
                 "warehouse_permission_result": warehouse_permission_result,
+                "source_permission_result": source_permission_result,
                 "status": "skipped",
                 "reason": "already_current",
                 "seed_version": config.seed_version,
@@ -622,6 +723,7 @@ async def run_secure_seed() -> dict[str, Any]:
         for statement in statements:
             await client.execute(statement)
 
+        source_permission_result = await _ensure_source_object_permissions(client, config)
         await _validate_seed_output(client, config)
         await _record_seed_success(client, config)
         return {
@@ -632,6 +734,7 @@ async def run_secure_seed() -> dict[str, Any]:
             "bootstrap_service_principal_result": bootstrap_service_principal_result,
             "bootstrap_service_principal_entitlement_result": bootstrap_service_principal_entitlement_result,
             "warehouse_permission_result": warehouse_permission_result,
+            "source_permission_result": source_permission_result,
             "status": "seeded",
             "seed_version": config.seed_version,
             "skip_catalog_create": config.skip_catalog_create,
@@ -641,6 +744,70 @@ async def run_secure_seed() -> dict[str, Any]:
     except DatabricksSqlError as exc:
         if _is_single_part_namespace_error(str(exc)):
             raise DatabricksSeedError(_build_unity_catalog_error_message(config)) from exc
+        raise DatabricksSeedError(str(exc)) from exc
+    except DatabricksAdminError as exc:
+        raise DatabricksSeedError(str(exc)) from exc
+    finally:
+        await admin_client.close()
+        await client.close()
+
+
+async def run_secure_access_bootstrap() -> dict[str, Any]:
+    config = load_seed_config()
+    base_settings = load_settings()
+    settings = DatabricksSqlSettings(
+        host=base_settings.host,
+        token_scope=base_settings.token_scope,
+        azure_management_scope=base_settings.azure_management_scope,
+        azure_workspace_resource_id=base_settings.azure_workspace_resource_id,
+        warehouse_id=config.warehouse_id or base_settings.warehouse_id,
+        timeout_seconds=base_settings.timeout_seconds,
+        retry_count=base_settings.retry_count,
+        poll_attempts=base_settings.poll_attempts,
+        poll_interval_seconds=base_settings.poll_interval_seconds,
+        pat=None,
+    )
+    credential = _build_bootstrap_credential(config)
+    client = DatabricksSqlClient(settings=settings, credential=credential)
+    admin_client = DatabricksAdminClient(
+        settings=DatabricksAdminSettings.from_sql_settings(settings),
+        credential=credential,
+    )
+    try:
+        principal_results = await _ensure_workspace_principals(admin_client, config)
+        workspace_user_entitlement_results = await _ensure_workspace_user_entitlements(
+            admin_client,
+            config,
+        )
+        bootstrap_service_principal_result = await _ensure_bootstrap_workspace_principal(
+            admin_client,
+            config,
+        )
+        bootstrap_service_principal_entitlement_result = (
+            await _ensure_bootstrap_workspace_principal_entitlements(
+                admin_client,
+                config,
+            )
+        )
+        resolved_warehouse_id = await _resolve_bootstrap_warehouse_id(client, config.warehouse_id)
+        warehouse_permission_result = await _ensure_sql_warehouse_access(
+            admin_client,
+            config,
+            resolved_warehouse_id,
+        )
+        source_permission_result = await _ensure_source_object_permissions(client, config)
+        return {
+            "auth_mode": config.auth_mode,
+            "principal_results": principal_results,
+            "workspace_user_entitlement_results": workspace_user_entitlement_results,
+            "bootstrap_service_principal_result": bootstrap_service_principal_result,
+            "bootstrap_service_principal_entitlement_result": bootstrap_service_principal_entitlement_result,
+            "warehouse_permission_result": warehouse_permission_result,
+            "source_permission_result": source_permission_result,
+            "status": "bootstrapped",
+            "warehouse_id": resolved_warehouse_id,
+        }
+    except DatabricksSqlError as exc:
         raise DatabricksSeedError(str(exc)) from exc
     except DatabricksAdminError as exc:
         raise DatabricksSeedError(str(exc)) from exc

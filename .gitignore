@@ -6,6 +6,8 @@
 __pycache__/
 **/__pycache__/
 *.pyc
+.venv-linux/
 
 # Local-only source material and scratch docs
 mvp/customer_input/
+mvp/infra/outputs/

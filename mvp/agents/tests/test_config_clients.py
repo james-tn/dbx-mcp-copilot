@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import sys
 from unittest.mock import sentinel
 
@@ -175,3 +176,76 @@ def test_session_store_defaults_include_ttl_and_capacity(monkeypatch) -> None:
 
     assert config.get_session_max_sessions() == 500
     assert config.get_session_idle_ttl_seconds() == 28800.0
+
+
+def test_dap_api_scope_defaults_from_client_id(monkeypatch) -> None:
+    monkeypatch.delenv("DAP_API_SCOPE", raising=False)
+    monkeypatch.delenv("DAP_API_EXPECTED_AUDIENCE", raising=False)
+    monkeypatch.setenv("DAP_API_CLIENT_ID", "11111111-2222-3333-4444-555555555555")
+
+    assert config.get_dap_api_scope() == "api://11111111-2222-3333-4444-555555555555/.default"
+    assert config.get_dap_api_expected_audience() == "api://11111111-2222-3333-4444-555555555555"
+
+
+def test_dap_api_explicit_scope_and_audience_override_client_id_defaults(monkeypatch) -> None:
+    monkeypatch.setenv("DAP_API_CLIENT_ID", "11111111-2222-3333-4444-555555555555")
+    monkeypatch.setenv("DAP_API_SCOPE", "api://custom-dap/access_as_user")
+    monkeypatch.setenv("DAP_API_EXPECTED_AUDIENCE", "api://custom-dap")
+
+    assert config.get_dap_api_scope() == "api://custom-dap/access_as_user"
+    assert config.get_dap_api_expected_audience() == "api://custom-dap"
+
+
+def test_customer_top_opportunities_config_helpers(monkeypatch) -> None:
+    monkeypatch.setenv("CUSTOMER_TOP_OPPORTUNITIES_SOURCE", "prod_catalog.data_science_account_iq_gold.account_iq_scores")
+    monkeypatch.setenv("CUSTOMER_TOP_OPPORTUNITIES_CATALOG", "prod_catalog")
+    monkeypatch.setenv("CUSTOMER_TOP_OPPORTUNITIES_SCHEMA", "data_science_account_iq_gold")
+    monkeypatch.setenv("CUSTOMER_TOP_OPPORTUNITIES_TABLE", "account_iq_scores")
+    monkeypatch.setenv("CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON", '{"Scott":"Germany-ENT-Named-5"}')
+
+    assert config.get_customer_top_opportunities_source() == "prod_catalog.data_science_account_iq_gold.account_iq_scores"
+    assert config.get_customer_top_opportunities_catalog() == "prod_catalog"
+    assert config.get_customer_top_opportunities_schema() == "data_science_account_iq_gold"
+    assert config.get_customer_top_opportunities_table() == "account_iq_scores"
+    assert config.get_customer_rep_lookup_static_map_json() == '{"Scott":"Germany-ENT-Named-5"}'
+
+
+def test_secure_customer_defaults_enable_customer_backend_and_legacy_sources(monkeypatch) -> None:
+    monkeypatch.setenv("SECURE_DEPLOYMENT", "true")
+    monkeypatch.delenv("CUSTOMER_BACKEND_MODE", raising=False)
+    monkeypatch.delenv("CUSTOMER_TOP_OPPORTUNITIES_SOURCE", raising=False)
+    monkeypatch.delenv("CUSTOMER_CONTACTS_SOURCE", raising=False)
+    monkeypatch.delenv("CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH", raising=False)
+
+    assert config.get_customer_backend_enabled() is True
+    assert config.get_customer_backend_mode() == "customer_existing_databricks"
+    assert config.get_customer_top_opportunities_source() == "prod_catalog.data_science_account_iq_gold.account_iq_scores"
+    assert config.get_customer_contacts_source() == "prod_catalog.account_iq_gold.aiq_contact"
+    assert config.get_customer_scope_accounts_static_json_path().endswith(
+        "fixtures/scope_accounts_glent1_ukirlprivent1.json"
+    )
+
+
+def test_customer_databricks_host_enables_customer_backend_without_mode(monkeypatch) -> None:
+    monkeypatch.setenv("SECURE_DEPLOYMENT", "false")
+    monkeypatch.delenv("CUSTOMER_BACKEND_MODE", raising=False)
+    monkeypatch.delenv("MOCK_DATABRICKS_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("CUSTOMER_DATABRICKS_HOST", "https://adb-example.azuredatabricks.net")
+
+    assert config.get_customer_backend_mode() == "customer_existing_databricks"
+    assert config.get_customer_backend_enabled() is True
+
+
+def test_customer_static_map_helpers_can_load_from_path(monkeypatch, tmp_path: Path) -> None:
+    sales_team_path = tmp_path / "sales_team.json"
+    rep_lookup_path = tmp_path / "rep_lookup.json"
+    sales_team_path.write_text('{"seller@example.com":"GreatLakes-ENT-Named-1"}', encoding="utf-8")
+    rep_lookup_path.write_text('{"Scott Jackson":"Germany-ENT-Named-5"}', encoding="utf-8")
+
+    monkeypatch.delenv("CUSTOMER_SALES_TEAM_STATIC_MAP_JSON", raising=False)
+    monkeypatch.delenv("CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON", raising=False)
+    monkeypatch.setenv("CUSTOMER_SALES_TEAM_STATIC_MAP_JSON_PATH", str(sales_team_path))
+    monkeypatch.setenv("CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH", str(rep_lookup_path))
+
+    assert config.get_customer_sales_team_static_map_json() == '{"seller@example.com":"GreatLakes-ENT-Named-1"}'
+    assert config.get_customer_rep_lookup_static_map_json() == '{"Scott Jackson":"Germany-ENT-Named-5"}'

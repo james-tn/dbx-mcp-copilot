@@ -1,12 +1,12 @@
 # Daily Account Planner Infra
 
-`mvp/infra` is the canonical home for infrastructure, deploy, seed, and
-environment validation assets.
+`mvp/infra` is the canonical home for infrastructure, deploy, optional mock
+seed, and environment validation assets.
 
 ## Layout
 
 - `bicep/`: shared foundation templates used by both open and secure stacks
-- `databricks/`: Databricks seed SQL and security model assets
+- `databricks/`: optional Databricks mock-seed SQL assets
 - `scripts/`: app registration, foundation deploy, service deploy, seed, and
   validation entrypoints
 - `outputs/`: deployment output snapshots written by the bash wrappers
@@ -47,6 +47,69 @@ The new bootstrap scripts:
   workspace instead of letting Azure generate a random fallback workspace on the
   first run
 
+Customer-target path:
+
+- for an existing secured Databricks environment, use the secure runtime env
+  and deploy scripts in place:
+
+```bash
+ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/deploy-customer-stack.sh
+```
+
+- for routine planner-only updates that leave the already-deployed wrapper
+  untouched, use:
+
+```bash
+ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/build-and-deploy-planner-only.sh
+```
+
+- for routine wrapper-only updates that leave the planner untouched, use:
+
+```bash
+ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/build-and-deploy-wrapper-only.sh
+```
+
+- this is the default hosted-secure operator model: Azure hosts the planner and
+  wrapper on top of an existing Databricks workspace and existing customer data
+  sources
+- no Databricks provisioning or data seeding is part of the default secure
+  customer runbook
+- the secure bootstrap does not mutate the existing customer workspace
+- existing Databricks permissions, users, and grants must already be in place
+  outside this runbook
+
+Optional mock Databricks path:
+
+- use this only when you intentionally want a mock environment for testing
+- enable it explicitly during Azure bootstrap:
+
+```bash
+ENABLE_MOCK_DATABRICKS_ENVIRONMENT=true bash mvp/infra/scripts/bootstrap-azure-demo.sh open
+ENABLE_MOCK_DATABRICKS_ENVIRONMENT=true bash mvp/infra/scripts/bootstrap-azure-demo.sh secure
+```
+
+- that path uses [`seed-databricks-aiq-dev.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/seed-databricks-aiq-dev.sh)
+  to create the AIQ-shaped mock tables used by Next Move parity testing
+- the mock seed path targets only the bootstrap/foundation `DATABRICKS_*`
+  workspace values
+- it does not fall back to `CUSTOMER_DATABRICKS_*`, so it cannot accidentally
+  seed an existing customer workspace
+- when `MOCK_DATABRICKS_ENVIRONMENT=true`, the planner can use that mock
+  workspace instead of an existing customer workspace because the bootstrap
+  rewires the planner's active `CUSTOMER_*` Databricks settings to the seeded
+  foundation workspace before planner deployment
+
+Local planner chat:
+
+- for local planner-only testing without Microsoft 365, run:
+
+```bash
+ENV_FILE=mvp/.env bash mvp/infra/scripts/run-local-planner-chat.sh
+```
+
+- the local chat app uses the same planner HTTP API and env settings, but it is
+  intended for open/local access only
+
 Optional operator overrides:
 
 - if your tenant uses a different Azure OpenAI quota profile, set
@@ -75,51 +138,11 @@ bash mvp/infra/scripts/deploy-stack.sh open
 bash mvp/infra/scripts/deploy-stack.sh secure
 ```
 
-Databricks seed:
-
-```bash
-bash mvp/infra/scripts/seed-databricks-ri.sh
-```
-
-For secure Databricks seeding, the same entrypoint starts a private ACA Job
-from inside the secure Container Apps environment. Set
-`DATABRICKS_BOOTSTRAP_AUTH_MODE`, `DATABRICKS_SEED_JOB_NAME`,
-`DATABRICKS_SEED_TIMEOUT_SECONDS`, `DATABRICKS_SEED_POLL_SECONDS`,
-`DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID`, and
-`DATABRICKS_AZURE_RESOURCE_ID` in `.env.secure`.
-
 The canonical secure path is now:
 
 1. fill [`mvp/.env.secure.inputs`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure.inputs)
 2. run `bootstrap-azure-demo.sh secure`
 3. run `bootstrap-m365-demo.sh secure`
-
-Secure seeding details:
-
-- the secure seed job uses a non-human Azure managed identity, not a Databricks
-  PAT
-- secure mode defaults `DATABRICKS_SKIP_CATALOG_CREATE=true` and reuses the
-  Databricks workspace catalog instead of trying to create a new managed catalog
-  such as `veeam_demo`
-- that default avoids secure-workspace failures where the metastore has no
-  catalog storage root configured for `CREATE CATALOG`
-- workspace principals are bootstrapped through Databricks SCIM/admin APIs
-  before SQL grants are applied
-- the bootstrap service principal is also ensured to have
-  `workspace-access` and `databricks-sql-access`
-- SQL `CREATE USER` is not used for the secure bootstrap path
-- the secure seed path no longer relies on temporarily enabling Databricks
-  public network access
-- warehouse permission bootstrap is best-effort when the workspace does not
-  expose a mutable warehouse-permissions endpoint; SQL execution remains the
-  hard gate
-- secure bootstrap validation checks seeded base tables, entitlements, and
-  secure-view existence; seller-scoped secure views are validated later through
-  delegated seller tests, not through the bootstrap identity
-- if secure seeding fails with `User with id ... not found`, treat that as a
-  Databricks SCIM propagation / workspace-assignment issue first: wait briefly,
-  rerun the seed, then verify the configured workspace users are assigned to the
-  workspace if the error repeats
 
 Secure app registration details:
 
@@ -141,8 +164,9 @@ Databricks warehouse bootstrap details:
 - open mode also auto-detects the workspace catalog exposed by the Databricks
   SQL warehouse and reuses it when the fresh workspace does not support the old
   `veeam_demo` catalog bootstrap path
-- secure mode uses the same warehouse bootstrap behavior from inside the private
-  ACA seed job
+- secure mode leaves existing customer workspaces untouched by default and only
+  runs mock seeding plus Databricks access bootstrap when
+  `ENABLE_MOCK_DATABRICKS_ENVIRONMENT` is explicitly enabled
 - set `DATABRICKS_WAREHOUSE_ID` to pin a specific warehouse, or
   `DATABRICKS_AUTO_CREATE_WAREHOUSE=false` to force the operator to provide one
 

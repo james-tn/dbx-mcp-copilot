@@ -24,14 +24,15 @@ def test_config_no_longer_exposes_direct_execute_sql() -> None:
 def test_account_pulse_prompt_uses_semantic_tools() -> None:
     assert "SELECT name, global_ultimate" not in ACCOUNT_PULSE_INSTRUCTIONS
     assert "generate_account_pulse_briefing" in ACCOUNT_PULSE_INSTRUCTIONS
-    assert "signed-in user's Databricks access" in ACCOUNT_PULSE_INSTRUCTIONS
+    assert "signed-in user's permitted enterprise data access" in ACCOUNT_PULSE_INSTRUCTIONS
 
 
 def test_next_move_prompt_uses_semantic_tools() -> None:
     assert "SELECT * FROM veeam_demo.ri_secure.opportunities" not in NEXT_MOVE_INSTRUCTIONS
     assert "get_top_opportunities" in NEXT_MOVE_INSTRUCTIONS
     assert "get_account_contacts" in NEXT_MOVE_INSTRUCTIONS
-    assert "signed-in user's access to Databricks secure views" in NEXT_MOVE_INSTRUCTIONS
+    assert "What territory should I use?" in NEXT_MOVE_INSTRUCTIONS
+    assert "territory string" in NEXT_MOVE_INSTRUCTIONS
 
 
 def test_semantic_tool_names_are_stable() -> None:

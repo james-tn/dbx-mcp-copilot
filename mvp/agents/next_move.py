@@ -11,9 +11,9 @@ from agent_framework import Agent
 from agent_framework.azure import AzureOpenAIResponsesClient
 
 try:
-    from .databricks_tools import get_account_contacts, get_scoped_accounts, get_top_opportunities, lookup_rep
+    from .databricks_tools import get_account_contacts, get_top_opportunities, lookup_rep
 except ImportError:
-    from databricks_tools import get_account_contacts, get_scoped_accounts, get_top_opportunities, lookup_rep
+    from databricks_tools import get_account_contacts, get_top_opportunities, lookup_rep
 
 _PROMPT_FILE = Path(__file__).resolve().parent / "next_move_prompt.txt"
 
@@ -44,5 +44,5 @@ def create_next_move_agent(client: AzureOpenAIResponsesClient) -> Agent:
             "using Databricks secure views."
         ),
         instructions=NEXT_MOVE_INSTRUCTIONS,
-        tools=[get_scoped_accounts, lookup_rep, get_top_opportunities, get_account_contacts],
+        tools=[lookup_rep, get_top_opportunities, get_account_contacts],
     )

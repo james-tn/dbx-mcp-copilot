@@ -14,6 +14,13 @@ seller experience with:
 - delegated **user-scoped Databricks access** using OAuth On-Behalf-Of
 - planner-owned **canned SQL queries** against `${DATABRICKS_CATALOG}.ri_secure.*`
 
+Note:
+
+- this document describes the seeded demo architecture on `main`
+- for the customer-target mixed backend against an existing Databricks
+  environment and DAP API, see
+  [`mvp/customer-existing-databricks-architecture.md`](/mnt/c/testing/veeam/revenue_intelligence/mvp/customer-existing-databricks-architecture.md)
+
 The current operator deployment supports both:
 
 - **open mode**: planner ingress is external and local direct-query validation is

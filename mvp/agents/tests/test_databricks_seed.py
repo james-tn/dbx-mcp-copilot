@@ -41,6 +41,21 @@ def test_load_seed_config_allows_missing_warehouse_id(monkeypatch, tmp_path: Pat
     assert config.warehouse_id is None
 
 
+def test_load_seed_config_allows_azure_cli_without_bootstrap_principal(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DATABRICKS_SEED_SQL_FILE", str(tmp_path / "seed.sql"))
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_AUTH_MODE", "azure_cli")
+    monkeypatch.delenv("ARM_CLIENT_ID", raising=False)
+    monkeypatch.delenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_PRINCIPAL_ID", raising=False)
+    monkeypatch.delenv("DATABRICKS_BOOTSTRAP_PRINCIPAL_NAME", raising=False)
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh-1")
+
+    config = databricks_seed.load_seed_config()
+
+    assert config.auth_mode == "azure_cli"
+    assert config.bootstrap_principal_names == ()
+
+
 def test_load_seed_config_includes_managed_identity_principal_candidates(
     monkeypatch,
     tmp_path: Path,
@@ -54,6 +69,28 @@ def test_load_seed_config_includes_managed_identity_principal_candidates(
     config = databricks_seed.load_seed_config()
 
     assert config.bootstrap_principal_names == ("mi-client", "mi-principal")
+
+
+def test_load_seed_config_uses_customer_sources_for_access_grants(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DATABRICKS_SEED_SQL_FILE", str(tmp_path / "seed.sql"))
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_AUTH_MODE", "managed_identity")
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID", "mi-client")
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh-1")
+    monkeypatch.setenv(
+        "CUSTOMER_TOP_OPPORTUNITIES_SOURCE",
+        "prod_catalog.data_science_account_iq_gold.account_iq_scores",
+    )
+    monkeypatch.setenv(
+        "CUSTOMER_CONTACTS_SOURCE",
+        "prod_catalog.account_iq_gold.aiq_contact",
+    )
+
+    config = databricks_seed.load_seed_config()
+
+    assert config.source_objects == (
+        "prod_catalog.data_science_account_iq_gold.account_iq_scores",
+        "prod_catalog.account_iq_gold.aiq_contact",
+    )
 
 
 def test_resolve_bootstrap_warehouse_id_creates_when_missing(monkeypatch) -> None:
@@ -429,6 +466,108 @@ def test_run_secure_seed_honors_skip_catalog_create(monkeypatch, tmp_path: Path)
     assert all("CREATE CATALOG IF NOT EXISTS" not in statement for statement in executed)
     assert any("CREATE SCHEMA IF NOT EXISTS workspace_catalog.ri" in statement for statement in executed)
     assert any("CREATE SCHEMA IF NOT EXISTS workspace_catalog.ri_ops" in statement for statement in executed)
+
+
+def test_run_secure_access_bootstrap_grants_customer_sources(monkeypatch, tmp_path: Path) -> None:
+    sql_file = tmp_path / "seed.sql"
+    sql_file.write_text("SELECT 1;", encoding="utf-8")
+
+    monkeypatch.setenv("DATABRICKS_SEED_SQL_FILE", str(sql_file))
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_AUTH_MODE", "managed_identity")
+    monkeypatch.setenv("DATABRICKS_BOOTSTRAP_MANAGED_IDENTITY_CLIENT_ID", "mi-client")
+    monkeypatch.setenv("DATABRICKS_HOST", "https://example.azuredatabricks.net")
+    monkeypatch.setenv("DATABRICKS_WAREHOUSE_ID", "wh-1")
+    monkeypatch.setenv(
+        "CUSTOMER_TOP_OPPORTUNITIES_SOURCE",
+        "prod_catalog.data_science_account_iq_gold.account_iq_scores",
+    )
+    monkeypatch.setenv(
+        "CUSTOMER_CONTACTS_SOURCE",
+        "prod_catalog.account_iq_gold.aiq_contact",
+    )
+
+    executed: list[str] = []
+    warehouse_permissions: list[tuple[str, str, str | None]] = []
+
+    class FakeClient:
+        def __init__(self, settings=None, **kwargs) -> None:
+            self.settings = settings
+
+        async def execute(self, statement: str):
+            executed.append(" ".join(statement.split()))
+            return []
+
+        async def close(self) -> None:
+            return None
+
+    class FakeAdminClient:
+        def __init__(self, settings=None, **kwargs) -> None:
+            self.settings = settings
+
+        async def ensure_workspace_user(self, user_upn: str) -> str:
+            return "existing"
+
+        async def ensure_workspace_user_entitlements(
+            self,
+            user_upn: str,
+            *,
+            required_entitlements: tuple[str, ...],
+        ) -> dict[str, str | list[str]]:
+            return {"status": "already_set", "applied": [], "required": list(required_entitlements)}
+
+        async def ensure_workspace_service_principal(
+            self,
+            application_id: str,
+            *,
+            display_name: str | None = None,
+            entitlements: tuple[str, ...] = (),
+        ) -> str:
+            return "existing"
+
+        async def ensure_workspace_service_principal_entitlements(
+            self,
+            application_id: str,
+            *,
+            required_entitlements: tuple[str, ...],
+        ) -> dict[str, str | list[str]]:
+            return {"status": "already_set", "applied": [], "required": list(required_entitlements)}
+
+        async def ensure_sql_warehouse_permission(
+            self,
+            warehouse_id: str,
+            principal_name: str,
+            *,
+            permission_level: str = "CAN_USE",
+            principal_type: str | None = None,
+        ) -> None:
+            warehouse_permissions.append((warehouse_id, principal_name, principal_type))
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(databricks_seed, "DatabricksSqlClient", FakeClient)
+    monkeypatch.setattr(databricks_seed, "DatabricksAdminClient", FakeAdminClient)
+    monkeypatch.setattr(databricks_seed, "_build_bootstrap_credential", lambda config: object())
+
+    result = asyncio.run(databricks_seed.run_secure_access_bootstrap())
+
+    assert result["status"] == "bootstrapped"
+    assert result["source_permission_result"] == {
+        "status": "applied",
+        "source_objects": [
+            "prod_catalog.data_science_account_iq_gold.account_iq_scores",
+            "prod_catalog.account_iq_gold.aiq_contact",
+        ],
+        "granted_principals": [SELLER_A_UPN, SELLER_B_UPN],
+        "grant_count": 4,
+    }
+    assert warehouse_permissions == [
+        ("wh-1", SELLER_A_UPN, "user"),
+        ("wh-1", SELLER_B_UPN, "user"),
+        ("wh-1", "mi-client", "service_principal"),
+    ]
+    assert "GRANT USE CATALOG ON CATALOG prod_catalog TO `seller-a@example.com`" in executed
+    assert "GRANT SELECT ON TABLE prod_catalog.account_iq_gold.aiq_contact TO `seller-b@example.com`" in executed
 
 
 def test_run_secure_seed_retries_warehouse_acl_with_multiple_bootstrap_principals(
