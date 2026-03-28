@@ -41,7 +41,14 @@ class PlannerServiceClient:
         )
         return self._parse_response(response)
 
-    async def send_turn(self, *, session_id: str, text: str, access_token: str) -> str:
+    async def get_session(self, *, session_id: str, access_token: str) -> dict[str, Any]:
+        response = await self.http_client.get(
+            f"{self.base_url}/api/chat/sessions/{session_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        return self._parse_response(response)
+
+    async def send_turn_payload(self, *, session_id: str, text: str, access_token: str) -> dict[str, Any]:
         response = await self.http_client.post(
             f"{self.base_url}/api/chat/sessions/{session_id}/messages",
             headers={"Authorization": f"Bearer {access_token}"},
@@ -54,7 +61,14 @@ class PlannerServiceClient:
                 headers={"Authorization": f"Bearer {access_token}"},
                 json={"text": text},
             )
-        payload = self._parse_response(response)
+        return self._parse_response(response)
+
+    async def send_turn(self, *, session_id: str, text: str, access_token: str) -> str:
+        payload = await self.send_turn_payload(
+            session_id=session_id,
+            text=text,
+            access_token=access_token,
+        )
         return str(payload.get("reply", "")).strip()
 
     @staticmethod
