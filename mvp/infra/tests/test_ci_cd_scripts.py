@@ -162,3 +162,109 @@ def test_ci_redact_env_file_redacts_sensitive_values(tmp_path: Path) -> None:
     assert "BOT_APP_PASSWORD=<redacted>" in rendered
     assert "AZURE_OPENAI_API_KEY=<redacted>" in rendered
     assert "PLANNER_API_BEARER_TOKEN=<redacted>" in rendered
+
+
+def test_validate_planner_service_e2e_uses_azure_for_internal_hosts(tmp_path: Path) -> None:
+    script = ROOT_DIR / "infra" / "scripts" / "validate-planner-service-e2e.sh"
+    env_file = tmp_path / "internal.env"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    env_file.write_text(
+        "\n".join(
+            [
+                "PLANNER_API_BASE_URL=https://planner.internal.example.com",
+                "AZURE_SUBSCRIPTION_ID=sub-id",
+                "AZURE_RESOURCE_GROUP=rg-integration",
+                "PLANNER_ACA_APP_NAME=planner-app",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    (bin_dir / "az").write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+cat <<'JSON'
+{
+  "name": "planner-app",
+  "properties": {
+    "runningStatus": "Running",
+    "provisioningState": "Succeeded",
+    "latestReadyRevisionName": "planner-app--0000010",
+    "configuration": {
+      "ingress": {
+        "fqdn": "planner.internal.example.com",
+        "external": false
+      }
+    }
+  }
+}
+JSON
+""",
+        encoding="utf-8",
+    )
+    (bin_dir / "curl").write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\necho 'curl should not be called for internal planner validation' >&2\nexit 99\n",
+        encoding="utf-8",
+    )
+    for path in (bin_dir / "az", bin_dir / "curl"):
+        path.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ENV_FILE": str(env_file),
+            "PATH": f"{bin_dir}:{env['PATH']}",
+        }
+    )
+
+    completed = run_script(script, env)
+
+    assert "Planner URL is internal; validating Container App state via Azure control plane..." in completed.stdout
+    assert '"running_status": "Running"' in completed.stdout
+    assert "authenticated chat validation skipped" in completed.stdout
+
+
+def test_validate_planner_service_e2e_uses_curl_for_public_hosts(tmp_path: Path) -> None:
+    script = ROOT_DIR / "infra" / "scripts" / "validate-planner-service-e2e.sh"
+    env_file = tmp_path / "public.env"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    env_file.write_text(
+        "\n".join(
+            [
+                "PLANNER_API_BASE_URL=https://planner.example.com",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    (bin_dir / "curl").write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$TMPDIR/curl.calls"
+printf '{"status":"ok"}'
+""",
+        encoding="utf-8",
+    )
+    (bin_dir / "curl").chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ENV_FILE": str(env_file),
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "TMPDIR": str(tmp_path),
+        }
+    )
+
+    completed = run_script(script, env)
+
+    curl_calls = (tmp_path / "curl.calls").read_text(encoding="utf-8")
+    assert "https://planner.example.com/healthz" in curl_calls
+    assert '{"status":"ok"}' in completed.stdout
+    assert "authenticated chat validation skipped" in completed.stdout
