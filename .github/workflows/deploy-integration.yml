@@ -1,0 +1,154 @@
+name: Deploy Integration
+
+on:
+  push:
+    branches:
+      - integration
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: deploy-integration
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy Secure Mock Integration
+    runs-on: ubuntu-latest
+    environment: integration
+    env:
+      MODE: secure
+      PROFILE: secure-mock
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      ACA_ENVIRONMENT_NAME: ${{ vars.ACA_ENVIRONMENT_NAME }}
+      PLANNER_ACA_APP_NAME: ${{ vars.PLANNER_ACA_APP_NAME }}
+      WRAPPER_ACA_APP_NAME: ${{ vars.WRAPPER_ACA_APP_NAME }}
+      AZURE_OPENAI_ACCOUNT_NAME: ${{ vars.AZURE_OPENAI_ACCOUNT_NAME }}
+      AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+      AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+      PLANNER_API_CLIENT_ID: ${{ vars.PLANNER_API_CLIENT_ID }}
+      PLANNER_API_EXPECTED_AUDIENCE: ${{ vars.PLANNER_API_EXPECTED_AUDIENCE }}
+      PLANNER_API_SCOPE: ${{ vars.PLANNER_API_SCOPE }}
+      BOT_APP_ID: ${{ vars.BOT_APP_ID }}
+      BOT_SSO_APP_ID: ${{ vars.BOT_SSO_APP_ID }}
+      BOT_SSO_RESOURCE: ${{ vars.BOT_SSO_RESOURCE }}
+      CUSTOMER_DATABRICKS_HOST: ${{ vars.CUSTOMER_DATABRICKS_HOST }}
+      CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID: ${{ vars.CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID }}
+      CUSTOMER_DATABRICKS_OBO_SCOPE: ${{ vars.CUSTOMER_DATABRICKS_OBO_SCOPE }}
+      CUSTOMER_DATABRICKS_WAREHOUSE_ID: ${{ vars.CUSTOMER_DATABRICKS_WAREHOUSE_ID }}
+      CUSTOMER_TOP_OPPORTUNITIES_SOURCE: ${{ vars.CUSTOMER_TOP_OPPORTUNITIES_SOURCE }}
+      CUSTOMER_CONTACTS_SOURCE: ${{ vars.CUSTOMER_CONTACTS_SOURCE }}
+      CUSTOMER_SCOPE_ACCOUNTS_CATALOG: ${{ vars.CUSTOMER_SCOPE_ACCOUNTS_CATALOG }}
+      CUSTOMER_SALES_TEAM_MAPPING_CATALOG: ${{ vars.CUSTOMER_SALES_TEAM_MAPPING_CATALOG }}
+      CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH: ${{ vars.CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH }}
+      WRAPPER_ENABLE_DEBUG_CHAT: ${{ vars.WRAPPER_ENABLE_DEBUG_CHAT }}
+      WRAPPER_DEBUG_ALLOWED_UPNS: ${{ vars.WRAPPER_DEBUG_ALLOWED_UPNS }}
+      WRAPPER_DEBUG_EXPECTED_AUDIENCE: ${{ vars.WRAPPER_DEBUG_EXPECTED_AUDIENCE }}
+      ACA_MIN_REPLICAS: ${{ vars.ACA_MIN_REPLICAS }}
+      ACA_MAX_REPLICAS: ${{ vars.ACA_MAX_REPLICAS }}
+      KEYVAULT_NAME: ${{ vars.KEYVAULT_NAME }}
+      KEYVAULT_PLANNER_API_CLIENT_SECRET_NAME: ${{ vars.KEYVAULT_PLANNER_API_CLIENT_SECRET_NAME }}
+      KEYVAULT_BOT_APP_PASSWORD_NAME: ${{ vars.KEYVAULT_BOT_APP_PASSWORD_NAME }}
+      KEYVAULT_PLANNER_API_BEARER_TOKEN_NAME: ${{ vars.KEYVAULT_PLANNER_API_BEARER_TOKEN_NAME }}
+      PLANNER_API_CLIENT_SECRET: ${{ secrets.PLANNER_API_CLIENT_SECRET }}
+      BOT_APP_PASSWORD: ${{ secrets.BOT_APP_PASSWORD }}
+      PLANNER_API_BEARER_TOKEN: ${{ secrets.PLANNER_API_BEARER_TOKEN }}
+      VALIDATE_USER_UPN: ${{ vars.VALIDATE_USER_UPN }}
+      REQUIRE_AUTHENTICATED_E2E: ${{ vars.REQUIRE_AUTHENTICATED_E2E }}
+      ENABLE_WRAPPER_HEALTHCHECK: ${{ vars.ENABLE_WRAPPER_HEALTHCHECK }}
+      ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION: ${{ vars.ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION }}
+      AZURE_OPENAI_AUTO_ROLE_ASSIGN: "false"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install validation dependencies
+        run: python -m pip install -r mvp/agents/requirements.txt
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+      - name: Download release metadata artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ARTIFACT_NAME: release-metadata-${{ github.sha }}
+          RELEASE_SHA: ${{ github.sha }}
+          OUTPUT_DIR: ${{ runner.temp }}/release-metadata
+          WORKFLOW_FILE: ci.yml
+          WAIT_SECONDS: 600
+        run: bash mvp/infra/scripts/ci-download-release-artifact.sh
+      - name: Fetch deployment secrets from Key Vault
+        shell: bash
+        run: |
+          set -euo pipefail
+          fetch_secret() {
+            local env_name="$1"
+            local secret_name="$2"
+            if [[ -n "${!env_name:-}" ]]; then
+              return 0
+            fi
+            if [[ -z "$secret_name" ]]; then
+              return 0
+            fi
+            local secret_value
+            secret_value="$(az keyvault secret show --vault-name "$KEYVAULT_NAME" --name "$secret_name" --query value -o tsv)"
+            {
+              echo "${env_name}<<EOF"
+              echo "$secret_value"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
+          }
+
+          fetch_secret "PLANNER_API_CLIENT_SECRET" "$KEYVAULT_PLANNER_API_CLIENT_SECRET_NAME"
+          fetch_secret "BOT_APP_PASSWORD" "$KEYVAULT_BOT_APP_PASSWORD_NAME"
+          fetch_secret "PLANNER_API_BEARER_TOKEN" "$KEYVAULT_PLANNER_API_BEARER_TOKEN_NAME"
+      - name: Render ephemeral runtime env
+        env:
+          OUTPUT_ENV_FILE: ${{ runner.temp }}/integration.env
+          RELEASE_METADATA_PATH: ${{ runner.temp }}/release-metadata/release-metadata.json
+        run: bash mvp/infra/scripts/ci-render-runtime-env.sh
+      - name: Deploy planner and wrapper
+        env:
+          ENV_FILE: ${{ runner.temp }}/integration.env
+          DEPLOY_TARGET: integration
+        run: bash mvp/infra/scripts/ci-deploy-stack.sh
+      - name: Run deployed validations
+        env:
+          ENV_FILE: ${{ runner.temp }}/integration.env
+          VALIDATE_USER_UPN: ${{ env.VALIDATE_USER_UPN }}
+          PLANNER_API_BEARER_TOKEN: ${{ env.PLANNER_API_BEARER_TOKEN }}
+          REQUIRE_AUTHENTICATED_E2E: ${{ env.REQUIRE_AUTHENTICATED_E2E }}
+          ENABLE_WRAPPER_HEALTHCHECK: ${{ env.ENABLE_WRAPPER_HEALTHCHECK }}
+          ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION: ${{ env.ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION }}
+        run: bash mvp/infra/scripts/ci-validate-integration.sh
+      - name: Write deployment summaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          INPUT_ENV_FILE="${{ runner.temp }}/integration.env" \
+          OUTPUT_ENV_FILE="${{ runner.temp }}/integration.env.redacted" \
+            bash mvp/infra/scripts/ci-redact-env-file.sh
+          cat <<EOF > "${{ runner.temp }}/integration-deployment-summary.txt"
+          release_sha=${{ github.sha }}
+          mode=secure
+          profile=secure-mock
+          runtime_env=${{ runner.temp }}/integration.env
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: integration-deployment-summary-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/integration.env.redacted
+            ${{ runner.temp }}/integration-deployment-summary.txt
+          if-no-files-found: error

@@ -15,7 +15,16 @@ fi
 
 env_file_declares_key() {
   local key="$1"
-  [[ -f "$ENV_FILE" ]] && rg -q "^${key}=" "$ENV_FILE"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    return 1
+  fi
+
+  if command -v rg >/dev/null 2>&1; then
+    rg -q "^${key}=" "$ENV_FILE"
+    return $?
+  fi
+
+  grep -q "^${key}=" "$ENV_FILE"
 }
 
 # Hosted deployments should default to Entra ID for Azure OpenAI unless the

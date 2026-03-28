@@ -1,0 +1,66 @@
+name: Bootstrap Foundation
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Bootstrap mode"
+        required: true
+        default: secure
+        type: choice
+        options:
+          - open
+          - secure
+      enable_mock_databricks_environment:
+        description: "Enable mock Databricks seeding path"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  bootstrap:
+    name: Bootstrap Azure Foundation
+    runs-on: ubuntu-latest
+    environment: bootstrap-foundation
+    env:
+      MODE: ${{ github.event.inputs.mode }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      INFRA_NAME_PREFIX: ${{ vars.INFRA_NAME_PREFIX }}
+      SELLER_A_UPN: ${{ vars.SELLER_A_UPN }}
+      SELLER_B_UPN: ${{ vars.SELLER_B_UPN }}
+      CUSTOMER_DATABRICKS_HOST: ${{ vars.CUSTOMER_DATABRICKS_HOST }}
+      CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID: ${{ vars.CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID }}
+      CUSTOMER_DATABRICKS_OBO_SCOPE: ${{ vars.CUSTOMER_DATABRICKS_OBO_SCOPE }}
+      CUSTOMER_DATABRICKS_WAREHOUSE_ID: ${{ vars.CUSTOMER_DATABRICKS_WAREHOUSE_ID }}
+      CUSTOMER_TOP_OPPORTUNITIES_SOURCE: ${{ vars.CUSTOMER_TOP_OPPORTUNITIES_SOURCE }}
+      CUSTOMER_CONTACTS_SOURCE: ${{ vars.CUSTOMER_CONTACTS_SOURCE }}
+      CUSTOMER_SCOPE_ACCOUNTS_CATALOG: ${{ vars.CUSTOMER_SCOPE_ACCOUNTS_CATALOG }}
+      CUSTOMER_SALES_TEAM_MAPPING_CATALOG: ${{ vars.CUSTOMER_SALES_TEAM_MAPPING_CATALOG }}
+      CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH: ${{ vars.CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH }}
+      M365_GRAPH_PUBLISHER_CLIENT_ID: ${{ vars.M365_GRAPH_PUBLISHER_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+      - name: Render bootstrap input file
+        env:
+          OUTPUT_INPUT_FILE: ${{ github.event.inputs.mode == 'secure' && 'mvp/.env.secure.inputs' || 'mvp/.env.inputs' }}
+        run: bash mvp/infra/scripts/ci-render-bootstrap-inputs.sh
+      - name: Run Azure bootstrap
+        env:
+          ENABLE_MOCK_DATABRICKS_ENVIRONMENT: ${{ github.event.inputs.enable_mock_databricks_environment }}
+        run: bash mvp/infra/scripts/bootstrap-azure-demo.sh "${{ github.event.inputs.mode }}"

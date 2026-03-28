@@ -11,7 +11,7 @@ from typing import Any
 from openpyxl import load_workbook
 
 
-_DEFAULT_SCOPE_WORKBOOK = Path(__file__).resolve().parent.parent / "customer_input" / "accont_scope_query_result.csv"
+_DEFAULT_SCOPE_WORKBOOK = Path(__file__).resolve().parent / "fixtures" / "accont_scope_query_result.csv"
 _WORKBOOK_SHEET_NAME = "result"
 _MOCK_EMAIL_ALIASES = {
     "DaichiM@M365CPI89838450.OnMicrosoft.com": "bartek.niezabitowski@veeam.com",
