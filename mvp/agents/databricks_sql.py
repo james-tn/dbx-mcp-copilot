@@ -333,7 +333,15 @@ class DatabricksSqlClient:
         )
 
     async def query_sql(self, statement: str) -> list[dict[str, Any]]:
-        return await self._run_statement(statement, wait_timeout="0s")
+        # Some Databricks workspaces return permission errors when polling a
+        # statement that was forced asynchronous with wait_timeout=0s, even
+        # though the same statement succeeds when the initial request waits
+        # inline. Reuse the standard execute timeout so read queries follow the
+        # more stable path.
+        return await self._run_statement(
+            statement,
+            wait_timeout=f"{max(5, int(self.settings.timeout_seconds))}s",
+        )
 
     async def _run_statement(self, statement: str, *, wait_timeout: str) -> list[dict[str, Any]]:
         payload = await self._execute_statement(statement, wait_timeout=wait_timeout)
