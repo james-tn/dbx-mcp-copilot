@@ -6,6 +6,7 @@ ENV_FILE="${ENV_FILE:-}"
 VALIDATE_USER_UPN="${VALIDATE_USER_UPN:-}"
 ENABLE_WRAPPER_HEALTHCHECK="${ENABLE_WRAPPER_HEALTHCHECK:-true}"
 REQUIRE_AUTHENTICATED_E2E="${REQUIRE_AUTHENTICATED_E2E:-true}"
+ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION="${ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION:-false}"
 
 if [[ -z "$ENV_FILE" ]]; then
   echo "ENV_FILE is required." >&2
@@ -17,7 +18,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
-if [[ -z "$VALIDATE_USER_UPN" ]]; then
+if [[ "${ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION,,}" == "true" && -z "$VALIDATE_USER_UPN" ]]; then
   echo "VALIDATE_USER_UPN is required." >&2
   exit 1
 fi
@@ -45,7 +46,12 @@ fi
 echo "Checking planner service health and authenticated chat..."
 ENV_FILE="$ENV_FILE" bash "$ROOT_DIR/infra/scripts/validate-planner-service-e2e.sh"
 
-echo
-echo "Checking customer vPower query path for $VALIDATE_USER_UPN..."
-ENV_FILE="$ENV_FILE" VALIDATE_USER_UPN="$VALIDATE_USER_UPN" \
-  bash "$ROOT_DIR/infra/scripts/validate-customer-vpower-query.sh"
+if [[ "${ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION,,}" == "true" ]]; then
+  echo
+  echo "Checking customer vPower query path for $VALIDATE_USER_UPN..."
+  ENV_FILE="$ENV_FILE" VALIDATE_USER_UPN="$VALIDATE_USER_UPN" \
+    bash "$ROOT_DIR/infra/scripts/validate-customer-vpower-query.sh"
+else
+  echo
+  echo "Skipping direct customer vPower query validation on this runner. Set ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION=true on a network-attached runner to enable it."
+fi
