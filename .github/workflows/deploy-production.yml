@@ -69,6 +69,7 @@ jobs:
       BOT_APP_PASSWORD: ${{ secrets.BOT_APP_PASSWORD }}
       PLANNER_API_BEARER_TOKEN: ${{ secrets.PLANNER_API_BEARER_TOKEN }}
       VALIDATE_USER_UPN: ${{ vars.VALIDATE_USER_UPN }}
+      ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION: ${{ vars.ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION }}
       AZURE_OPENAI_AUTO_ROLE_ASSIGN: "false"
     steps:
       - uses: actions/checkout@v5
@@ -166,9 +167,11 @@ jobs:
             echo
           fi
 
-          if [[ -n "${VALIDATE_USER_UPN:-}" ]]; then
+          if [[ "${ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION,,}" == "true" && -n "${VALIDATE_USER_UPN:-}" ]]; then
             ENV_FILE="$ENV_FILE" VALIDATE_USER_UPN="$VALIDATE_USER_UPN" \
               bash mvp/infra/scripts/validate-customer-vpower-query.sh
+          else
+            echo "Skipping direct customer vPower query validation on this runner. Set ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION=true on a network-attached runner to enable it."
           fi
       - name: Write production deployment summaries
         shell: bash

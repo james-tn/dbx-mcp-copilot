@@ -64,6 +64,7 @@ jobs:
       VALIDATE_USER_UPN: ${{ vars.VALIDATE_USER_UPN }}
       REQUIRE_AUTHENTICATED_E2E: ${{ vars.REQUIRE_AUTHENTICATED_E2E }}
       ENABLE_WRAPPER_HEALTHCHECK: ${{ vars.ENABLE_WRAPPER_HEALTHCHECK }}
+      ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION: ${{ vars.ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION }}
       AZURE_OPENAI_AUTO_ROLE_ASSIGN: "false"
     steps:
       - uses: actions/checkout@v5
@@ -129,6 +130,7 @@ jobs:
           PLANNER_API_BEARER_TOKEN: ${{ env.PLANNER_API_BEARER_TOKEN }}
           REQUIRE_AUTHENTICATED_E2E: ${{ env.REQUIRE_AUTHENTICATED_E2E }}
           ENABLE_WRAPPER_HEALTHCHECK: ${{ env.ENABLE_WRAPPER_HEALTHCHECK }}
+          ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION: ${{ env.ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION }}
         run: bash mvp/infra/scripts/ci-validate-integration.sh
       - name: Write deployment summaries
         shell: bash
