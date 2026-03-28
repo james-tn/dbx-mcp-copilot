@@ -222,6 +222,15 @@ if resource_exists "$AZURE_RESOURCE_GROUP" "$WRAPPER_ACA_APP_NAME" "Microsoft.Ap
     --resource-group "$AZURE_RESOURCE_GROUP" \
     --secrets "bot-app-password=$BOT_APP_PASSWORD" \
     >/dev/null
+  if [[ -n "${registry_settings[0]:-}" && -n "${registry_settings[1]:-}" && -n "${registry_settings[2]:-}" ]]; then
+    az containerapp registry set \
+      --name "$WRAPPER_ACA_APP_NAME" \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      --server "${registry_settings[0]}" \
+      --username "${registry_settings[1]}" \
+      --password "${registry_settings[2]}" \
+      >/dev/null
+  fi
   az containerapp update \
     --name "$WRAPPER_ACA_APP_NAME" \
     --resource-group "$AZURE_RESOURCE_GROUP" \
