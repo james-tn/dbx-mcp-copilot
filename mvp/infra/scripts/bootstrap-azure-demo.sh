@@ -339,7 +339,9 @@ PY
     aiq_dev_catalog="${aiq_dev_catalog:-dev_catalog}"
     upsert_env_value "MOCK_DATABRICKS_ENVIRONMENT" "true"
     upsert_env_value "AIQ_DEV_CATALOG" "$aiq_dev_catalog"
-    upsert_env_value "AIQ_DEV_SKIP_CATALOG_CREATE" "$([[ "$MODE" == "secure" ]] && printf 'true' || printf 'false')"
+    # The secure mock bootstrap owns the internal workspace, so seeding must be
+    # allowed to create the mock catalog on first run.
+    upsert_env_value "AIQ_DEV_SKIP_CATALOG_CREATE" "false"
     upsert_env_value "CUSTOMER_DATABRICKS_HOST" "${DATABRICKS_HOST:-}"
     upsert_env_value "CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID" "${DATABRICKS_AZURE_RESOURCE_ID:-}"
     upsert_env_value "CUSTOMER_DATABRICKS_OBO_SCOPE" "${DATABRICKS_OBO_SCOPE:-2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default}"
