@@ -164,6 +164,108 @@ def test_ci_redact_env_file_redacts_sensitive_values(tmp_path: Path) -> None:
     assert "PLANNER_API_BEARER_TOKEN=<redacted>" in rendered
 
 
+def test_ci_download_release_artifact_prefers_push_run_when_pr_run_shares_sha(tmp_path: Path) -> None:
+    script = ROOT_DIR / "infra" / "scripts" / "ci-download-release-artifact.sh"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    output_dir = tmp_path / "release"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    runs_json = {
+        "workflow_runs": [
+            {"id": 2002, "event": "pull_request", "conclusion": "success"},
+            {"id": 1001, "event": "push", "conclusion": "success"},
+        ]
+    }
+    pr_artifacts_json = {
+        "artifacts": [
+            {"name": "m365-package-deadbeef", "expired": False, "archive_download_url": "https://example.invalid/pr.zip"}
+        ]
+    }
+    push_artifacts_json = {
+        "artifacts": [
+            {
+                "name": "release-metadata-deadbeef",
+                "expired": False,
+                "archive_download_url": "https://example.invalid/push.zip",
+            }
+        ]
+    }
+
+    (bin_dir / "gh").write_text(
+        f"""#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+state_dir = Path({str(state_dir)!r})
+(state_dir / "gh.calls").write_text((state_dir / "gh.calls").read_text() + " ".join(args) + "\\n" if (state_dir / "gh.calls").exists() else " ".join(args) + "\\n")
+if args[:1] != ["api"]:
+    raise SystemExit("unexpected gh arguments: " + " ".join(args))
+request = args[1]
+if "actions/workflows/ci.yml/runs" in request:
+    print({json.dumps(runs_json)!r})
+elif "actions/runs/2002/artifacts" in request:
+    print({json.dumps(pr_artifacts_json)!r})
+elif "actions/runs/1001/artifacts" in request:
+    print({json.dumps(push_artifacts_json)!r})
+else:
+    raise SystemExit("unexpected gh api request: " + request)
+""",
+        encoding="utf-8",
+    )
+    (bin_dir / "curl").write_text(
+        """#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+output_path = Path(args[args.index("-o") + 1])
+output_path.write_text("fake zip payload", encoding="utf-8")
+""",
+        encoding="utf-8",
+    )
+    (bin_dir / "unzip").write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+dest = Path(args[args.index("-d") + 1])
+dest.mkdir(parents=True, exist_ok=True)
+(dest / "release-metadata.json").write_text(json.dumps({"ok": True}), encoding="utf-8")
+""",
+        encoding="utf-8",
+    )
+    for path in (bin_dir / "gh", bin_dir / "curl", bin_dir / "unzip"):
+        path.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ARTIFACT_NAME": "release-metadata-deadbeef",
+            "RELEASE_SHA": "deadbeef",
+            "OUTPUT_DIR": str(output_dir),
+            "WORKFLOW_FILE": "ci.yml",
+            "WAIT_SECONDS": "1",
+            "POLL_INTERVAL_SECONDS": "0",
+            "GITHUB_REPOSITORY": "example/repo",
+            "GH_TOKEN": "test-token",
+            "PATH": f"{bin_dir}:{env['PATH']}",
+        }
+    )
+
+    run_script(script, env)
+
+    assert (output_dir / "release-metadata.json").exists()
+    gh_calls = (state_dir / "gh.calls").read_text(encoding="utf-8")
+    assert "actions/runs/1001/artifacts" in gh_calls
+    assert "actions/runs/2002/artifacts" not in gh_calls
+
+
 def test_validate_planner_service_e2e_uses_azure_for_internal_hosts(tmp_path: Path) -> None:
     script = ROOT_DIR / "infra" / "scripts" / "validate-planner-service-e2e.sh"
     env_file = tmp_path / "internal.env"
