@@ -157,12 +157,7 @@ jobs:
           source <(sed 's/\r$//' "$ENV_FILE")
           set +a
 
-          if [[ -n "${PLANNER_API_BEARER_TOKEN:-}" ]]; then
-            ENV_FILE="$ENV_FILE" bash mvp/infra/scripts/validate-planner-service-e2e.sh
-          else
-            curl -fsS "${PLANNER_API_BASE_URL%/}/healthz"
-            echo
-          fi
+          ENV_FILE="$ENV_FILE" bash mvp/infra/scripts/validate-planner-service-e2e.sh
 
           if [[ -n "${WRAPPER_BASE_URL:-}" ]]; then
             curl -fsS "${WRAPPER_BASE_URL%/}/healthz"

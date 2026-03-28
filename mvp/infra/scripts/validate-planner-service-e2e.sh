@@ -18,12 +18,72 @@ if [[ -z "${PLANNER_API_BASE_URL:-}" ]]; then
   exit 1
 fi
 
+planner_host="$(python - <<'PY' "$PLANNER_API_BASE_URL"
+from urllib.parse import urlparse
+import sys
+
+print((urlparse(sys.argv[1]).hostname or "").strip())
+PY
+)"
+
+planner_url_is_internal="false"
+if [[ "$planner_host" == *".internal."* ]]; then
+  planner_url_is_internal="true"
+fi
+
+check_internal_planner_via_azure() {
+  if [[ -z "${AZURE_SUBSCRIPTION_ID:-}" || -z "${AZURE_RESOURCE_GROUP:-}" || -z "${PLANNER_ACA_APP_NAME:-}" ]]; then
+    echo "AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, and PLANNER_ACA_APP_NAME are required for internal planner validation." >&2
+    exit 1
+  fi
+
+  local resource_payload=""
+  resource_payload="$(az rest --method get --url \
+    "https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.App/containerApps/${PLANNER_ACA_APP_NAME}?api-version=2024-03-01")"
+
+  python - <<'PY' "$resource_payload"
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+properties = payload.get("properties", {})
+configuration = properties.get("configuration", {})
+ingress = configuration.get("ingress", {})
+summary = {
+    "name": payload.get("name"),
+    "running_status": properties.get("runningStatus"),
+    "provisioning_state": properties.get("provisioningState"),
+    "latest_ready_revision": properties.get("latestReadyRevisionName"),
+    "fqdn": ingress.get("fqdn"),
+    "external": ingress.get("external"),
+}
+print(json.dumps(summary, indent=2))
+
+if summary["provisioning_state"] != "Succeeded":
+    raise SystemExit("Planner container app provisioning state is not Succeeded.")
+if summary["running_status"] != "Running":
+    raise SystemExit("Planner container app running status is not Running.")
+if not summary["latest_ready_revision"]:
+    raise SystemExit("Planner container app does not have a latest ready revision.")
+PY
+}
+
+if [[ "$planner_url_is_internal" == "true" ]]; then
+  echo "Planner URL is internal; validating Container App state via Azure control plane..."
+  check_internal_planner_via_azure
+else
 echo "Checking planner health endpoint..."
 curl -fsS "$PLANNER_API_BASE_URL/healthz"
 echo
+fi
 
 if [[ -z "${PLANNER_API_BEARER_TOKEN:-}" ]]; then
   echo "PLANNER_API_BEARER_TOKEN is not set. Health check completed, authenticated chat validation skipped."
+  exit 0
+fi
+
+if [[ "$planner_url_is_internal" == "true" ]]; then
+  echo "PLANNER_API_BASE_URL points to an internal ingress host, so direct authenticated chat validation is skipped on this runner."
   exit 0
 fi
 
