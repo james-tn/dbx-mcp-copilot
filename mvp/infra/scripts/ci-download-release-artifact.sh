@@ -40,27 +40,40 @@ mkdir -p "$OUTPUT_DIR"
 
 find_artifact_download_url() {
   local runs_json
-  local run_id
+  local run_ids
   local artifacts_json
+  local run_id
+  local download_url
 
   runs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_FILE}/runs?head_sha=${RELEASE_SHA}&status=completed&per_page=20")"
-  run_id="$(python - <<'PY' "$runs_json"
+  run_ids="$(python - <<'PY' "$runs_json"
 import json
 import sys
 
 payload = json.loads(sys.argv[1])
-for run in payload.get("workflow_runs", []):
-    if str(run.get("conclusion", "")).lower() == "success":
-        print(run.get("id", ""))
-        break
+runs = [
+    run
+    for run in payload.get("workflow_runs", [])
+    if str(run.get("conclusion", "")).lower() == "success" and run.get("id")
+]
+
+def sort_key(run):
+    # Prefer the push-triggered build, because that is the one that publishes
+    # release metadata. Keep GitHub's default ordering within each bucket.
+    return (0 if str(run.get("event", "")).lower() == "push" else 1)
+
+for run in sorted(runs, key=sort_key):
+    print(run["id"])
 PY
 )"
-  if [[ -z "$run_id" ]]; then
+  if [[ -z "$run_ids" ]]; then
     return 1
   fi
 
-  artifacts_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100")"
-  python - <<'PY' "$artifacts_json" "$ARTIFACT_NAME"
+  while IFS= read -r run_id; do
+    [[ -n "$run_id" ]] || continue
+    artifacts_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100")"
+    download_url="$(python - <<'PY' "$artifacts_json" "$ARTIFACT_NAME"
 import json
 import sys
 
@@ -71,6 +84,14 @@ for artifact in payload.get("artifacts", []):
         print(artifact.get("archive_download_url", ""))
         break
 PY
+)"
+    if [[ -n "$download_url" ]]; then
+      printf '%s\n' "$download_url"
+      return 0
+    fi
+  done <<< "$run_ids"
+
+  return 1
 }
 
 download_url=""
