@@ -1,0 +1,87 @@
+name: Publish Teams Catalog
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: "Release SHA whose package artifact should be prepared"
+        required: true
+        type: string
+      package_artifact_name:
+        description: "Optional package artifact name override"
+        required: false
+        type: string
+      target_mode:
+        description: "Target publish mode"
+        required: false
+        default: production
+        type: choice
+        options:
+          - production
+          - integration
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  prepare:
+    name: Prepare Admin Publish Bundle
+    runs-on: ubuntu-latest
+    environment: teams-catalog-admin
+    env:
+      RELEASE_SHA: ${{ github.event.inputs.release_sha }}
+      PACKAGE_ARTIFACT_NAME: ${{ github.event.inputs.package_artifact_name }}
+      TARGET_MODE: ${{ github.event.inputs.target_mode }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Resolve package artifact name
+        id: artifact-name
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_name="${PACKAGE_ARTIFACT_NAME:-}"
+          if [[ -z "$artifact_name" ]]; then
+            artifact_name="m365-package-${RELEASE_SHA}"
+          fi
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+      - name: Download package artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ARTIFACT_NAME: ${{ steps.artifact-name.outputs.artifact_name }}
+          RELEASE_SHA: ${{ env.RELEASE_SHA }}
+          OUTPUT_DIR: ${{ runner.temp }}/m365-package
+          WORKFLOW_FILE: build-m365-package.yml
+        run: |
+          set -euo pipefail
+          if ! bash mvp/infra/scripts/ci-download-release-artifact.sh; then
+            WORKFLOW_FILE=ci.yml bash mvp/infra/scripts/ci-download-release-artifact.sh
+          fi
+      - name: Write admin handoff summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_path="${{ runner.temp }}/m365-package/daily-account-planner-m365.zip"
+          manifest_path="${{ runner.temp }}/m365-package/manifest.json"
+          cat <<EOF > "${{ runner.temp }}/teams-catalog-admin-summary.txt"
+          release_sha=${RELEASE_SHA}
+          target_mode=${TARGET_MODE}
+          package_artifact_name=${{ steps.artifact-name.outputs.artifact_name }}
+          package_path=${package_path}
+          manifest_path=${manifest_path}
+
+          Admin-controlled next step:
+            PACKAGE_PATH=${package_path} MANIFEST_PATH=${manifest_path} \\
+            bash mvp/scripts/publish-m365-app-package-graph.sh
+          EOF
+          cat "${{ runner.temp }}/teams-catalog-admin-summary.txt" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: teams-catalog-admin-bundle-${{ env.RELEASE_SHA }}
+          path: |
+            ${{ runner.temp }}/m365-package/daily-account-planner-m365.zip
+            ${{ runner.temp }}/m365-package/manifest.json
+            ${{ runner.temp }}/teams-catalog-admin-summary.txt
+          if-no-files-found: error

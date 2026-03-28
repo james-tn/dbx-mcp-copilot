@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
 SQL_TEMPLATE="${SQL_TEMPLATE:-$ROOT_DIR/infra/databricks/seed-databricks-aiq-dev.sql}"
-CUSTOMER_SCOPE_SEED_WORKBOOK="${CUSTOMER_SCOPE_SEED_WORKBOOK:-$ROOT_DIR/customer_input/accont_scope_query_result.csv}"
+CUSTOMER_SCOPE_SEED_WORKBOOK="${CUSTOMER_SCOPE_SEED_WORKBOOK:-$ROOT_DIR/agents/fixtures/accont_scope_query_result.csv}"
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a

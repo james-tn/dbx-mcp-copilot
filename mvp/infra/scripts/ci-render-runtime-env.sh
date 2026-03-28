@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+MODE="${MODE:-secure}"
+PROFILE="${PROFILE:-secure-mock}"
+OUTPUT_ENV_FILE="${OUTPUT_ENV_FILE:-}"
+RELEASE_METADATA_PATH="${RELEASE_METADATA_PATH:-}"
+
+if [[ "$MODE" != "open" && "$MODE" != "secure" ]]; then
+  echo "MODE must be 'open' or 'secure'." >&2
+  exit 1
+fi
+
+if [[ -z "$OUTPUT_ENV_FILE" ]]; then
+  echo "OUTPUT_ENV_FILE is required." >&2
+  exit 1
+fi
+
+if [[ -z "$RELEASE_METADATA_PATH" ]]; then
+  echo "RELEASE_METADATA_PATH is required." >&2
+  exit 1
+fi
+
+TEMPLATE_PATH="$ROOT_DIR/.env.example"
+if [[ "$MODE" == "secure" ]]; then
+  TEMPLATE_PATH="$ROOT_DIR/.env.secure.example"
+fi
+
+python - <<'PY' "$ROOT_DIR" "$TEMPLATE_PATH" "$RELEASE_METADATA_PATH" "$OUTPUT_ENV_FILE" "$MODE" "$PROFILE"
+import json
+import os
+import sys
+from collections import OrderedDict
+from pathlib import Path
+
+root_dir = Path(sys.argv[1])
+template_path = Path(sys.argv[2])
+metadata_path = Path(sys.argv[3])
+output_env_file = Path(sys.argv[4])
+mode = sys.argv[5]
+profile = sys.argv[6]
+
+sys.path.insert(0, str(root_dir))
+from infra.bootstrap_helpers import load_env_file, write_env_file  # noqa: E402
+
+if not template_path.exists():
+    raise SystemExit(f"Template env file not found: {template_path}")
+if not metadata_path.exists():
+    raise SystemExit(f"Release metadata file not found: {metadata_path}")
+
+metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+for required_key in ("planner_image", "wrapper_image", "git_sha"):
+    if not str(metadata.get(required_key, "")).strip():
+        raise SystemExit(f"Release metadata is missing '{required_key}'.")
+
+values = OrderedDict(load_env_file(template_path))
+values["DEPLOYMENT_MODE"] = "secure" if mode == "secure" else "open"
+values["SECURE_DEPLOYMENT"] = "true" if mode == "secure" else "false"
+values["PLANNER_API_IMAGE"] = str(metadata["planner_image"]).strip()
+values["WRAPPER_IMAGE"] = str(metadata["wrapper_image"]).strip()
+values["AZURE_OPENAI_AUTO_ROLE_ASSIGN"] = os.environ.get("AZURE_OPENAI_AUTO_ROLE_ASSIGN", "false")
+
+template_keys = set(values)
+always_allow = {
+    "ACA_ENVIRONMENT_NAME",
+    "ACA_MAX_REPLICAS",
+    "ACA_MIN_REPLICAS",
+    "ACR_NAME",
+    "AZURE_LOCATION",
+    "AZURE_OPENAI_ACCOUNT_NAME",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_AUTO_ROLE_ASSIGN",
+    "AZURE_OPENAI_DEPLOYMENT",
+    "AZURE_OPENAI_ENDPOINT",
+    "AZURE_RESOURCE_GROUP",
+    "AZURE_SUBSCRIPTION_ID",
+    "AZURE_TENANT_ID",
+    "BOT_APP_ID",
+    "BOT_APP_PASSWORD",
+    "BOT_RESOURCE_NAME",
+    "BOT_SSO_APP_ID",
+    "BOT_SSO_RESOURCE",
+    "CUSTOMER_CONTACTS_QUERY",
+    "CUSTOMER_CONTACTS_SOURCE",
+    "CUSTOMER_CONTACTS_TABLE",
+    "CUSTOMER_CONTACTS_SCHEMA",
+    "CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID",
+    "CUSTOMER_DATABRICKS_HOST",
+    "CUSTOMER_DATABRICKS_OBO_SCOPE",
+    "CUSTOMER_DATABRICKS_WAREHOUSE_ID",
+    "CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON",
+    "CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH",
+    "CUSTOMER_SALES_TEAM_MAPPING_CATALOG",
+    "CUSTOMER_SALES_TEAM_MAPPING_QUERY",
+    "CUSTOMER_SALES_TEAM_MAPPING_SCHEMA",
+    "CUSTOMER_SALES_TEAM_MAPPING_SOURCE",
+    "CUSTOMER_SALES_TEAM_MAPPING_TABLE",
+    "CUSTOMER_SALES_TEAM_STATIC_MAP_JSON",
+    "CUSTOMER_SALES_TEAM_STATIC_MAP_JSON_PATH",
+    "CUSTOMER_SCOPE_ACCOUNTS_CATALOG",
+    "CUSTOMER_SCOPE_ACCOUNTS_QUERY",
+    "CUSTOMER_SCOPE_ACCOUNTS_SCHEMA",
+    "CUSTOMER_SCOPE_ACCOUNTS_SOURCE",
+    "CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH",
+    "CUSTOMER_SCOPE_ACCOUNTS_TABLE",
+    "CUSTOMER_TOP_OPPORTUNITIES_QUERY",
+    "CUSTOMER_TOP_OPPORTUNITIES_SOURCE",
+    "CUSTOMER_TOP_OPPORTUNITIES_TABLE",
+    "CUSTOMER_TOP_OPPORTUNITIES_SCHEMA",
+    "DATABRICKS_AZURE_RESOURCE_ID",
+    "DATABRICKS_AUTO_CREATE_WAREHOUSE",
+    "DATABRICKS_CATALOG",
+    "DATABRICKS_HOST",
+    "DATABRICKS_OBO_SCOPE",
+    "DATABRICKS_SKIP_CATALOG_CREATE",
+    "DATABRICKS_WAREHOUSE_ID",
+    "DATABRICKS_WORKSPACE_NAME",
+    "DATABRICKS_RESOURCE_GROUP",
+    "INFRA_NAME_PREFIX",
+    "LOCAL_DEBUG_PUBLIC_CLIENT_ID",
+    "PLANNER_ACA_APP_NAME",
+    "PLANNER_API_BASE_URL",
+    "PLANNER_API_CLIENT_ID",
+    "PLANNER_API_CLIENT_SECRET",
+    "PLANNER_API_EXPECTED_AUDIENCE",
+    "PLANNER_API_SCOPE",
+    "PLANNER_SERVICE_BASE_URL",
+    "SECURE_ACA_SUBNET_ID",
+    "SELLER_A_UPN",
+    "SELLER_B_UPN",
+    "WRAPPER_ACA_APP_NAME",
+    "WRAPPER_BASE_URL",
+    "WRAPPER_DEBUG_ALLOWED_UPNS",
+    "WRAPPER_DEBUG_EXPECTED_AUDIENCE",
+}
+
+for key, value in os.environ.items():
+    if key in template_keys or key in always_allow:
+        values[key] = value
+
+if profile == "secure-mock":
+    values["SECURE_DEPLOYMENT"] = "true"
+    values["DEPLOYMENT_MODE"] = "secure"
+    values.setdefault("DATABRICKS_SKIP_CATALOG_CREATE", "true")
+elif profile == "secure-customer":
+    values["SECURE_DEPLOYMENT"] = "true"
+    values["DEPLOYMENT_MODE"] = "secure"
+
+output_env_file.parent.mkdir(parents=True, exist_ok=True)
+write_env_file(output_env_file, values)
+PY
