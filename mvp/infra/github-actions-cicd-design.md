@@ -170,7 +170,6 @@ Choose this path when the customer already has:
 This is the easier and more common enterprise customer path.
 
 Recommended operating model:
-
 - do not use bootstrap for routine delivery
 - populate GitHub Environments directly
 - use `deploy-integration.yml` and `deploy-production.yml`
