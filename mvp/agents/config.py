@@ -42,10 +42,19 @@ _DEFAULT_MAX_RETRIES = 6
 _DEFAULT_AZURE_DATABRICKS_SCOPE = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default"
 _DEFAULT_CUSTOMER_TOP_OPPORTUNITIES_SOURCE = "prod_catalog.data_science_account_iq_gold.account_iq_scores"
 _DEFAULT_CUSTOMER_CONTACTS_SOURCE = "prod_catalog.account_iq_gold.aiq_contact"
+_TRUTHY_VALUES = {"1", "true", "yes", "on"}
 
 
-def _load_json_text_from_path(env_key: str) -> str:
-    configured = os.environ.get(env_key, "").strip()
+def _first_env_value(*names: str) -> str:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _load_json_text_from_path(*env_keys: str) -> str:
+    configured = _first_env_value(*env_keys)
     if not configured:
         return ""
 
@@ -268,12 +277,20 @@ def get_customer_backend_mode() -> str:
     value = os.environ.get("CUSTOMER_BACKEND_MODE", "").strip().lower()
     if value in {"customer_existing_databricks", "demo_seeded"}:
         return value
-    customer_host = os.environ.get("CUSTOMER_DATABRICKS_HOST", "").strip()
-    if customer_host:
-        return "customer_existing_databricks"
     mock_enabled = os.environ.get("MOCK_DATABRICKS_ENVIRONMENT", "").strip().lower()
     if mock_enabled in {"1", "true", "yes", "on"}:
         return "demo_seeded"
+    customer_host = _first_env_value("DATABRICKS_HOST", "CUSTOMER_DATABRICKS_HOST")
+    has_customer_runtime_sources = any(
+        (
+            _first_env_value("TOP_OPPORTUNITIES_SOURCE", "CUSTOMER_TOP_OPPORTUNITIES_SOURCE"),
+            _first_env_value("CONTACTS_SOURCE", "CUSTOMER_CONTACTS_SOURCE"),
+            _first_env_value("SCOPE_ACCOUNTS_CATALOG", "CUSTOMER_SCOPE_ACCOUNTS_CATALOG"),
+            _first_env_value("SALES_TEAM_MAPPING_CATALOG", "CUSTOMER_SALES_TEAM_MAPPING_CATALOG"),
+        )
+    )
+    if customer_host and (get_secure_deployment_enabled() or has_customer_runtime_sources):
+        return "customer_existing_databricks"
     if get_secure_deployment_enabled():
         return "customer_existing_databricks"
     return "demo_seeded"
@@ -341,89 +358,87 @@ def get_dap_debug_headers_path() -> str:
 
 def get_customer_databricks_host() -> str:
     return _normalize_host_with_https(
-        os.environ.get("CUSTOMER_DATABRICKS_HOST", "").strip().rstrip("/")
-        or os.environ.get("DATABRICKS_HOST", "").strip().rstrip("/")
+        _first_env_value("DATABRICKS_HOST", "CUSTOMER_DATABRICKS_HOST").rstrip("/")
     )
 
 
 def get_customer_databricks_scope() -> str:
     return (
-        os.environ.get("CUSTOMER_DATABRICKS_OBO_SCOPE", "").strip()
-        or os.environ.get("DATABRICKS_OBO_SCOPE", "").strip()
+        _first_env_value("DATABRICKS_OBO_SCOPE", "CUSTOMER_DATABRICKS_OBO_SCOPE")
         or _DEFAULT_AZURE_DATABRICKS_SCOPE
     )
 
 
 def get_customer_databricks_warehouse_id() -> str:
-    return (
-        os.environ.get("CUSTOMER_DATABRICKS_WAREHOUSE_ID", "").strip()
-        or os.environ.get("DATABRICKS_WAREHOUSE_ID", "").strip()
-    )
+    return _first_env_value("DATABRICKS_WAREHOUSE_ID", "CUSTOMER_DATABRICKS_WAREHOUSE_ID")
 
 
 def get_customer_databricks_resource_id() -> str:
-    return (
-        os.environ.get("CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID", "").strip()
-        or os.environ.get("DATABRICKS_AZURE_RESOURCE_ID", "").strip()
-    )
+    return _first_env_value("DATABRICKS_AZURE_RESOURCE_ID", "CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID")
 
 
 def get_customer_databricks_pat() -> str:
-    return (
-        os.environ.get("CUSTOMER_DATABRICKS_PAT", "").strip()
-        or os.environ.get("DATABRICKS_PAT", "").strip()
-    )
+    return _first_env_value("DATABRICKS_PAT", "CUSTOMER_DATABRICKS_PAT")
 
 
 def get_customer_sales_team_static_map_json() -> str:
-    configured = os.environ.get("CUSTOMER_SALES_TEAM_STATIC_MAP_JSON", "").strip()
+    configured = _first_env_value("SALES_TEAM_STATIC_MAP_JSON", "CUSTOMER_SALES_TEAM_STATIC_MAP_JSON")
     if configured:
         return configured
-    return _load_json_text_from_path("CUSTOMER_SALES_TEAM_STATIC_MAP_JSON_PATH")
+    return _load_json_text_from_path(
+        "SALES_TEAM_STATIC_MAP_JSON_PATH",
+        "CUSTOMER_SALES_TEAM_STATIC_MAP_JSON_PATH",
+    )
 
 
 def get_customer_sales_team_mapping_source() -> str:
-    return os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_SOURCE", "").strip()
+    return _first_env_value("SALES_TEAM_MAPPING_SOURCE", "CUSTOMER_SALES_TEAM_MAPPING_SOURCE")
 
 
 def get_customer_sales_team_mapping_query() -> str:
-    return os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_QUERY", "").strip()
+    return _first_env_value("SALES_TEAM_MAPPING_QUERY", "CUSTOMER_SALES_TEAM_MAPPING_QUERY")
 
 
 def get_customer_sales_team_user_column() -> str:
-    return os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_USER_COLUMN", "user_upn").strip() or "user_upn"
+    return (
+        _first_env_value("SALES_TEAM_MAPPING_USER_COLUMN", "CUSTOMER_SALES_TEAM_MAPPING_USER_COLUMN")
+        or "user_upn"
+    )
 
 
 def get_customer_sales_team_column() -> str:
-    return os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_TEAM_COLUMN", "sales_team").strip() or "sales_team"
+    return (
+        _first_env_value("SALES_TEAM_MAPPING_TEAM_COLUMN", "CUSTOMER_SALES_TEAM_MAPPING_TEAM_COLUMN")
+        or "sales_team"
+    )
 
 
 def get_customer_scope_accounts_source() -> str:
-    return os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_SOURCE", "").strip()
+    return _first_env_value("SCOPE_ACCOUNTS_SOURCE", "CUSTOMER_SCOPE_ACCOUNTS_SOURCE")
 
 
 def get_customer_scope_accounts_static_json_path() -> str:
-    return os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH", "").strip()
+    return _first_env_value("SCOPE_ACCOUNTS_STATIC_JSON_PATH", "CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH")
 
 
 def get_customer_scope_accounts_query() -> str:
-    return os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_QUERY", "").strip()
+    return _first_env_value("SCOPE_ACCOUNTS_QUERY", "CUSTOMER_SCOPE_ACCOUNTS_QUERY")
 
 
 def get_customer_scope_accounts_catalog() -> str:
-    return os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_CATALOG", "").strip()
+    return _first_env_value("SCOPE_ACCOUNTS_CATALOG", "CUSTOMER_SCOPE_ACCOUNTS_CATALOG")
 
 
 def get_customer_scope_accounts_schema() -> str:
-    return os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_SCHEMA", "").strip()
+    return _first_env_value("SCOPE_ACCOUNTS_SCHEMA", "CUSTOMER_SCOPE_ACCOUNTS_SCHEMA")
 
 
 def get_customer_scope_accounts_table() -> str:
-    return os.environ.get("CUSTOMER_SCOPE_ACCOUNTS_TABLE", "").strip()
+    return _first_env_value("SCOPE_ACCOUNTS_TABLE", "CUSTOMER_SCOPE_ACCOUNTS_TABLE")
 
 
 def get_customer_contacts_source() -> str:
-    configured = os.environ.get("CUSTOMER_CONTACTS_SOURCE", "").strip()
+    configured = _first_env_value("CONTACTS_SOURCE", "CUSTOMER_CONTACTS_SOURCE")
     if configured:
         return configured
     if get_secure_deployment_enabled():
@@ -432,23 +447,23 @@ def get_customer_contacts_source() -> str:
 
 
 def get_customer_contacts_query() -> str:
-    return os.environ.get("CUSTOMER_CONTACTS_QUERY", "").strip()
+    return _first_env_value("CONTACTS_QUERY", "CUSTOMER_CONTACTS_QUERY")
 
 
 def get_customer_contacts_catalog() -> str:
-    return os.environ.get("CUSTOMER_CONTACTS_CATALOG", "").strip()
+    return _first_env_value("CONTACTS_CATALOG", "CUSTOMER_CONTACTS_CATALOG")
 
 
 def get_customer_contacts_schema() -> str:
-    return os.environ.get("CUSTOMER_CONTACTS_SCHEMA", "").strip()
+    return _first_env_value("CONTACTS_SCHEMA", "CUSTOMER_CONTACTS_SCHEMA")
 
 
 def get_customer_contacts_table() -> str:
-    return os.environ.get("CUSTOMER_CONTACTS_TABLE", "").strip()
+    return _first_env_value("CONTACTS_TABLE", "CUSTOMER_CONTACTS_TABLE")
 
 
 def get_customer_top_opportunities_source() -> str:
-    configured = os.environ.get("CUSTOMER_TOP_OPPORTUNITIES_SOURCE", "").strip()
+    configured = _first_env_value("TOP_OPPORTUNITIES_SOURCE", "CUSTOMER_TOP_OPPORTUNITIES_SOURCE")
     if configured:
         return configured
     if get_secure_deployment_enabled():
@@ -457,35 +472,38 @@ def get_customer_top_opportunities_source() -> str:
 
 
 def get_customer_top_opportunities_query() -> str:
-    return os.environ.get("CUSTOMER_TOP_OPPORTUNITIES_QUERY", "").strip()
+    return _first_env_value("TOP_OPPORTUNITIES_QUERY", "CUSTOMER_TOP_OPPORTUNITIES_QUERY")
 
 
 def get_customer_top_opportunities_catalog() -> str:
-    return os.environ.get("CUSTOMER_TOP_OPPORTUNITIES_CATALOG", "").strip()
+    return _first_env_value("TOP_OPPORTUNITIES_CATALOG", "CUSTOMER_TOP_OPPORTUNITIES_CATALOG")
 
 
 def get_customer_top_opportunities_schema() -> str:
-    return os.environ.get("CUSTOMER_TOP_OPPORTUNITIES_SCHEMA", "").strip()
+    return _first_env_value("TOP_OPPORTUNITIES_SCHEMA", "CUSTOMER_TOP_OPPORTUNITIES_SCHEMA")
 
 
 def get_customer_top_opportunities_table() -> str:
-    return os.environ.get("CUSTOMER_TOP_OPPORTUNITIES_TABLE", "").strip()
-
-
-def get_customer_rep_lookup_static_map_json() -> str:
-    configured = os.environ.get("CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON", "").strip()
-    if configured:
-        return configured
-    return _load_json_text_from_path("CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH")
+    return _first_env_value("TOP_OPPORTUNITIES_TABLE", "CUSTOMER_TOP_OPPORTUNITIES_TABLE")
 
 
 def get_customer_sales_team_mapping_catalog() -> str:
-    return os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_CATALOG", "").strip()
+    return _first_env_value("SALES_TEAM_MAPPING_CATALOG", "CUSTOMER_SALES_TEAM_MAPPING_CATALOG")
 
 
 def get_customer_sales_team_mapping_schema() -> str:
-    return os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_SCHEMA", "").strip()
+    return _first_env_value("SALES_TEAM_MAPPING_SCHEMA", "CUSTOMER_SALES_TEAM_MAPPING_SCHEMA")
 
 
 def get_customer_sales_team_mapping_table() -> str:
-    return os.environ.get("CUSTOMER_SALES_TEAM_MAPPING_TABLE", "").strip()
+    return _first_env_value("SALES_TEAM_MAPPING_TABLE", "CUSTOMER_SALES_TEAM_MAPPING_TABLE")
+
+
+def get_customer_legacy_static_fallback_enabled() -> bool:
+    configured = _first_env_value(
+        "LEGACY_STATIC_CUSTOMER_FALLBACK_ENABLED",
+        "CUSTOMER_LEGACY_STATIC_FALLBACK_ENABLED",
+    )
+    if configured:
+        return configured.lower() in _TRUTHY_VALUES
+    return not is_hosted_environment()

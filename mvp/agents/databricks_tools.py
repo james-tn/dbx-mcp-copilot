@@ -238,45 +238,6 @@ FROM {catalog}.ri_secure.accounts
     return _json_payload(payload)
 
 
-@tool(
-    name="lookup_rep",
-    description=(
-        "Look up a seller territory by rep name. Supports exact or partial name matches."
-    ),
-)
-async def lookup_rep(
-    rep_name: Annotated[str, Field(description="Full or partial seller name")] = "",
-) -> str:
-    if _customer_backend_enabled():
-        try:
-            payload = get_customer_tool_backend_router().lookup_rep_payload(rep_name)
-        except CustomerBackendConfigurationError as exc:
-            return _json_payload({"error": str(exc)})
-        return _json_payload(payload)
-
-    name = rep_name.strip()
-    if not name:
-        return _json_payload({"error": "rep_name is required."})
-    if _request_is_user_scoped():
-        return _json_payload(
-            {
-                "error": (
-                    "Rep lookup is disabled in authenticated planner sessions. "
-                    "The planner uses the signed-in user's Databricks access instead."
-                )
-            }
-        )
-
-    statement = f"""
-SELECT rep_key, rep_name, territory
-FROM {_catalog_name()}.ri_secure.reps
-WHERE LOWER(rep_name) LIKE '%{_escape_sql(name.lower())}%'
-ORDER BY rep_name
-""".strip()
-    rows = await _run_query(statement)
-    return _json_payload({"matches": rows})
-
-
 def _top_opportunities_statement(
     territory: str | None,
     *,
