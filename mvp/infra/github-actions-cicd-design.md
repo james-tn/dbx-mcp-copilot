@@ -15,6 +15,7 @@ This guide explains:
 - the delivery model implemented in this repo
 - what each workflow is responsible for
 - how GitHub OIDC, Azure RBAC, Key Vault, and GitHub Environments fit together
+- the exact Azure RBAC expected for each GitHub OIDC principal
 - how Dev, Infra, and M365 Admin teams should collaborate
 - how to migrate from an older manually maintained `mvp/.env.secure` setup into
   GitHub Actions automation
@@ -64,8 +65,9 @@ Before a customer sets up CI/CD, they should already have:
   identities for GitHub OIDC
 - Azure RBAC rights on the target subscription or resource groups
 - a decision on whether `integration` will use:
-  - a secure mock Databricks environment, or
-  - an existing non-production Databricks workspace
+  - an existing non-production Databricks workspace that the customer will
+    populate, or
+  - an explicit mock/seed path if they intentionally want that extra setup
 - a decision on whether production points at:
   - an already-existing customer environment, or
   - a newly bootstrapped environment created by this repo
@@ -77,6 +79,8 @@ For the most common customer path, the customer already has:
 - existing planner and wrapper app registrations
 - existing customer Databricks workspace
 - existing AIQ and vPower-backed sources
+- a separate plan for how the non-production Databricks workspace will be
+  populated with validation data when integration tests depend on it
 
 ## Setup Checklist
 
@@ -206,7 +210,8 @@ The current recommended operating model for this repo is:
 - `main` is the approved production branch
 - GitHub Actions uses Azure OIDC instead of long-lived Azure credentials
 - CI builds planner and wrapper artifacts once on `integration`
-- `integration` deploys those artifacts into a secure mock environment
+- `integration` deploys those artifacts into a secure non-production
+  environment
 - `main` promotes the already-tested release into the production customer
   environment
 - Teams/M365 app publish remains a separate manual admin path
@@ -260,7 +265,7 @@ requires different tenant-level permissions than Azure deployment.
   - engineering integration branch
   - validates buildability and tests
 - `integration`
-  - secure mock deployment branch
+  - secure non-production deployment branch
   - validates real Azure deployment and runtime behavior
 - `main`
   - production branch
@@ -270,7 +275,7 @@ requires different tenant-level permissions than Azure deployment.
 ### GitHub Environments
 
 - `integration`
-  - secure mock Azure deployment target
+  - secure non-production Azure deployment target
 - `production`
   - secure customer-target production deployment
 - `teams-catalog-admin`
@@ -311,22 +316,21 @@ Purpose:
 Expected characteristics:
 
 - private or secure-style Azure topology
-- mock or seeded Databricks-backed data
+- Databricks-backed data that is safe for non-production validation
 - at least one known validation UPN
 - stable integration resource group, ACR, Container Apps names, and runtime
   values
 
 Customer copy/deployment note:
 
-- the repo currently names the default `integration` profile "secure mock"
-- that is the recommended default for this upstream repo because it gives a
-  safe place to validate release behavior without touching production data
-- however, a customer copying this repo does **not** have to use a mock
-  Databricks workspace for integration if they already have a separate
-  non-production Databricks workspace
-- in that case, they can point the `integration` GitHub Environment at that
-  existing non-production Databricks workspace by supplying the appropriate
-  customer runtime values and by **not** enabling seed/bootstrap behavior
+- the upstream repo uses the profile name `secure-mock`, but customer copies
+  of this repo should not assume a seeded Databricks workspace already exists
+- the normal customer pattern is:
+  - use an existing non-production Databricks workspace
+  - populate it separately with the data needed for validation
+  - point the `integration` GitHub Environment at that workspace
+- if a customer wants a mock/seeded Databricks path, treat that as an explicit
+  extra setup decision, not as the default assumption
 - what should be avoided is pointing automated integration validation at the
   live production customer workspace unless that is an explicit, accepted
   operating decision
@@ -394,8 +398,8 @@ Important design point:
 
 Purpose:
 
-- automatically deploy the validated `integration` release into the secure mock
-  environment
+- automatically deploy the validated `integration` release into the secure
+  non-production environment
 
 Current flow:
 
@@ -498,6 +502,39 @@ Recommended security posture:
 - bind each federated credential to this repo
 - scope each identity only to the Azure resources it actually needs
 - do not use a single broad Azure identity for every environment
+- keep bootstrap/foundation on a separate identity when the customer wants a
+  tighter separation of duties
+
+### Runnable Setup Scripts
+
+This repo now includes standalone GitHub OIDC setup helpers:
+
+- [`mvp/infra/scripts/setup-github-oidc.sh`](scripts/setup-github-oidc.sh)
+- [`mvp/infra/scripts/setup-github-oidc.ps1`](scripts/setup-github-oidc.ps1)
+
+These scripts:
+
+- create the Entra app registrations and service principals
+- add federated credentials bound to GitHub Environments
+- assign the Azure RBAC this repository expects
+- print the resulting `AZURE_CLIENT_ID` values to place into GitHub
+  Environments
+
+Typical bash usage:
+
+```bash
+bash mvp/infra/scripts/setup-github-oidc.sh \
+  --github-org <org> \
+  --github-repo <repo> \
+  --subscription-id <subscription-id> \
+  --tenant-id <tenant-id> \
+  --integration-scope /subscriptions/<sub>/resourceGroups/<rg-integration> \
+  --integration-acr-scope /subscriptions/<sub>/resourceGroups/<rg-integration>/providers/Microsoft.ContainerRegistry/registries/<acr-name> \
+  --integration-keyvault-scope /subscriptions/<sub>/resourceGroups/<rg-integration>/providers/Microsoft.KeyVault/vaults/<kv-name> \
+  --production-scope /subscriptions/<sub>/resourceGroups/<rg-production> \
+  --production-keyvault-scope /subscriptions/<sub>/resourceGroups/<rg-production>/providers/Microsoft.KeyVault/vaults/<kv-name> \
+  --bootstrap-scope /subscriptions/<sub>/resourceGroups/<rg-bootstrap>
+```
 
 ## Azure RBAC
 
@@ -506,6 +543,93 @@ Pre-provision stable access for the OIDC identities.
 Do not rely on normal deploy workflows to repair missing RBAC dynamically.
 
 Deploy workflows should fail fast if RBAC is missing.
+
+### Exact RBAC For The `integration` OIDC Principal
+
+The `integration` principal is used by:
+
+- [`ci.yml`](../../../.github/workflows/ci.yml) on push to `integration`
+  - `az acr build`
+  - `az acr repository show`
+- [`deploy-integration.yml`](../../../.github/workflows/deploy-integration.yml)
+  - `az keyvault secret show` when Key Vault is enabled
+  - planner/wrapper deploy scripts that create or update Container Apps
+  - validation scripts that read Azure resource state
+
+Assign exactly these roles:
+
+- `Contributor`
+  - scope: the integration deployment scope
+  - recommended scope: the integration resource group
+  - why:
+    - create/update Container Apps resources
+    - create/update Container Apps environment when needed
+    - read Azure resource state for validation
+- `AcrPush`
+  - scope: the integration ACR resource or the resource group that contains the
+    integration ACR
+  - why:
+    - required by `az acr build`
+    - required for CI to build/push planner and wrapper images on
+      `integration`
+- `Key Vault Secrets User`
+  - scope: the integration Key Vault resource when Key Vault lookup is enabled
+  - why:
+    - required by `az keyvault secret show`
+
+Do **not** grant `User Access Administrator` or `Role Based Access Control
+Administrator` for routine integration delivery.
+
+This repo already sets `AZURE_OPENAI_AUTO_ROLE_ASSIGN=false` in the CI/CD path,
+so normal GitHub Actions runs are expected to use pre-provisioned RBAC.
+
+### Exact RBAC For The `production` OIDC Principal
+
+The `production` principal is used by
+[`deploy-production.yml`](../../../.github/workflows/deploy-production.yml) to:
+
+- log into Azure
+- read Key Vault secrets when configured
+- deploy planner and wrapper from already-built release metadata
+- run smoke validation
+
+Assign exactly these roles:
+
+- `Contributor`
+  - scope: the production deployment scope
+  - recommended scope: the production resource group
+  - why:
+    - create/update Container Apps resources
+    - support the normal production deploy/update path
+- `Key Vault Secrets User`
+  - scope: the production Key Vault resource when Key Vault lookup is enabled
+  - why:
+    - required to read deployment secrets from Key Vault
+
+Do **not** grant `AcrPush` to the production identity unless the customer has a
+non-standard production flow that actually builds images in production. The
+implemented production workflow promotes an already-tested release and does not
+rebuild planner or wrapper images.
+
+### Exact RBAC For The Optional `bootstrap-foundation` OIDC Principal
+
+If the customer wants bootstrap isolated from normal release delivery, create a
+separate `bootstrap-foundation` principal.
+
+Assign:
+
+- `Contributor`
+  - scope: the bootstrap/foundation resource group or subscription slice
+  - why:
+    - foundation/bootstrap creates and updates Azure resources such as:
+      - resource-group deployments
+      - Container Apps environment
+      - Azure OpenAI / AI Foundry resources
+      - Databricks workspace
+      - virtual networking and private endpoints
+
+Only add broader roles if the customer proves they are actually required for a
+specific bootstrap variant.
 
 ## GitHub Secrets Vs Key Vault
 
@@ -569,10 +693,10 @@ For most customer tenants, the correct production model is:
 
 For `integration`, the customer has two reasonable options:
 
-1. recommended: use a separate secure mock or non-production Databricks
-   environment
-2. acceptable if available: use an existing non-production customer Databricks
-   workspace with the same query surface
+1. recommended: use an existing non-production customer Databricks workspace
+   and populate it with the data needed for validation
+2. acceptable when the customer intentionally wants extra scaffolding: use a
+   dedicated mock or seeded Databricks environment
 
 The least desirable option is using the live production Databricks workspace as
 the integration validation target. Only do that if the customer explicitly
@@ -1257,54 +1381,6 @@ For a customer coming from a previous manual secure deployment:
    the first production rollout
 7. test `integration` first, then `main`
 
-## Why `PLANNER_API_BEARER_TOKEN` And `VALIDATE_USER_UPN` Are Optional
-
-These two values tend to look more important than they really are.
-
-### `PLANNER_API_BEARER_TOKEN`
-
-Purpose:
-
-- lets CI run an authenticated chat turn against the planner API during
-  validation
-
-What it is **not**:
-
-- it is not a core planner deployment input
-- it is not required for the planner container to start
-- it is not required for wrapper deployment
-
-Current behavior:
-
-- integration validation only requires it when `REQUIRE_AUTHENTICATED_E2E=true`
-- the planner validation script will still do health checks without it
-- production smoke validation can also skip authenticated chat when it is not
-  present
-
-Recommended treatment:
-
-- document it as optional validation-only
-- add it only if the customer wants richer automated chat validation in CI/CD
-
-### `VALIDATE_USER_UPN`
-
-Purpose:
-
-- gives CI a known seller identity to test direct Databricks-backed territory
-  and scoped-account resolution
-
-What it is **not**:
-
-- it is not a required production runtime setting
-- it is not needed for planner deployment itself
-- it is not needed for wrapper deployment itself
-
-Recommended treatment:
-
-- use it only when the customer wants automated query-path validation in CI/CD
-- if present, choose a stable non-admin seller identity that is expected to
-  have a predictable territory/account scope
-
 ## Suggested GitHub Environment Inventory
 
 Use the following practical split.
@@ -1315,8 +1391,8 @@ Use the following practical split.
 - ACR name
 - Container Apps names
 - planner/wrapper public IDs and audiences
-- either secure mock Databricks values or customer non-production Databricks
-  values
+- either customer non-production Databricks values or optional mock/seed
+  Databricks values
 - validation flags and validation UPN
 
 Typical integration variable keys in this repo:
@@ -1444,8 +1520,9 @@ Azure and Databricks runtime environment.
     `CUSTOMER_*` namespace
 12. run a small PR through `dev`
 13. promote to `integration`
-14. validate that `deploy-integration.yml` works against either the secure mock
-    environment or the customer's non-production Databricks environment
+14. validate that `deploy-integration.yml` works against either the customer's
+    non-production Databricks environment or an intentionally provisioned
+    mock/seed path
 15. promote to `main`
 16. confirm the production environment pauses for approval
 17. approve and complete the first production release
