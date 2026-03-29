@@ -10,7 +10,10 @@ runbook so there is one clear place for step-by-step deployment guidance.
 
 - Operator deployment and troubleshooting: [`../mvp-setup-and-deployment-runbook.md`](../mvp-setup-and-deployment-runbook.md)
 - Runtime architecture: [`../daily-account-planner-architecture.md`](../daily-account-planner-architecture.md)
-- GitHub Actions / Azure OIDC setup: [`github-actions-cicd-design.md`](github-actions-cicd-design.md)
+- GitHub Actions CI/CD overview: [`cicd-overview.md`](cicd-overview.md)
+- GitHub Actions setup and migration: [`cicd-setup-guide.md`](cicd-setup-guide.md)
+- GitHub Actions validation and operations: [`cicd-validation-and-operations.md`](cicd-validation-and-operations.md)
+- CI/CD doc index: [`github-actions-cicd-design.md`](github-actions-cicd-design.md)
 
 ## Layout
 
