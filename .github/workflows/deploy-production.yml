@@ -55,9 +55,6 @@ jobs:
               - 'mvp/infra/scripts/deploy-*.sh'
               - 'mvp/infra/scripts/validate-*.sh'
               - 'mvp/infra/tests/**'
-              - '.github/workflows/ci.yml'
-              - '.github/workflows/deploy-*.yml'
-              - '.github/workflows/bootstrap-foundation.yml'
       - id: classify
         shell: bash
         run: |
