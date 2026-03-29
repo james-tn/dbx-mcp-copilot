@@ -22,6 +22,136 @@ This guide explains:
 This guide complements, but does not replace, the operational notes in
 [`mvp/infra/README.md`](README.md).
 
+## Quick Setup Overview
+
+This repo's GitHub Actions model is based on these fixed choices:
+
+- branch flow: `feature/*` -> `dev` -> `integration` -> `main`
+- `dev` runs CI validation
+- `integration` builds the release artifact, deploys it to Azure, and validates
+  the deployed integration environment
+- `main` promotes the already-tested integration artifact to production
+- Azure authentication uses GitHub OIDC, not stored Azure credentials
+- Teams/M365 catalog publish stays separate from normal Azure deployment
+
+At a high level, the automation looks like this:
+
+```text
+GitHub Actions
+  ci.yml
+    PR to dev/integration/main -> tests, shell validation, Docker smoke, package build
+    push to integration        -> same checks + build release metadata/artifacts
+
+  deploy-integration.yml
+    push to integration -> Azure OIDC login -> render runtime env -> deploy -> validate
+
+  deploy-production.yml
+    push to main -> Azure OIDC login -> reuse tested release metadata -> deploy production
+
+  publish-teams-catalog.yml
+    manual only -> M365 admin-controlled publish/install path
+
+  bootstrap-foundation.yml
+    manual only -> rare foundation/bootstrap path
+```
+
+## Prerequisites
+
+Before a customer sets up CI/CD, they should already have:
+
+- admin access to the GitHub repository or an internal repo fork
+- Azure rights to create Entra app registrations or user-assigned managed
+  identities for GitHub OIDC
+- Azure RBAC rights on the target subscription or resource groups
+- a decision on whether `integration` will use:
+  - a secure mock Databricks environment, or
+  - an existing non-production Databricks workspace
+- a decision on whether production points at:
+  - an already-existing customer environment, or
+  - a newly bootstrapped environment created by this repo
+
+For the most common customer path, the customer already has:
+
+- existing Azure resource group
+- existing Container Apps environment
+- existing planner and wrapper app registrations
+- existing customer Databricks workspace
+- existing AIQ and vPower-backed sources
+
+## Setup Checklist
+
+If the customer wants the shortest possible setup sequence, use this checklist:
+
+1. Choose whether the customer is following:
+   - Path A: existing infrastructure
+   - Path B: starting from scratch
+2. Create the GitHub Environments:
+   - `integration`
+   - `production`
+   - `teams-catalog-admin`
+   - `bootstrap-foundation`
+3. Create one Azure OIDC principal for `integration`
+4. Create one separate Azure OIDC principal for `production`
+5. Add GitHub federated credentials for those two environments
+6. Assign Azure RBAC to those OIDC principals
+7. Populate GitHub Environment variables and secrets
+8. Run a small PR through `dev`
+9. Promote the tested change to `integration`
+10. Verify deployed integration validation succeeds
+11. Promote to `main`
+12. Approve the `production` environment deployment
+
+If the customer is starting from zero infrastructure, insert this between steps
+7 and 8:
+
+13. run `bootstrap-foundation.yml`
+14. review generated outputs and deployed resources
+15. finish the M365 bootstrap path
+
+After bootstrap is complete, routine delivery should return to the normal
+`dev` -> `integration` -> `main` flow.
+
+## First-Time Setup Order
+
+For a customer team, the cleanest implementation order is:
+
+### 1. Set Up GitHub
+
+- create the target branches: `dev`, `integration`, `main`
+- configure branch protection
+- create GitHub Environments
+- add required reviewers for `production`
+- add required reviewers for `teams-catalog-admin`
+
+### 2. Set Up Azure OIDC
+
+- create the Azure principal for `integration`
+- create the Azure principal for `production`
+- add federated credentials that bind each principal to the matching GitHub
+  Environment
+- assign Azure RBAC
+
+### 3. Move Runtime Configuration Into GitHub
+
+- treat the old `mvp/.env.secure` as migration inventory only
+- move non-secret values into GitHub Environment variables
+- move secrets into GitHub Environment secrets or Azure Key Vault
+- keep customer runtime Databricks settings in the `CUSTOMER_*` namespace for
+  production
+
+### 4. Validate Integration First
+
+- merge a safe change into `integration`
+- let CI build release metadata and images
+- let `deploy-integration.yml` deploy the tested artifact
+- confirm deployed validation succeeds before promoting to `main`
+
+### 5. Promote To Production
+
+- merge `integration` into `main`
+- let `deploy-production.yml` reuse the tested release metadata
+- approve the `production` GitHub Environment when prompted
+
 ## Start Here: Choose Your Path
 
 There are two very different customer setup paths in this repo.
