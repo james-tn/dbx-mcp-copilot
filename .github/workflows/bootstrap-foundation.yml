@@ -48,10 +48,10 @@ jobs:
       M365_GRAPH_PUBLISHER_CLIENT_ID: ${{ vars.M365_GRAPH_PUBLISHER_CLIENT_ID }}
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: azure/login@v2
+      - uses: azure/login@v3
         with:
           client-id: ${{ env.AZURE_CLIENT_ID }}
           tenant-id: ${{ env.AZURE_TENANT_ID }}
