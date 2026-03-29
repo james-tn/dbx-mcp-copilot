@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.MD"
+      - "mvp/.env.example"
+      - "mvp/.env.secure.example"
+      - "mvp/.env.inputs.example"
+      - "mvp/.env.secure.inputs.example"
   workflow_dispatch:
     inputs:
       release_sha:
@@ -47,15 +54,14 @@ jobs:
       BOT_APP_ID: ${{ vars.BOT_APP_ID }}
       BOT_SSO_APP_ID: ${{ vars.BOT_SSO_APP_ID }}
       BOT_SSO_RESOURCE: ${{ vars.BOT_SSO_RESOURCE }}
-      CUSTOMER_DATABRICKS_HOST: ${{ vars.CUSTOMER_DATABRICKS_HOST }}
-      CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID: ${{ vars.CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID }}
-      CUSTOMER_DATABRICKS_OBO_SCOPE: ${{ vars.CUSTOMER_DATABRICKS_OBO_SCOPE }}
-      CUSTOMER_DATABRICKS_WAREHOUSE_ID: ${{ vars.CUSTOMER_DATABRICKS_WAREHOUSE_ID }}
-      CUSTOMER_TOP_OPPORTUNITIES_SOURCE: ${{ vars.CUSTOMER_TOP_OPPORTUNITIES_SOURCE }}
-      CUSTOMER_CONTACTS_SOURCE: ${{ vars.CUSTOMER_CONTACTS_SOURCE }}
-      CUSTOMER_SCOPE_ACCOUNTS_CATALOG: ${{ vars.CUSTOMER_SCOPE_ACCOUNTS_CATALOG }}
-      CUSTOMER_SALES_TEAM_MAPPING_CATALOG: ${{ vars.CUSTOMER_SALES_TEAM_MAPPING_CATALOG }}
-      CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH: ${{ vars.CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH }}
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST || vars.CUSTOMER_DATABRICKS_HOST }}
+      DATABRICKS_AZURE_RESOURCE_ID: ${{ vars.DATABRICKS_AZURE_RESOURCE_ID || vars.CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID }}
+      DATABRICKS_OBO_SCOPE: ${{ vars.DATABRICKS_OBO_SCOPE || vars.CUSTOMER_DATABRICKS_OBO_SCOPE }}
+      DATABRICKS_WAREHOUSE_ID: ${{ vars.DATABRICKS_WAREHOUSE_ID || vars.CUSTOMER_DATABRICKS_WAREHOUSE_ID }}
+      TOP_OPPORTUNITIES_SOURCE: ${{ vars.TOP_OPPORTUNITIES_SOURCE || vars.CUSTOMER_TOP_OPPORTUNITIES_SOURCE }}
+      CONTACTS_SOURCE: ${{ vars.CONTACTS_SOURCE || vars.CUSTOMER_CONTACTS_SOURCE }}
+      SCOPE_ACCOUNTS_CATALOG: ${{ vars.SCOPE_ACCOUNTS_CATALOG || vars.CUSTOMER_SCOPE_ACCOUNTS_CATALOG }}
+      SALES_TEAM_MAPPING_CATALOG: ${{ vars.SALES_TEAM_MAPPING_CATALOG || vars.CUSTOMER_SALES_TEAM_MAPPING_CATALOG }}
       WRAPPER_ENABLE_DEBUG_CHAT: ${{ vars.WRAPPER_ENABLE_DEBUG_CHAT }}
       WRAPPER_DEBUG_ALLOWED_UPNS: ${{ vars.WRAPPER_DEBUG_ALLOWED_UPNS }}
       WRAPPER_DEBUG_EXPECTED_AUDIENCE: ${{ vars.WRAPPER_DEBUG_EXPECTED_AUDIENCE }}
@@ -72,12 +78,12 @@ jobs:
       AZURE_OPENAI_AUTO_ROLE_ASSIGN: "false"
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Resolve promoted release SHA
         id: resolve-release
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const inputSha = `${{ github.event.inputs.release_sha || '' }}`.trim();
@@ -96,7 +102,7 @@ jobs:
             });
             const pull = response.data.find((item) => item.base?.ref === "main") || response.data[0];
             core.setOutput("release_sha", pull?.head?.sha || context.sha);
-      - uses: azure/login@v2
+      - uses: azure/login@v3
         with:
           client-id: ${{ env.AZURE_CLIENT_ID }}
           tenant-id: ${{ env.AZURE_TENANT_ID }}
@@ -181,7 +187,7 @@ jobs:
           profile=secure-customer
           runtime_env=${{ runner.temp }}/production.env
           EOF
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: production-deployment-summary-${{ steps.resolve-release.outputs.release_sha }}
           path: |
