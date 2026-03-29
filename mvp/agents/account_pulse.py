@@ -9,11 +9,12 @@ import json
 import logging
 import time
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
 from agent_framework import Agent, tool
 from agent_framework.azure import AzureOpenAIResponsesClient
+from pydantic import Field
 
 try:
     from .config import get_account_pulse_execution_mode
@@ -32,15 +33,16 @@ ACCOUNT_PULSE_INSTRUCTIONS = """You are Account Pulse, a daily intelligence brie
 
 ## When to Activate
 
-Activate when the user asks for a briefing in any form: "Give me my briefing", "What's going on in my accounts?", "Any news today?", "What's happening?", etc. Activate a single-account scan when the user names a specific account.
+Activate when the user asks for a briefing in any form: "Give me my briefing", "What's going on in my accounts?", "Any news today?", "What's happening?", etc. Activate a narrowed scan when the user names one or more specific accounts.
 
 ## Execution Rule
 
-For any briefing request, including a follow-up that names a specific account, call `generate_account_pulse_briefing` exactly once and return its markdown output exactly as your final answer.
+For any briefing request, including a follow-up that names one or more specific accounts, call `generate_account_pulse_briefing` exactly once and return its markdown output exactly as your final answer.
 
 `generate_account_pulse_briefing` already:
 - loads the signed-in seller's scoped accounts
-- narrows to a named account when the request clearly asks for one
+- can narrow to one or more explicitly supplied account names
+- also narrows to a named account when the request clearly asks for one
 - applies Velocity candidate filtering when needed
 - groups by Global Ultimate
 - runs the internal parallel parent scan
@@ -337,6 +339,39 @@ def _matches_requested_account(request: str, row: dict[str, Any]) -> bool:
     return False
 
 
+def _parse_account_filters(accounts: Any) -> list[str]:
+    if accounts in (None, "", []):
+        return []
+    if isinstance(accounts, list):
+        values = [str(value).strip() for value in accounts if str(value).strip()]
+    else:
+        values = [
+            part.strip()
+            for part in str(accounts).split(",")
+            if part.strip()
+        ]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        lowered = value.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        deduped.append(value)
+    return deduped
+
+
+def _matches_explicit_account_filters(account_filters: list[str], row: dict[str, Any]) -> bool:
+    if not account_filters:
+        return False
+    candidates = {
+        str(row.get("name", "")).strip().lower(),
+        str(row.get("global_ultimate", "")).strip().lower(),
+    }
+    candidates.discard("")
+    return any(account_name.lower() in candidates for account_name in account_filters)
+
+
 def _relationship_context_for_rows(rows: list[dict[str, Any]]) -> dict[str, list[str]]:
     return {
         "customer_or_prospect": sorted({value for row in rows for value in _normalize_string_list(row.get("customer_or_prospect"))}),
@@ -351,14 +386,23 @@ def _build_parent_scan_targets(
     scoped_accounts_payload: dict[str, Any],
     *,
     request_text: str,
+    account_filters: list[str] | None = None,
     top_opportunities_payload: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     accounts = list(scoped_accounts_payload.get("accounts", []) or [])
     if not accounts:
         return [], 0
 
-    narrowed_accounts = [row for row in accounts if _matches_requested_account(request_text, row)]
-    active_accounts = narrowed_accounts or accounts
+    explicit_filters = [value for value in (account_filters or []) if value]
+    narrowed_accounts = (
+        [row for row in accounts if _matches_explicit_account_filters(explicit_filters, row)]
+        if explicit_filters
+        else [row for row in accounts if _matches_requested_account(request_text, row)]
+    )
+    if explicit_filters:
+        active_accounts = narrowed_accounts
+    else:
+        active_accounts = narrowed_accounts or accounts
     segment = str(scoped_accounts_payload.get("segment", "UNKNOWN")).strip() or "UNKNOWN"
     candidate_account_names = None
     candidate_account_ids = None
@@ -432,13 +476,25 @@ def create_account_pulse_agent(
         name="generate_account_pulse_briefing",
         description=(
             "Generate the full Account Pulse markdown briefing for the seller request. "
-            "Handles scope loading, account narrowing, parent grouping, internal parallel scanning, "
+            "Handles scope loading, optional account narrowing, parent grouping, internal parallel scanning, "
             "and final formatting. Return the markdown exactly as the final answer."
         ),
     )
-    async def generate_account_pulse_briefing(request: str) -> str:
+    async def generate_account_pulse_briefing(
+        request: str,
+        accounts: Annotated[
+            str | list[str] | None,
+            Field(
+                description=(
+                "Optional account name or comma-separated / list-form account names to narrow the briefing. "
+                "Leave empty to scan all accounts in the signed-in seller scope."
+                )
+            ),
+        ] = None,
+    ) -> str:
         started = time.perf_counter()
         logger.info("Account Pulse briefing started.", extra={"request_text": request[:120]})
+        requested_accounts = _parse_account_filters(accounts)
         scoped_accounts_payload = json.loads(await scoped_accounts_func())
         print(
             "[account-pulse] scope-payload "
@@ -460,7 +516,11 @@ def create_account_pulse_agent(
         if not accounts:
             logger.warning("Account Pulse briefing aborted because no scoped accounts were returned.")
             return _build_no_scoped_accounts_message(scoped_accounts_payload)
-        narrowed_accounts = [row for row in accounts if _matches_requested_account(request, row)]
+        narrowed_accounts = (
+            [row for row in accounts if _matches_explicit_account_filters(requested_accounts, row)]
+            if requested_accounts
+            else [row for row in accounts if _matches_requested_account(request, row)]
+        )
 
         top_opportunities_payload = None
         if str(scoped_accounts_payload.get("segment", "")).upper() == "VEL":
@@ -471,6 +531,7 @@ def create_account_pulse_agent(
         scan_targets, selected_account_count = _build_parent_scan_targets(
             scoped_accounts_payload,
             request_text=request,
+            account_filters=requested_accounts,
             top_opportunities_payload=top_opportunities_payload,
         )
         print(
@@ -492,6 +553,7 @@ def create_account_pulse_agent(
             extra={
                 "segment": str(scoped_accounts_payload.get("segment", "UNKNOWN")).upper(),
                 "execution_mode": get_account_pulse_execution_mode(),
+                "requested_account_filters": requested_accounts,
                 "scan_target_count": len(scan_targets),
                 "selected_account_count": selected_account_count,
                 "scan_targets_completed": scan_bundle.get("scan_targets_completed", 0),

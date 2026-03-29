@@ -11,10 +11,11 @@ import config
 from account_pulse import (
     ACCOUNT_PULSE_INSTRUCTIONS,
     _build_no_scoped_accounts_message,
+    _parse_account_filters,
     _build_parent_scan_targets,
     render_account_pulse_briefing_markdown,
 )
-from databricks_tools import get_account_contacts, get_scoped_accounts, get_top_opportunities, lookup_rep
+from databricks_tools import get_account_contacts, get_scoped_accounts, get_top_opportunities
 from next_move import NEXT_MOVE_INSTRUCTIONS, _render_scope_guidance
 
 
@@ -25,6 +26,7 @@ def test_config_no_longer_exposes_direct_execute_sql() -> None:
 def test_account_pulse_prompt_uses_semantic_tools() -> None:
     assert "SELECT name, global_ultimate" not in ACCOUNT_PULSE_INSTRUCTIONS
     assert "generate_account_pulse_briefing" in ACCOUNT_PULSE_INSTRUCTIONS
+    assert "explicitly supplied account names" in ACCOUNT_PULSE_INSTRUCTIONS
     assert "signed-in user's permitted enterprise data access" in ACCOUNT_PULSE_INSTRUCTIONS
 
 
@@ -37,7 +39,6 @@ def test_next_move_prompt_uses_semantic_tools() -> None:
 
 def test_semantic_tool_names_are_stable() -> None:
     assert get_scoped_accounts.name == "get_scoped_accounts"
-    assert lookup_rep.name == "lookup_rep"
     assert get_top_opportunities.name == "get_top_opportunities"
     assert get_account_contacts.name == "get_account_contacts"
 
@@ -119,6 +120,38 @@ def test_account_pulse_scan_target_builder_can_narrow_to_named_account() -> None
     assert len(scan_targets) == 1
     assert scan_targets[0]["parent_name"] == "Ford Motor Company"
     assert scan_targets[0]["child_accounts"] == ["Ford Pro"]
+
+
+def test_account_pulse_parse_account_filters_supports_csv_and_dedupes() -> None:
+    assert _parse_account_filters("Ford Pro, adidas AG, Ford Pro") == ["Ford Pro", "adidas AG"]
+
+
+def test_account_pulse_scan_target_builder_can_narrow_to_explicit_account_list() -> None:
+    scan_targets, selected_account_count = _build_parent_scan_targets(
+        {
+            "segment": "ENT",
+            "accounts": [
+                {
+                    "name": "Latitude AI LLC",
+                    "global_ultimate": "Ford Motor Company",
+                },
+                {
+                    "name": "Ford Pro",
+                    "global_ultimate": "Ford Motor Company",
+                },
+                {
+                    "name": "adidas North America",
+                    "global_ultimate": "adidas AG",
+                },
+            ],
+        },
+        request_text="give me my morning briefing",
+        account_filters=["Ford Pro", "adidas AG"],
+    )
+
+    assert selected_account_count == 2
+    assert len(scan_targets) == 2
+    assert {row["parent_name"] for row in scan_targets} == {"Ford Motor Company", "adidas AG"}
 
 
 def test_account_pulse_no_scoped_accounts_message_mentions_scope() -> None:

@@ -270,48 +270,6 @@ def test_sales_team_resolver_can_build_source_from_catalog_schema_table(monkeypa
     assert "FROM demo_catalog.ri.seller_mapping" in query_client.statements[0]
 
 
-def test_rep_lookup_resolver_supports_exact_partial_and_ambiguous(monkeypatch) -> None:
-    monkeypatch.setattr(
-        customer_backend,
-        "get_customer_rep_lookup_static_map_json",
-        lambda: json.dumps(
-            {
-                "Scott Jackson": "Germany-ENT-Named-5",
-                "Scott Jones": "GreatLakes-ENT-Named-1",
-                "Jon Test": "NewYorkNewJersey-ENT-Named-2",
-            }
-        ),
-    )
-
-    resolver = customer_backend.RepLookupResolver()
-
-    exact = resolver.resolve("Jon Test")
-    assert exact["status"] == "ok"
-    assert exact["match_type"] == "exact"
-    assert exact["territory"] == "NewYorkNewJersey-ENT-Named-2"
-
-    partial = resolver.resolve("Test")
-    assert partial["status"] == "ok"
-    assert partial["match_type"] == "partial"
-
-    ambiguous = resolver.resolve("Scott")
-    assert ambiguous["status"] == "ambiguous"
-    assert len(ambiguous["matches"]) == 2
-
-
-def test_rep_lookup_resolver_returns_available_reps_when_missing(monkeypatch) -> None:
-    monkeypatch.setattr(
-        customer_backend,
-        "get_customer_rep_lookup_static_map_json",
-        lambda: json.dumps({"Jon Test": "NewYorkNewJersey-ENT-Named-2"}),
-    )
-
-    payload = customer_backend.RepLookupResolver().resolve("Nope")
-
-    assert payload["status"] == "no_match"
-    assert payload["available_reps"] == ["Jon Test"]
-
-
 def test_scoped_accounts_can_build_source_from_catalog_schema_table(monkeypatch) -> None:
     monkeypatch.setattr(customer_backend, "get_request_user_upn", lambda: "seller@example.com")
     monkeypatch.setattr(
@@ -418,6 +376,74 @@ def test_scoped_accounts_prefers_static_json_path(monkeypatch, tmp_path: Path) -
     assert payload["accounts"][0]["source_vpower_id"] == "001cx00000PLCLkAAP"
     assert payload["accounts"][0]["industry"] is None
     assert databricks_client.statements == []
+
+
+def test_hosted_scoped_accounts_ignore_legacy_static_fallback(monkeypatch, tmp_path: Path) -> None:
+    scoped_accounts_path = tmp_path / "scope_accounts.json"
+    scoped_accounts_path.write_text(
+        json.dumps(
+            [
+                {
+                    "account_id": "static-001",
+                    "name": "Static Account",
+                    "global_ultimate": "Static Account",
+                    "sales_team": "Legacy-ENT-1",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(customer_backend, "get_request_user_upn", lambda: "seller@example.com")
+    monkeypatch.setattr(
+        customer_backend,
+        "get_customer_legacy_static_fallback_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        customer_backend,
+        "get_customer_sales_team_static_map_json",
+        lambda: json.dumps({"seller@example.com": "Legacy-ENT-1"}),
+    )
+    monkeypatch.setattr(
+        customer_backend,
+        "get_customer_scope_accounts_static_json_path",
+        lambda: str(scoped_accounts_path),
+    )
+    monkeypatch.setattr(customer_backend, "get_customer_scope_accounts_query", lambda: "")
+    monkeypatch.setattr(customer_backend, "get_customer_scope_accounts_source", lambda: "")
+    monkeypatch.setattr(customer_backend, "get_customer_scope_accounts_catalog", lambda: "workspace_catalog")
+    monkeypatch.setattr(customer_backend, "get_customer_sales_team_mapping_query", lambda: "")
+    monkeypatch.setattr(customer_backend, "get_customer_sales_team_mapping_source", lambda: "")
+    monkeypatch.setattr(customer_backend, "get_customer_sales_team_mapping_catalog", lambda: "workspace_catalog")
+
+    databricks_client = _FakeDatabricksClient(
+        [
+            [{"sales_team": "Germany-ENT-Named-5"}],
+            [
+                {
+                    "account_id": "001GL0001",
+                    "source_vpower_id": "001cx00000GL0001",
+                    "legacy_id": None,
+                    "name": "Ford Motor Company",
+                    "global_ultimate": "Ford Motor Company",
+                    "sales_team": "Germany-ENT-Named-5",
+                    "is_subsidiary": False,
+                }
+            ],
+        ]
+    )
+
+    router = customer_backend.ToolBackendRouter(
+        databricks_client=databricks_client,
+        sales_team_resolver=customer_backend.SalesTeamResolver(databricks_client),
+    )
+
+    payload = asyncio.run(router.get_scoped_accounts_payload())
+
+    assert payload["total_accounts"] == 1
+    assert payload["accounts"][0]["account_id"] == "001GL0001"
+    assert len(databricks_client.statements) == 2
 
 
 def test_scoped_accounts_use_builtin_vpower_query_by_default(monkeypatch) -> None:

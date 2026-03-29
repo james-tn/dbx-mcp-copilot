@@ -32,7 +32,7 @@ try:
         get_customer_databricks_pat,
         get_customer_databricks_resource_id,
         get_customer_databricks_scope,
-        get_customer_rep_lookup_static_map_json,
+        get_customer_legacy_static_fallback_enabled,
         get_customer_databricks_warehouse_id,
         get_customer_sales_team_column,
         get_customer_sales_team_mapping_catalog,
@@ -80,7 +80,7 @@ except ImportError:
         get_customer_databricks_pat,
         get_customer_databricks_resource_id,
         get_customer_databricks_scope,
-        get_customer_rep_lookup_static_map_json,
+        get_customer_legacy_static_fallback_enabled,
         get_customer_databricks_warehouse_id,
         get_customer_sales_team_column,
         get_customer_sales_team_mapping_catalog,
@@ -128,10 +128,6 @@ class CustomerDataAccessError(RuntimeError):
 
 class SalesTeamResolutionError(RuntimeError):
     """Raised when the planner cannot resolve the signed-in user's sales team."""
-
-
-class RepLookupConfigurationError(RuntimeError):
-    """Raised when hosted rep lookup configuration is invalid."""
 
 
 _CUSTOMER_VPOWER_TERRITORY_MODEL_ID = "0MAcx000000Arz7GAC"
@@ -489,14 +485,14 @@ def _load_static_scoped_accounts(path_value: str, *, sales_teams: list[str]) -> 
     resolved_path = _resolve_local_data_path(path_value)
     if not resolved_path.exists():
         raise CustomerBackendConfigurationError(
-            f"CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH does not exist: {resolved_path}"
+            f"SCOPE_ACCOUNTS_STATIC_JSON_PATH does not exist: {resolved_path}"
         )
 
     try:
         payload = json.loads(resolved_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise CustomerBackendConfigurationError(
-            f"CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH is not valid JSON: {resolved_path}"
+            f"SCOPE_ACCOUNTS_STATIC_JSON_PATH is not valid JSON: {resolved_path}"
         ) from exc
 
     if isinstance(payload, dict):
@@ -505,7 +501,7 @@ def _load_static_scoped_accounts(path_value: str, *, sales_teams: list[str]) -> 
         rows = payload
     if not isinstance(rows, list):
         raise CustomerBackendConfigurationError(
-            "CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH must contain a JSON array or an object with an 'accounts' array."
+            "SCOPE_ACCOUNTS_STATIC_JSON_PATH must contain a JSON array or an object with an 'accounts' array."
         )
 
     normalized_rows = [
@@ -648,7 +644,7 @@ class CustomerDatabricksQueryClient:
     async def query_sql(self, statement: str, *, query_name: str = "unnamed") -> list[dict[str, Any]]:
         if not self.settings.host:
             raise CustomerBackendConfigurationError(
-                "CUSTOMER_DATABRICKS_HOST or DATABRICKS_HOST is required for customer mode."
+                "DATABRICKS_HOST is required for customer mode."
             )
 
         access_token = acquire_downstream_access_token(
@@ -726,7 +722,9 @@ class SalesTeamResolver:
                 "The signed-in user identity is missing an email/UPN claim, so sales-team mapping cannot be resolved."
             )
 
-        sales_teams = self._resolve_from_static_map(user_upn)
+        sales_teams = None
+        if get_customer_legacy_static_fallback_enabled():
+            sales_teams = self._resolve_from_static_map(user_upn)
         if sales_teams is None:
             sales_teams = await self._resolve_from_databricks(user_upn)
 
@@ -745,11 +743,11 @@ class SalesTeamResolver:
             payload = json.loads(raw_json)
         except json.JSONDecodeError as exc:
             raise CustomerBackendConfigurationError(
-                "CUSTOMER_SALES_TEAM_STATIC_MAP_JSON is not valid JSON."
+                "SALES_TEAM_STATIC_MAP_JSON is not valid JSON."
             ) from exc
         if not isinstance(payload, dict):
             raise CustomerBackendConfigurationError(
-                "CUSTOMER_SALES_TEAM_STATIC_MAP_JSON must be a JSON object keyed by user UPN."
+                "SALES_TEAM_STATIC_MAP_JSON must be a JSON object keyed by user UPN."
             )
         entry = payload.get(user_upn) or payload.get(user_upn.lower())
         if entry is None:
@@ -798,63 +796,6 @@ class SalesTeamResolver:
         ]
 
 
-class RepLookupResolver:
-    def resolve(self, rep_name: str) -> dict[str, Any]:
-        name_query = _normalize_string(rep_name)
-        if not name_query:
-            return {"status": "error", "message": "rep_name is required."}
-
-        raw_json = get_customer_rep_lookup_static_map_json()
-        if not raw_json:
-            return {
-                "status": "error",
-                "message": "Rep lookup is not configured. Set CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON.",
-            }
-        try:
-            payload = json.loads(raw_json)
-        except json.JSONDecodeError as exc:
-            raise RepLookupConfigurationError(
-                "CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON is not valid JSON."
-            ) from exc
-        if not isinstance(payload, dict):
-            raise RepLookupConfigurationError(
-                "CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON must be a JSON object keyed by rep name."
-            )
-
-        records: list[tuple[str, str]] = []
-        for rep, territory in payload.items():
-            rep_value = _normalize_string(rep)
-            territory_value = _normalize_string(territory)
-            if rep_value and territory_value:
-                records.append((rep_value, territory_value))
-
-        lowered = name_query.lower()
-        exact = [(rep, territory) for rep, territory in records if rep.lower() == lowered]
-        if len(exact) == 1:
-            rep, territory = exact[0]
-            return {"status": "ok", "rep": rep, "territory": territory, "match_type": "exact"}
-
-        partial = [(rep, territory) for rep, territory in records if lowered in rep.lower()]
-        if len(partial) == 1:
-            rep, territory = partial[0]
-            return {"status": "ok", "rep": rep, "territory": territory, "match_type": "partial"}
-        if len(partial) > 1:
-            return {
-                "status": "ambiguous",
-                "query": rep_name,
-                "matches": [
-                    {"rep": rep, "territory": territory}
-                    for rep, territory in sorted(partial, key=lambda item: item[0].lower())
-                ],
-            }
-
-        return {
-            "status": "no_match",
-            "query": rep_name,
-            "available_reps": sorted([rep for rep, _territory in records], key=str.lower),
-        }
-
-
 class ToolBackendRouter:
     def __init__(
         self,
@@ -862,12 +803,10 @@ class ToolBackendRouter:
         dap_client: CustomerDapClient | None = None,
         databricks_client: CustomerDatabricksQueryClient | None = None,
         sales_team_resolver: SalesTeamResolver | None = None,
-        rep_lookup_resolver: RepLookupResolver | None = None,
     ) -> None:
         self.dap_client = dap_client or CustomerDapClient()
         self.databricks_client = databricks_client or CustomerDatabricksQueryClient()
         self.sales_team_resolver = sales_team_resolver or SalesTeamResolver(self.databricks_client)
-        self.rep_lookup_resolver = rep_lookup_resolver or RepLookupResolver()
 
     async def get_scoped_accounts_payload(self) -> dict[str, Any]:
         user_upn = _normalize_string(get_request_user_upn())
@@ -880,12 +819,17 @@ class ToolBackendRouter:
             f"[customer-backend] scoped-accounts user_upn={user_upn} sales_teams={','.join(sales_teams)}"
         )
         static_json_path = get_customer_scope_accounts_static_json_path()
-        if static_json_path:
+        static_fallback_enabled = get_customer_legacy_static_fallback_enabled()
+        if static_json_path and static_fallback_enabled:
             _emit_backend_log(
                 f"[customer-backend] scoped-accounts source=static_json path={static_json_path}"
             )
             rows = _load_static_scoped_accounts(static_json_path, sales_teams=sales_teams)
         else:
+            if static_json_path and not static_fallback_enabled:
+                _emit_backend_log(
+                    f"[customer-backend] scoped-accounts source=static_json_disabled path={static_json_path}"
+                )
             query = get_customer_scope_accounts_query()
             if not query:
                 source = get_customer_scope_accounts_source() or _source_from_parts(
@@ -986,7 +930,7 @@ ORDER BY sales_team, global_ultimate, name
             )
             if not source:
                 raise CustomerBackendConfigurationError(
-                    "Configure CUSTOMER_CONTACTS_QUERY or CUSTOMER_CONTACTS_SOURCE for customer mode."
+                    "Configure CONTACTS_QUERY or CONTACTS_SOURCE for customer mode."
                 )
             query = f"""
 SELECT
@@ -1051,7 +995,7 @@ ORDER BY engagement_level, title
             )
             if not source:
                 raise CustomerBackendConfigurationError(
-                    "Configure CUSTOMER_TOP_OPPORTUNITIES_QUERY or CUSTOMER_TOP_OPPORTUNITIES_SOURCE for customer mode."
+                    "Configure TOP_OPPORTUNITIES_QUERY or TOP_OPPORTUNITIES_SOURCE for customer mode."
                 )
             filters = ["{{sales_team_filter}}"]
             if mode == "new_logo_only":
@@ -1147,9 +1091,6 @@ OFFSET {{{{offset}}}}
             "accounts": accounts,
         }
 
-    def lookup_rep_payload(self, rep_name: str) -> dict[str, Any]:
-        return self.rep_lookup_resolver.resolve(rep_name)
-
     async def close(self) -> None:
         await self.dap_client.close()
 
@@ -1185,13 +1126,13 @@ def build_backend_investigation_matrix() -> list[dict[str, Any]]:
             ],
             "fallback_behavior": "optional fallback to signed-in user sales-team mapping when no territory is provided",
             "config_keys": [
-                "CUSTOMER_TOP_OPPORTUNITIES_QUERY",
-                "CUSTOMER_TOP_OPPORTUNITIES_SOURCE",
-                "CUSTOMER_TOP_OPPORTUNITIES_CATALOG",
-                "CUSTOMER_TOP_OPPORTUNITIES_SCHEMA",
-                "CUSTOMER_TOP_OPPORTUNITIES_TABLE",
-                "CUSTOMER_DATABRICKS_HOST",
-                "CUSTOMER_DATABRICKS_WAREHOUSE_ID",
+                "TOP_OPPORTUNITIES_QUERY",
+                "TOP_OPPORTUNITIES_SOURCE",
+                "TOP_OPPORTUNITIES_CATALOG",
+                "TOP_OPPORTUNITIES_SCHEMA",
+                "TOP_OPPORTUNITIES_TABLE",
+                "DATABRICKS_HOST",
+                "DATABRICKS_WAREHOUSE_ID",
             ],
             "open_questions": [
                 "What customer table or view should define the top opportunities source?",
@@ -1217,14 +1158,13 @@ def build_backend_investigation_matrix() -> list[dict[str, Any]]:
             ],
             "fallback_behavior": "built-in customer vPower Databricks query, with optional explicit override config",
             "config_keys": [
-                "CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH",
-                "CUSTOMER_SCOPE_ACCOUNTS_QUERY",
-                "CUSTOMER_SCOPE_ACCOUNTS_SOURCE",
-                "CUSTOMER_SCOPE_ACCOUNTS_CATALOG",
-                "CUSTOMER_SCOPE_ACCOUNTS_SCHEMA",
-                "CUSTOMER_SCOPE_ACCOUNTS_TABLE",
-                "CUSTOMER_DATABRICKS_HOST",
-                "CUSTOMER_DATABRICKS_WAREHOUSE_ID",
+                "SCOPE_ACCOUNTS_QUERY",
+                "SCOPE_ACCOUNTS_SOURCE",
+                "SCOPE_ACCOUNTS_CATALOG",
+                "SCOPE_ACCOUNTS_SCHEMA",
+                "SCOPE_ACCOUNTS_TABLE",
+                "DATABRICKS_HOST",
+                "DATABRICKS_WAREHOUSE_ID",
             ],
             "open_questions": [
                 "Does the customer query guarantee that u.Email matches the Entra UPN used by planner OBO?",
@@ -1249,27 +1189,17 @@ def build_backend_investigation_matrix() -> list[dict[str, Any]]:
             ],
             "fallback_behavior": "none",
             "config_keys": [
-                "CUSTOMER_CONTACTS_QUERY",
-                "CUSTOMER_CONTACTS_SOURCE",
-                "CUSTOMER_CONTACTS_CATALOG",
-                "CUSTOMER_CONTACTS_SCHEMA",
-                "CUSTOMER_CONTACTS_TABLE",
-                "CUSTOMER_DATABRICKS_HOST",
-                "CUSTOMER_DATABRICKS_WAREHOUSE_ID",
+                "CONTACTS_QUERY",
+                "CONTACTS_SOURCE",
+                "CONTACTS_CATALOG",
+                "CONTACTS_SCHEMA",
+                "CONTACTS_TABLE",
+                "DATABRICKS_HOST",
+                "DATABRICKS_WAREHOUSE_ID",
             ],
             "open_questions": [
                 "What customer table or view should define the contact list?",
             ],
-        },
-        {
-            "tool": "lookup_rep",
-            "backend_source": "static configured rep mapping",
-            "auth_model": "none",
-            "required_inputs": ["rep_name"],
-            "required_fields": ["matches"],
-            "fallback_behavior": "returns no_match with available reps",
-            "config_keys": ["CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON"],
-            "open_questions": ["Should hosted rep lookup move to a dedicated customer source later?"],
         },
     ]
 
