@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+import yaml
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -377,3 +378,15 @@ printf '{"status":"ok"}'
     assert "https://planner.example.com/healthz" in curl_calls
     assert '{"status":"ok"}' in completed.stdout
     assert "authenticated chat validation skipped" in completed.stdout
+
+
+def test_ci_build_release_artifacts_allows_skipped_m365_package() -> None:
+    workflow_path = ROOT_DIR.parent / ".github" / "workflows" / "ci.yml"
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+
+    build_release = workflow["jobs"]["build-release-artifacts"]
+    condition = build_release["if"]
+
+    assert "always()" in condition
+    assert "needs.package-m365.result == 'skipped'" in condition
+    assert "needs.package-m365.result == 'success'" in condition
