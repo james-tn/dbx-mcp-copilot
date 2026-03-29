@@ -214,7 +214,15 @@ jobs:
 
   build-release-artifacts:
     name: Build Release Artifacts
-    if: github.event_name == 'push' && github.ref_name == 'integration' && needs.changes.outputs.deploy_relevant == 'true'
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      github.ref_name == 'integration' &&
+      needs.changes.outputs.deploy_relevant == 'true' &&
+      needs.python-tests.result == 'success' &&
+      needs.shell-validation.result == 'success' &&
+      needs.docker-build-smoke.result == 'success' &&
+      (needs.package-m365.result == 'success' || needs.package-m365.result == 'skipped')
     runs-on: ubuntu-latest
     needs:
       - changes
