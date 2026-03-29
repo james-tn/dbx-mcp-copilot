@@ -5,6 +5,17 @@
 This runbook is the recommended operator path for Azure and Microsoft 365
 deployment of the planner stack.
 
+This is the canonical step-by-step operator document for the repo.
+
+Document boundaries:
+
+- root [`README.md`](../README.md) is the repo entrypoint and doc map
+- [`mvp/infra/README.md`](infra/README.md) is the infra/script index
+- [`mvp/infra/github-actions-cicd-design.md`](infra/github-actions-cicd-design.md)
+  is the GitHub Actions and Azure OIDC setup guide
+- this file owns the human operator bootstrap, deploy, validation, and recovery
+  flow
+
 Default operator model:
 
 - Azure hosts the planner and wrapper on top of an existing Databricks
@@ -70,6 +81,13 @@ cp mvp/.env.inputs.example mvp/.env.inputs
 
 2. Fill the required blanks in the file you plan to use.
 
+Tracked templates versus local files:
+
+- `mvp/.env.inputs.example` and `mvp/.env.secure.inputs.example` are tracked
+  templates
+- `mvp/.env.inputs` and `mvp/.env.secure.inputs` are local operator-owned copies
+- `mvp/.env` and `mvp/.env.secure` are generated runtime files
+
 Secure mode:
 
 - `AZURE_TENANT_ID`
@@ -93,23 +111,26 @@ Open mode:
 If you are deploying against an existing production Databricks workspace with no
 workspace provisioning and no seed step, also fill these in the input env:
 
-- `CUSTOMER_DATABRICKS_HOST`
-- `CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID` when the Azure Databricks workspace
+- `DATABRICKS_HOST`
+- `DATABRICKS_AZURE_RESOURCE_ID` when the Azure Databricks workspace
   requires the workspace resource header
-- `CUSTOMER_DATABRICKS_WAREHOUSE_ID` if you want to pin a warehouse; otherwise
+- `DATABRICKS_WAREHOUSE_ID` if you want to pin a warehouse; otherwise
   leave it blank and let the planner resolve one dynamically
-- `CUSTOMER_TOP_OPPORTUNITIES_SOURCE`
-- `CUSTOMER_CONTACTS_SOURCE`
-- `CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH`
-  default: `fixtures/customer_rep_lookup_static_map.json`
+- `TOP_OPPORTUNITIES_SOURCE`
+- `CONTACTS_SOURCE`
 - optional when the customer `sf_vpower_bronze` tables are not on the workspace
   default catalog:
-  - `CUSTOMER_SCOPE_ACCOUNTS_CATALOG`
-  - `CUSTOMER_SALES_TEAM_MAPPING_CATALOG`
+  - `SCOPE_ACCOUNTS_CATALOG`
+  - `SALES_TEAM_MAPPING_CATALOG`
 
 In that default existing-workspace mode, the Azure bootstrap does not seed or
 mutate Databricks at all. Existing users, grants, warehouse access, and table
 permissions must already be present on the customer workspace.
+
+Prefer canonical names such as `DATABRICKS_HOST`, `TOP_OPPORTUNITIES_SOURCE`,
+`CONTACTS_SOURCE`, `SCOPE_ACCOUNTS_CATALOG`, and
+`SALES_TEAM_MAPPING_CATALOG`. Some scripts still tolerate legacy `CUSTOMER_*`
+aliases for migration, but they are no longer the preferred operator contract.
 
 3. Sign in to Azure:
 
@@ -289,12 +310,12 @@ Default existing-Databricks note:
 - the default secure customer path expects you to supply the existing Databricks
   connection values in the runtime env
 - the planner then connects directly to those existing sources:
-  - `CUSTOMER_TOP_OPPORTUNITIES_SOURCE=prod_catalog.data_science_account_iq_gold.account_iq_scores`
-  - `CUSTOMER_CONTACTS_SOURCE=prod_catalog.account_iq_gold.aiq_contact`
+  - `TOP_OPPORTUNITIES_SOURCE=prod_catalog.data_science_account_iq_gold.account_iq_scores`
+  - `CONTACTS_SOURCE=prod_catalog.account_iq_gold.aiq_contact`
 - Account Pulse and sales-team resolution now default to built-in customer
   Databricks queries against `sf_vpower_bronze`
 - if `sf_vpower_bronze` is not on the workspace default catalog, set
-  `CUSTOMER_SCOPE_ACCOUNTS_CATALOG` and `CUSTOMER_SALES_TEAM_MAPPING_CATALOG`
+  `SCOPE_ACCOUNTS_CATALOG` and `SALES_TEAM_MAPPING_CATALOG`
 - the bootstrap does not create workspace users, warehouse permissions, or Unity
   Catalog grants on that existing customer workspace
 
@@ -305,10 +326,10 @@ Optional mock Databricks note:
   to create AIQ-shaped mock tables plus `sf_vpower_bronze` territory/account
   tables derived from the customer workbook sample for parity testing
 - the mock seed path targets only the foundation `DATABRICKS_*` workspace
-  values and never falls back to `CUSTOMER_DATABRICKS_*`
+  values
 - when mock mode is enabled, the bootstrap rewires the planner's active
-  `CUSTOMER_*` Databricks settings to the seeded foundation workspace before
-  planner deployment
+  `DATABRICKS_*`, `TOP_OPPORTUNITIES_SOURCE`, and `CONTACTS_SOURCE` settings to
+  the seeded foundation workspace before planner deployment
 
 ## What The M365 Script Creates
 
@@ -619,21 +640,18 @@ For the hosted secure customer path:
 
 - use [`.env.secure.example`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure.example) as the only hosted env template
 - set the existing Databricks values in [`mvp/.env.secure.inputs`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure.inputs) before bootstrap, or in [`.env.secure`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure) before planner-only redeploys
-- set `CUSTOMER_DATABRICKS_HOST` at deployment time
-- set `CUSTOMER_DATABRICKS_WAREHOUSE_ID` only if you want to pin a specific SQL warehouse; blank is allowed
-- keep `CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID` when the target Azure Databricks workspace requires the workspace resource header, but do not treat it as mandatory
-- leave `CUSTOMER_DATABRICKS_OBO_SCOPE` at the default Azure Databricks delegated scope unless the customer explicitly requires a different resource
+- set `DATABRICKS_HOST` at deployment time
+- set `DATABRICKS_WAREHOUSE_ID` only if you want to pin a specific SQL warehouse; blank is allowed
+- keep `DATABRICKS_AZURE_RESOURCE_ID` when the target Azure Databricks workspace requires the workspace resource header, but do not treat it as mandatory
+- leave `DATABRICKS_OBO_SCOPE` at the default Azure Databricks delegated scope unless the customer explicitly requires a different resource
 - Next Move defaults to:
-  - `CUSTOMER_TOP_OPPORTUNITIES_SOURCE=prod_catalog.data_science_account_iq_gold.account_iq_scores`
-  - `CUSTOMER_CONTACTS_SOURCE=prod_catalog.account_iq_gold.aiq_contact`
+  - `TOP_OPPORTUNITIES_SOURCE=prod_catalog.data_science_account_iq_gold.account_iq_scores`
+  - `CONTACTS_SOURCE=prod_catalog.account_iq_gold.aiq_contact`
 - Account Pulse and sales-team resolution default to the built-in `sf_vpower_bronze`
   queries in planner code; no hosted static scope JSON is required
 - if the bronze tables require catalog qualification, set:
-  - `CUSTOMER_SCOPE_ACCOUNTS_CATALOG=<catalog>`
-  - `CUSTOMER_SALES_TEAM_MAPPING_CATALOG=<catalog>`
-- customer rep lookup defaults to:
-  - `CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH=fixtures/customer_rep_lookup_static_map.json`
-
+  - `SCOPE_ACCOUNTS_CATALOG=<catalog>`
+  - `SALES_TEAM_MAPPING_CATALOG=<catalog>`
 Validate the new customer query path directly by user email:
 
 ```bash
@@ -662,12 +680,42 @@ ENV_FILE=mvp/.env.secure bash mvp/infra/scripts/deploy-customer-stack.sh
 For local planner testing without Microsoft 365:
 
 ```bash
+ENV_FILE=mvp/.env bash mvp/infra/scripts/run-local-planner-api.sh
+```
+
+```bash
 ENV_FILE=mvp/.env bash mvp/infra/scripts/run-local-planner-chat.sh
 ```
 
 - the local chat app reuses the planner HTTP API and wrapper debug-auth helpers
 - use `.env`, not `.env.secure`, because the secure planner is expected to be
   private from local/operator access
+- set up the tenant-owned local debug public client once with:
+
+```bash
+ENV_FILE=mvp/.env bash mvp/infra/scripts/setup-local-debug-public-client.sh
+```
+
+- then acquire the local bearer token with:
+
+```bash
+python mvp/scripts/get-local-debug-token.py
+```
+- to run both services together for local development:
+
+```bash
+ENV_FILE=mvp/.env bash mvp/infra/scripts/run-local-dev-stack.sh
+```
+
+- a full local authenticated turn also requires:
+  - interactive consent for the local debug token audience through the local public client
+  - local network reachability to the configured Databricks workspace
+
+Optional low-level troubleshooting:
+
+- `python mvp/scripts/get-local-debug-token.py` still exists as a debugging
+  helper, but it is no longer the normal local chat workflow because the local
+  UI now obtains the token through browser sign-in
 
 For local simulated customer-scope scenario coverage without Microsoft 365 or live Databricks login:
 

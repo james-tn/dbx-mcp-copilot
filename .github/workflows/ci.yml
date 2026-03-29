@@ -6,11 +6,25 @@ on:
       - dev
       - integration
       - main
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.MD"
+      - "mvp/.env.example"
+      - "mvp/.env.secure.example"
+      - "mvp/.env.inputs.example"
+      - "mvp/.env.secure.inputs.example"
   push:
     branches:
       - dev
       - integration
       - main
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.MD"
+      - "mvp/.env.example"
+      - "mvp/.env.secure.example"
+      - "mvp/.env.inputs.example"
+      - "mvp/.env.secure.inputs.example"
 
 permissions:
   contents: read
