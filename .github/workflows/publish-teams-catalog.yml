@@ -77,7 +77,7 @@ jobs:
             bash mvp/scripts/publish-m365-app-package-graph.sh
           EOF
           cat "${{ runner.temp }}/teams-catalog-admin-summary.txt" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: teams-catalog-admin-bundle-${{ env.RELEASE_SHA }}
           path: |

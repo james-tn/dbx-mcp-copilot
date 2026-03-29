@@ -28,7 +28,7 @@ jobs:
       APP_VERSION: ${{ github.event.inputs.app_version || format('0.0.0-build.{0}', github.run_number) }}
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Build package
@@ -37,7 +37,7 @@ jobs:
         run: |
           touch "$ENV_FILE"
           bash mvp/scripts/build-m365-app-package.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: m365-package-${{ github.sha }}
           path: |
