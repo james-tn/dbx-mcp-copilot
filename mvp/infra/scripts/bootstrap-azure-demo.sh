@@ -342,14 +342,14 @@ PY
     # The secure mock bootstrap owns the internal workspace, so seeding must be
     # allowed to create the mock catalog on first run.
     upsert_env_value "AIQ_DEV_SKIP_CATALOG_CREATE" "false"
-    upsert_env_value "CUSTOMER_DATABRICKS_HOST" "${DATABRICKS_HOST:-}"
-    upsert_env_value "CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID" "${DATABRICKS_AZURE_RESOURCE_ID:-}"
-    upsert_env_value "CUSTOMER_DATABRICKS_OBO_SCOPE" "${DATABRICKS_OBO_SCOPE:-2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default}"
-    upsert_env_value "CUSTOMER_DATABRICKS_WAREHOUSE_ID" "${DATABRICKS_WAREHOUSE_ID:-}"
-    upsert_env_value "CUSTOMER_TOP_OPPORTUNITIES_SOURCE" "${aiq_dev_catalog}.data_science_account_iq_gold.account_iq_scores"
-    upsert_env_value "CUSTOMER_CONTACTS_SOURCE" "${aiq_dev_catalog}.account_iq_gold.aiq_contact"
-    upsert_env_value "CUSTOMER_SCOPE_ACCOUNTS_CATALOG" "${aiq_dev_catalog}"
-    upsert_env_value "CUSTOMER_SALES_TEAM_MAPPING_CATALOG" "${aiq_dev_catalog}"
+    upsert_env_value "DATABRICKS_HOST" "${DATABRICKS_HOST:-}"
+    upsert_env_value "DATABRICKS_AZURE_RESOURCE_ID" "${DATABRICKS_AZURE_RESOURCE_ID:-}"
+    upsert_env_value "DATABRICKS_OBO_SCOPE" "${DATABRICKS_OBO_SCOPE:-2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default}"
+    upsert_env_value "DATABRICKS_WAREHOUSE_ID" "${DATABRICKS_WAREHOUSE_ID:-}"
+    upsert_env_value "TOP_OPPORTUNITIES_SOURCE" "${aiq_dev_catalog}.data_science_account_iq_gold.account_iq_scores"
+    upsert_env_value "CONTACTS_SOURCE" "${aiq_dev_catalog}.account_iq_gold.aiq_contact"
+    upsert_env_value "SCOPE_ACCOUNTS_CATALOG" "${aiq_dev_catalog}"
+    upsert_env_value "SALES_TEAM_MAPPING_CATALOG" "${aiq_dev_catalog}"
   else
     upsert_env_value "MOCK_DATABRICKS_ENVIRONMENT" "false"
   fi

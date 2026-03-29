@@ -6,22 +6,128 @@ on:
       - dev
       - integration
       - main
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.MD"
+      - "mvp/.env.example"
+      - "mvp/.env.secure.example"
+      - "mvp/.env.inputs.example"
+      - "mvp/.env.secure.inputs.example"
   push:
     branches:
       - dev
       - integration
       - main
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.MD"
+      - "mvp/.env.example"
+      - "mvp/.env.secure.example"
+      - "mvp/.env.inputs.example"
+      - "mvp/.env.secure.inputs.example"
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Classify Changes
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.filter.outputs.docs_only }}
+      planner_runtime: ${{ steps.filter.outputs.planner_runtime }}
+      wrapper_runtime: ${{ steps.filter.outputs.wrapper_runtime }}
+      infra_runtime: ${{ steps.filter.outputs.infra_runtime }}
+      m365_package: ${{ steps.filter.outputs.m365_package }}
+      local_dev_only: ${{ steps.classify.outputs.local_dev_only }}
+      ci_relevant: ${{ steps.classify.outputs.ci_relevant }}
+      deploy_relevant: ${{ steps.classify.outputs.deploy_relevant }}
+      package_relevant: ${{ steps.classify.outputs.package_relevant }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            docs_only:
+              - '**/*.md'
+              - '**/*.MD'
+              - 'mvp/.env.example'
+              - 'mvp/.env.secure.example'
+              - 'mvp/.env.inputs.example'
+              - 'mvp/.env.secure.inputs.example'
+            planner_runtime:
+              - 'mvp/agents/**'
+              - 'mvp/agents/Dockerfile'
+            wrapper_runtime:
+              - 'mvp/m365_wrapper/**'
+              - 'mvp/m365_wrapper/Dockerfile'
+            infra_runtime:
+              - 'mvp/infra/bicep/**'
+              - 'mvp/infra/databricks/**'
+              - 'mvp/infra/scripts/bootstrap-*.sh'
+              - 'mvp/infra/scripts/build-and-deploy-*.sh'
+              - 'mvp/infra/scripts/ci-*.sh'
+              - 'mvp/infra/scripts/deploy-*.sh'
+              - 'mvp/infra/scripts/validate-*.sh'
+              - 'mvp/infra/tests/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/deploy-*.yml'
+              - '.github/workflows/bootstrap-foundation.yml'
+            m365_package:
+              - 'mvp/appPackage/**'
+              - 'mvp/scripts/build-m365-app-package.sh'
+              - '.github/workflows/build-m365-package.yml'
+              - '.github/workflows/publish-teams-catalog.yml'
+            local_dev_only:
+              - 'mvp/dev_ui/**'
+              - 'mvp/infra/scripts/run-local-*.sh'
+              - 'mvp/infra/scripts/setup-local-debug-public-client.sh'
+              - 'mvp/scripts/get-local-debug-token.py'
+      - id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          planner="${{ steps.filter.outputs.planner_runtime }}"
+          wrapper="${{ steps.filter.outputs.wrapper_runtime }}"
+          infra="${{ steps.filter.outputs.infra_runtime }}"
+          package="${{ steps.filter.outputs.m365_package }}"
+          local_only="${{ steps.filter.outputs.local_dev_only }}"
+
+          ci_relevant=false
+          deploy_relevant=false
+          package_relevant=false
+          local_dev_only=false
+
+          if [[ "$planner" == "true" || "$wrapper" == "true" || "$infra" == "true" || "$package" == "true" ]]; then
+            ci_relevant=true
+          fi
+          if [[ "$planner" == "true" || "$wrapper" == "true" || "$infra" == "true" ]]; then
+            deploy_relevant=true
+          fi
+          if [[ "$package" == "true" ]]; then
+            package_relevant=true
+          fi
+          if [[ "$local_only" == "true" && "$planner" != "true" && "$wrapper" != "true" && "$infra" != "true" && "$package" != "true" ]]; then
+            local_dev_only=true
+          fi
+
+          {
+            echo "ci_relevant=$ci_relevant"
+            echo "deploy_relevant=$deploy_relevant"
+            echo "package_relevant=$package_relevant"
+            echo "local_dev_only=$local_dev_only"
+          } >> "$GITHUB_OUTPUT"
+
   python-tests:
     name: Python Tests (${{ matrix.name }})
+    needs: changes
+    if: needs.changes.outputs.ci_relevant == 'true' || needs.changes.outputs.local_dev_only == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -44,6 +150,8 @@ jobs:
 
   shell-validation:
     name: Shell Validation
+    needs: changes
+    if: needs.changes.outputs.ci_relevant == 'true' || needs.changes.outputs.local_dev_only == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -64,6 +172,8 @@ jobs:
 
   docker-build-smoke:
     name: Docker Build Smoke
+    needs: changes
+    if: needs.changes.outputs.deploy_relevant == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -74,6 +184,8 @@ jobs:
 
   package-m365:
     name: Package M365 Artifact
+    needs: changes
+    if: needs.changes.outputs.package_relevant == 'true' || needs.changes.outputs.wrapper_runtime == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -102,9 +214,10 @@ jobs:
 
   build-release-artifacts:
     name: Build Release Artifacts
-    if: github.event_name == 'push' && github.ref_name == 'integration'
+    if: github.event_name == 'push' && github.ref_name == 'integration' && needs.changes.outputs.deploy_relevant == 'true'
     runs-on: ubuntu-latest
     needs:
+      - changes
       - python-tests
       - shell-validation
       - docker-build-smoke

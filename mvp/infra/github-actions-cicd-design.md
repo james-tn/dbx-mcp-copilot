@@ -1,700 +1,811 @@
-# GitHub Actions CI/CD Design
+# GitHub Actions CI/CD Setup Guide
 
 ## Purpose
 
-This document describes the recommended GitHub Actions CI/CD design for this
+This document is the step-by-step setup and operating guide for CI/CD in this
 repository.
+
+It is written for the repo as it exists today, not as a generic future-state
+proposal.
 
 It covers:
 
-- branch strategy
-- workflow layout
-- Azure OIDC authentication
-- artifact promotion
-- environment protection
-- multi-team collaboration
-- release sequencing when infrastructure changes are involved
+- the delivery model
+- the GitHub branch and environment strategy
+- Azure OIDC setup
+- GitHub Actions workflow setup
+- runtime secret and environment wiring
+- integration and production deployment flow
+- Teams package handling
+- how Dev, Infra, and M365 Admin teams should work together
+- how to handle normal app changes versus infra-affecting changes
+- how docs-only or env-template-only repo changes stay out of the normal CI/CD path
 
-This design is intentionally aligned to the current repository shape:
+## What This Repo Deploys
 
-- planner service and M365 wrapper are deployed independently
-- Azure runtime deployment is script-driven
-- Microsoft 365 app package publish is a separate admin-controlled concern
-- local and CI Python execution now use `uv`
+This repository has three distinct delivery surfaces:
 
-## Goals
+1. The planner service
+   - Azure Container App
+   - Databricks-backed runtime
+   - OpenAI-backed orchestration/runtime
 
-- make `dev` the main developer integration branch
-- make `integration` the first real deployment branch
-- make `main` the production branch
-- use GitHub OIDC for Azure deployment authentication
-- avoid long-lived Azure secrets in GitHub
-- build once and promote forward instead of rebuilding different artifacts per environment
-- keep Teams app catalog publish separate from normal Azure deploys
-- preserve separation of duties between Dev, Infra, and M365 Admin teams
+2. The M365 wrapper
+   - separate Azure Container App
+   - front-door integration point for the Microsoft 365 agent experience
 
-## Non-Goals
+3. The M365 package
+   - app package zip and manifest
+   - built in CI
+   - published separately through an admin-controlled path
 
-- full automation of Teams catalog publish by the same Azure OIDC identity
-- forcing every code change through infra or M365 approval
-- using committed `.env` files as the CI/CD system of record
+These should not be collapsed into one single privilege domain.
 
-## Repo Deployment Context
+## High-Level Design
 
-The repository already has clear operational boundaries:
+### Core Principles
 
-- planner image build + deploy
-- wrapper image build + deploy
-- customer-target deploy
-- foundation/bootstrap deploy
-- M365 app package build and publish
-- validation scripts for planner, Databricks, and customer query behavior
+- build once, promote forward
+- use GitHub OIDC for Azure authentication
+- keep runtime secrets out of the repo
+- keep Teams app catalog publish separate from Azure deployment
+- treat foundation/bootstrap as a privileged exception path
+- let app-only delivery stay fast
 
-The CI/CD design should preserve those boundaries instead of collapsing
-everything into one monolithic workflow.
+### Deployment Model
 
-## Target Branch Model
+- `feature/*` is where developers work
+- `dev` is the shared engineering branch
+- `integration` is the deployed secure-mock validation branch
+- `main` is the production branch
 
-### Branches
+The intended progression is:
 
-- `feature/*`
-  - developer feature branches
-  - opened as PRs into `dev`
+1. developer change lands in `dev`
+2. validated code is promoted to `integration`
+3. `integration` auto-deploys to secure-mock Azure
+4. validated release is promoted to `main`
+5. `main` deploys to production after environment approval
+6. Teams package publish stays manual and admin-controlled
+
+### Environment Model
+
+The repo is designed around these GitHub Environments:
+
+- `integration`
+- `production`
+- `teams-catalog-admin`
+- `bootstrap-foundation`
+
+The repo already contains workflows bound to those environments under
+[`.github/workflows`](/mnt/c/testing/veeam/revenue_intelligence/.github/workflows).
+
+## Implemented Workflow Catalog
+
+These workflows already exist in the repo:
+
+- [`ci.yml`](/mnt/c/testing/veeam/revenue_intelligence/.github/workflows/ci.yml)
+- [`deploy-integration.yml`](/mnt/c/testing/veeam/revenue_intelligence/.github/workflows/deploy-integration.yml)
+- [`deploy-production.yml`](/mnt/c/testing/veeam/revenue_intelligence/.github/workflows/deploy-production.yml)
+- [`build-m365-package.yml`](/mnt/c/testing/veeam/revenue_intelligence/.github/workflows/build-m365-package.yml)
+- [`publish-teams-catalog.yml`](/mnt/c/testing/veeam/revenue_intelligence/.github/workflows/publish-teams-catalog.yml)
+- [`bootstrap-foundation.yml`](/mnt/c/testing/veeam/revenue_intelligence/.github/workflows/bootstrap-foundation.yml)
+
+Supporting CI/CD scripts already exist under
+[`mvp/infra/scripts`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts).
+
+The most important CI/CD entrypoints are:
+
+- [`ci-render-runtime-env.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/ci-render-runtime-env.sh)
+- [`ci-deploy-stack.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/ci-deploy-stack.sh)
+- [`ci-validate-integration.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/ci-validate-integration.sh)
+- [`ci-download-release-artifact.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/ci-download-release-artifact.sh)
+- [`ci-write-release-metadata.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/ci-write-release-metadata.sh)
+
+## Step 1: Decide The Operating Model
+
+Before wiring anything, align on these fixed choices:
+
+- `integration` is a secure mock deployment environment
+- `production` is the secure customer-target deployment environment
+- normal releases deploy planner and wrapper automatically
+- Teams package publish is not part of the Azure deployment workflow
+- foundation/bootstrap is not part of normal application delivery
+
+If your teams agree on those rules first, the rest of the setup becomes much
+clearer.
+
+## Step 2: Configure Repository Branching
+
+Create or protect these branches:
+
 - `dev`
-  - shared engineering branch
-  - receives normal feature merges after CI passes
 - `integration`
-  - deployment branch for non-production Azure validation
-  - receives merges from `dev`
 - `main`
-  - production branch
-  - receives controlled merges from `integration`
 
-### Branch Intent
+Recommended usage:
 
-- `dev` answers: "does the code build and pass tests?"
-- `integration` answers: "does the code deploy and work in a real Azure environment?"
-- `main` answers: "is this version approved for production?"
+- developers branch from `dev`
+- promotion into `integration` happens from `dev`
+- promotion into `main` happens from `integration`
 
-## Target GitHub Environment Model
+Recommended protection rules:
 
-### Environments
-
-- `ci`
-  - optional logical environment for CI-only jobs
+- `dev`
+  - require pull request
+  - require CI success
+  - require at least one review from Dev team
 - `integration`
-  - non-production Azure deployment target
-- `production`
-  - production Azure deployment target
-- `teams-catalog-admin`
-  - separate manual environment for Teams app publish/install steps
-- `bootstrap-foundation`
-  - optional protected environment for rare privileged bootstrap runs
+  - require pull request
+  - require CI success
+  - restrict direct pushes
+  - optionally require Infra review when infra files changed
+- `main`
+  - require pull request from `integration`
+  - require CI success
+  - restrict direct pushes
+  - production deployment approval handled by GitHub Environment
 
-### Environment Protections
+## Step 3: Configure GitHub Environments
 
-- `integration`
-  - branch restriction: only `integration`
-  - optional reviewer requirement for infra-affecting changes
-- `production`
-  - branch restriction: only `main`
-  - required reviewers from Infra team
-- `teams-catalog-admin`
-  - manual workflow only
-  - required reviewers from M365 admin team
-- `bootstrap-foundation`
-  - manual workflow only
-  - required reviewers from Infra team
+Create these GitHub Environments in the repository settings:
 
-## Authentication And Secret Model
+### `integration`
 
-## Azure
+Use for secure-mock deployment.
 
-Use GitHub OIDC for Azure login.
+Recommended protections:
 
-Recommended setup:
+- restrict to branch `integration`
+- optional reviewers if you want a light gate
 
-- one Entra application or user-assigned identity for `integration`
-- one separate Entra application or user-assigned identity for `production`
-- each one has its own federated credential bound to:
-  - this repository
-  - the intended branch or environment
-  - the intended workflow scope
+Recommended variables:
 
-Recommended examples:
+- `AZURE_CLIENT_ID`
+- `AZURE_TENANT_ID`
+- `AZURE_SUBSCRIPTION_ID`
+- `AZURE_RESOURCE_GROUP`
+- `AZURE_LOCATION`
+- `ACR_NAME`
+- `ACA_ENVIRONMENT_NAME`
+- `PLANNER_ACA_APP_NAME`
+- `WRAPPER_ACA_APP_NAME`
+- `AZURE_OPENAI_ACCOUNT_NAME`
+- `AZURE_OPENAI_ENDPOINT`
+- `AZURE_OPENAI_DEPLOYMENT`
+- `PLANNER_API_CLIENT_ID`
+- `PLANNER_API_EXPECTED_AUDIENCE`
+- `PLANNER_API_SCOPE`
+- `BOT_APP_ID`
+- `BOT_SSO_APP_ID`
+- `BOT_SSO_RESOURCE`
+- `DATABRICKS_HOST`
+- `DATABRICKS_AZURE_RESOURCE_ID`
+- `DATABRICKS_OBO_SCOPE`
+- `DATABRICKS_WAREHOUSE_ID`
+- `TOP_OPPORTUNITIES_SOURCE`
+- `CONTACTS_SOURCE`
+- `SCOPE_ACCOUNTS_CATALOG`
+- `SALES_TEAM_MAPPING_CATALOG`
+- `WRAPPER_ENABLE_DEBUG_CHAT`
+- `WRAPPER_DEBUG_ALLOWED_UPNS`
+- `WRAPPER_DEBUG_EXPECTED_AUDIENCE`
+- `ACA_MIN_REPLICAS`
+- `ACA_MAX_REPLICAS`
+- `KEYVAULT_NAME`
+- `KEYVAULT_PLANNER_API_CLIENT_SECRET_NAME`
+- `KEYVAULT_BOT_APP_PASSWORD_NAME`
+- `KEYVAULT_PLANNER_API_BEARER_TOKEN_NAME`
+- `VALIDATE_USER_UPN`
+- `REQUIRE_AUTHENTICATED_E2E`
+- `ENABLE_WRAPPER_HEALTHCHECK`
+
+Recommended secrets when not sourcing directly from Key Vault:
+
+- `PLANNER_API_CLIENT_SECRET`
+- `BOT_APP_PASSWORD`
+- `PLANNER_API_BEARER_TOKEN`
+
+### `production`
+
+Use for secure customer-target production deployment.
+
+Recommended protections:
+
+- restrict to branch `main`
+- require Infra reviewers
+
+Use the same variable model as `integration`, but with production values only.
+
+Do not mix integration and production values in the same environment.
+
+### `teams-catalog-admin`
+
+Use only for the manual Teams package publish workflow.
+
+Recommended protections:
+
+- manual workflow only
+- required reviewers from M365 Admin team
+
+This environment should not carry Azure deployment credentials.
+
+### `bootstrap-foundation`
+
+Use only for foundation/bootstrap workflows.
+
+Recommended protections:
+
+- manual workflow only
+- required reviewers from Infra team
+
+This environment is intentionally privileged and should be used sparingly.
+
+## Step 4: Set Up Azure OIDC
+
+Use separate Azure trust paths for integration and production.
+
+Recommended identities:
 
 - `gh-dbx-mcp-copilot-integration`
 - `gh-dbx-mcp-copilot-production`
 
-### Azure Scope
+You can implement these as:
 
-Grant the integration identity only what it needs in the integration resource
-group or subscription slice.
+- Entra app registrations with federated credentials
+- or user-assigned managed identities fronted by federated credentials
 
-Grant the production identity only what it needs in the production resource
-group or subscription slice.
+### Integration OIDC Setup
 
-Do not use one broad Azure identity for all environments.
+For the integration identity:
 
-### Key Vault
+1. Create the Entra application or user-assigned identity.
+2. Add a federated credential for this GitHub repository.
+3. Scope it to the `integration` deployment path.
+4. Grant Azure RBAC only to the integration target scope.
+5. Put the resulting client ID into GitHub Environment `integration` as `AZURE_CLIENT_ID`.
 
-Keep sensitive runtime values in Azure Key Vault instead of GitHub repository
-secrets whenever possible.
+### Production OIDC Setup
 
-Typical values to source from Key Vault at workflow runtime:
+For the production identity:
+
+1. Create a separate Entra application or user-assigned identity.
+2. Add a federated credential for this repository.
+3. Scope it to the `main`/production deployment path.
+4. Grant RBAC only to the production target scope.
+5. Put the client ID into GitHub Environment `production` as `AZURE_CLIENT_ID`.
+
+### Minimum GitHub Workflow Permission
+
+The workflows already request:
+
+- `id-token: write`
+- `contents: read`
+
+That is required for `azure/login`.
+
+### RBAC Guidance
+
+Do not rely on deploy workflows to create role assignments dynamically.
+
+Best practice is:
+
+- pre-provision RBAC once
+- let routine deploys fail fast if RBAC is wrong
+- repair RBAC out-of-band through Infra change control
+
+## Step 5: Decide How Secrets Are Sourced
+
+This repo supports two practical models:
+
+### Model A: GitHub Environment secrets first
+
+Use this when:
+
+- GitHub-hosted runners cannot reach a private Key Vault
+- you want the simplest initial setup
+
+In this mode:
+
+- non-secret settings stay in GitHub Environment variables
+- secrets stay in GitHub Environment secrets
+- Azure OIDC is still used for deployment authentication
+
+### Model B: Key Vault first, GitHub secrets as fallback
+
+Use this when:
+
+- runners can reach Key Vault
+- you want runtime secret retrieval through Azure
+
+The deploy workflows already implement this pattern:
+
+- if a secret is already set in the environment, the workflow uses it
+- otherwise it fetches from Key Vault using `az keyvault secret show`
+
+### Recommended Secrets
+
+These are the main sensitive values in current runtime delivery:
 
 - planner confidential client secret
 - bot app password
-- any explicit API key fallback values
-- optional Databricks PAT values for special environments
+- optional planner API bearer token for authenticated E2E validation
+- optional API-key fallbacks where applicable
 
-GitHub environment variables can still hold non-secret settings such as:
+## Step 6: Understand Build-Once / Promote-Forward
 
-- Azure tenant ID
-- subscription ID
-- resource group
-- deployment mode
-- container app names
-- ACR name
-- expected base URLs
+This repo already supports artifact promotion through release metadata.
 
-### Hosted Runner Note
+### What CI Builds
 
-GitHub-hosted runners cannot read a private-only Key Vault unless the vault is
-reachable from the public runner network.
+On push to `integration`, [`ci.yml`](/mnt/c/testing/veeam/revenue_intelligence/.github/workflows/ci.yml):
 
-For this repo, that means:
+- runs Python test shards
+- validates shell scripts
+- smoke-builds both Docker images locally
+- builds the Teams package artifact
+- builds planner and wrapper images in ACR
+- emits release metadata
 
-- if the target Key Vault allows public access or the workflow runs on a
-  self-hosted runner inside the private network, runtime secrets can be read
-  directly from Key Vault
-- if the target Key Vault is private-endpoint-only and the workflow runs on a
-  GitHub-hosted runner, the practical path is GitHub Environment secrets with
-  Azure OIDC still used for Azure deployment auth
+### Release Metadata
 
-The workflows in this repo therefore support GitHub Environment secrets as the
-first path and Key Vault lookup as an optional fallback.
+Release metadata is written by
+[`ci-write-release-metadata.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/ci-write-release-metadata.sh).
 
-## Microsoft 365 Graph And Teams Publish
+It records:
 
-Treat Teams app catalog publish as a separate trust path from Azure resource
-deployment.
+- commit SHA
+- git ref
+- build timestamp
+- planner image ref and digest
+- wrapper image ref and digest
+- M365 package artifact name
+- deployment mode and profile metadata
 
-Reason:
+### Promotion Rule
 
-- Azure OIDC is the right model for Azure deploy
-- Teams app catalog publish is a Graph delegated-admin concern
-- the same Azure OIDC identity should not be expected to also satisfy Teams
-  catalog publish requirements
+- integration deploy consumes the release metadata artifact for that SHA
+- production deploy downloads the same release metadata artifact
+- production does not rebuild planner or wrapper images
+
+This is the most important safeguard in the flow.
+
+## Step 6A: Keep Docs-Only Changes Out Of CD
+
+This repo should not spend Azure build/deploy capacity on docs-only maintenance.
+
+The workflow triggers are therefore expected to ignore changes that only touch:
+
+- Markdown docs
+- tracked env templates and example inputs
+
+Practical effect:
+
+- editing `README.md` or other `*.md` files should not trigger CI or deploy
+  workflows by itself
+- editing `mvp/.env.example`, `mvp/.env.secure.example`,
+  `mvp/.env.inputs.example`, or `mvp/.env.secure.inputs.example` should also be
+  treated as documentation/template maintenance
+- any PR that also changes code, scripts, or workflow files still runs the
+  normal CI/CD path
+
+## Step 7: Understand The Runtime Env Rendering Model
+
+Do not use tracked `.env` files as the CI system of record.
+
+The CI/CD path renders ephemeral env files in the runner workspace using
+[`ci-render-runtime-env.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/ci-render-runtime-env.sh).
+
+That script combines:
+
+- the example env template
+- workflow environment variables
+- runtime secrets
+- release metadata
+
+It writes a temporary env file used only by the workflow run.
+
+This is the correct model for CI because it:
+
+- avoids mutating tracked env files
+- keeps runtime inputs explicit
+- allows promotion using the same artifact metadata
+
+## Step 8: Set Up The Integration Environment
+
+Integration is the first real deployment environment.
+
+Its purpose is to answer:
+
+"Does the merged code deploy and work in a real secure Azure environment?"
+
+### Integration Profile
+
+Use `secure-mock`.
 
 That means:
 
-- build the Teams package in standard CI
-- publish the Teams package in a separate manual admin workflow
-- require M365 admin approval before that workflow can access its environment
+- secure deployment shape
+- mock or seeded Databricks-backed data
+- no customer production data
+- stable known validation user
 
-## Artifact Strategy
+### What `deploy-integration.yml` Does
 
-## Principle
+The workflow:
 
-Build once, promote many.
+1. triggers on push to `integration`
+2. logs into Azure using OIDC
+3. downloads release metadata from CI
+4. fetches secrets from Key Vault when needed
+5. renders an ephemeral env file
+6. deploys planner and wrapper via
+   [`ci-deploy-stack.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/ci-deploy-stack.sh)
+7. runs deployed validations via
+   [`ci-validate-integration.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/ci-validate-integration.sh)
+8. uploads redacted deployment summary artifacts
 
-Do not rebuild planner and wrapper images separately in integration and
-production if the intent is to promote the same tested release.
+### Integration Validation Checklist
 
-## Recommended Artifacts
-
-Each successful CI build should produce:
-
-- planner image reference or immutable digest
-- wrapper image reference or immutable digest
-- M365 app package zip
-- release metadata artifact, for example:
-  - commit SHA
-  - branch
-  - build timestamp
-  - planner image digest
-  - wrapper image digest
-  - package artifact path
-
-## Promotion Rule
-
-- `integration` deploy consumes the build artifact created from the merged code
-- `production` deploy reuses the same exact image references or digests after
-  approval
-
-This is better than rebuilding on `main`, because rebuilds can drift from what
-was validated in `integration`.
-
-## Env File Strategy In CI/CD
-
-The current operator scripts update runtime `.env` files with generated image
-tags and discovered values. That behavior is useful for human-operated
-deployment, but CI should not rely on committing `.env` mutations back into the
-repo.
-
-Recommended CI behavior:
-
-- render an ephemeral runtime env file inside the GitHub runner workspace
-- populate it from:
-  - GitHub environment variables
-  - Azure Key Vault secrets
-  - artifact metadata
-- pass that ephemeral env file into deploy and validation scripts
-- never commit CI-generated runtime env files
-
-## Workflow Catalog
-
-## 1. `ci.yml`
-
-### Trigger
-
-- pull requests to `dev`, `integration`, and `main`
-- pushes to `dev`
-
-### Purpose
-
-Validate code quality and buildability without deploying to Azure.
-
-### Jobs
-
-- `python-tests`
-  - `uv sync --project mvp --group dev`
-  - run tests under:
-    - `mvp/infra/tests`
-    - `mvp/m365_wrapper/tests`
-    - `mvp/dev_ui/tests`
-    - `mvp/agents/tests`
-- `shell-validation`
-  - run `bash -n` on `mvp/infra/scripts/*.sh` and selected `mvp/scripts/*.sh`
-- `docker-build-smoke`
-  - build planner Dockerfile
-  - build wrapper Dockerfile
-- `package-m365`
-  - build the Teams package zip artifact
-
-### Path Filtering
-
-Use path filters so expensive jobs run only when needed.
-
-Example:
-
-- planner jobs on changes under `mvp/agents/**`, `mvp/shared/**`, `mvp/infra/**`
-- wrapper jobs on changes under `mvp/m365_wrapper/**`, `mvp/shared/**`
-- package jobs on changes under `mvp/appPackage/**`, `mvp/scripts/build-m365-app-package.sh`
-
-## 2. `deploy-integration.yml`
-
-### Trigger
-
-- push to `integration`
-
-### Purpose
-
-Deploy the validated build to a non-production Azure environment automatically.
-
-### Authentication
-
-- GitHub OIDC to Azure
-- protected `integration` environment
-
-### Inputs
-
-- artifact metadata from CI
-- GitHub environment variables
-- Key Vault secrets
-
-### Recommended Steps
-
-1. download the build artifact metadata
-2. log into Azure with OIDC
-3. fetch required secrets from Key Vault
-4. render an ephemeral env file for integration
-5. deploy planner
-6. deploy wrapper
-7. run integration validations
-8. publish deployment summary as workflow artifact
-
-### Integration Validations
-
-Run a small but meaningful deployed validation set, for example:
+The integration environment should validate:
 
 - planner health
-- planner session/message E2E
-- customer vPower query validation for a known test user
-- optional wrapper health validation
+- wrapper health when enabled
+- authenticated planner E2E when required
+- customer vPower query path for `VALIDATE_USER_UPN`
+- secure deployment shape compatibility
 
-The integration environment should be the place where seeded or mockable
-Databricks-backed behavior is proven continuously.
+## Step 9: Set Up The Production Environment
 
-## 3. `deploy-production.yml`
+Production is the customer-target secure runtime environment.
 
-### Trigger
+Its purpose is to answer:
 
-- push to `main`
-- optional `workflow_dispatch`
-
-### Purpose
-
-Promote the already-tested build to production.
-
-### Authentication
-
-- GitHub OIDC to Azure
-- protected `production` environment
-- required Infra approval
-
-### Recommended Steps
-
-1. resolve the exact artifact/image refs previously validated in integration
-2. log into Azure with production OIDC identity
-3. fetch production secrets from Key Vault
-4. render an ephemeral production env file
-5. deploy planner
-6. deploy wrapper
-7. run post-deploy smoke validation
-8. record release metadata
+"Can we safely promote the already-validated release into production?"
 
 ### Production Guardrails
 
-- no rebuilds in this workflow
-- no automatic infra bootstrap
+- no rebuilds
+- no bootstrap
+- no seed
+- no routine RBAC mutation
 - no automatic Teams publish
 
-## 4. `bootstrap-foundation.yml`
+### What `deploy-production.yml` Does
 
-### Trigger
+The workflow:
 
-- `workflow_dispatch` only
+1. triggers on push to `main` or manual dispatch
+2. resolves the release SHA to promote
+3. logs into Azure using production OIDC
+4. downloads the release metadata artifact for that SHA
+5. fetches secrets from Key Vault when needed
+6. renders an ephemeral production env file
+7. deploys planner and wrapper
+8. runs smoke validation
+9. writes production deployment summary artifacts
 
-### Purpose
+### Production Validation Checklist
 
-Handle rare privileged infrastructure changes:
+At minimum validate:
 
-- new Azure resources
-- new foundation networking
-- new OIDC prerequisites
-- new bootstrap-time app registration setup
+- planner service health
+- wrapper health if exposed
+- customer vPower query validation for a known allowed user if appropriate
 
-### Why Separate
+## Step 10: Keep Teams Package Publish Separate
 
-Bootstrap has a different blast radius from normal app delivery. It may involve:
+Teams package build and Teams catalog publish are intentionally separate.
 
-- foundation resources
-- role assignments
-- managed identities
-- networking
+### Build Phase
+
+[`build-m365-package.yml`](/mnt/c/testing/veeam/revenue_intelligence/.github/workflows/build-m365-package.yml):
+
+- builds the M365 package artifact
+- uploads the zip and manifest
+- does not publish to the tenant
+
+### Publish Phase
+
+[`publish-teams-catalog.yml`](/mnt/c/testing/veeam/revenue_intelligence/.github/workflows/publish-teams-catalog.yml):
+
+- is manual only
+- uses environment `teams-catalog-admin`
+- downloads the selected package artifact
+- prepares an admin handoff summary
+- stops before pretending Azure deployment auth can do tenant admin work
+
+This separation is a feature, not a limitation.
+
+It keeps Azure deployment privilege and Teams admin privilege from being mixed.
+
+## Step 11: Keep Foundation Bootstrap Separate
+
+[`bootstrap-foundation.yml`](/mnt/c/testing/veeam/revenue_intelligence/.github/workflows/bootstrap-foundation.yml)
+exists for privileged foundation setup, not for normal app delivery.
+
+Use it only when needed for things like:
+
+- new Azure foundation resources
 - initial environment creation
+- rare networking or identity bootstrap
+- seeded mock environment creation
 
-That should not run on every merge.
+Normal app delivery should not run bootstrap.
 
-## 5. `build-m365-package.yml`
+## Step 12: Understand What Counts As “App-Only” Versus “Infra”
 
-### Trigger
+This is where teams usually get confused.
 
-- changes to manifest/package inputs
-- release tags
-- optional `workflow_dispatch`
-
-### Purpose
-
-Build the M365 package zip and store it as a reusable artifact.
-
-### Important Rule
-
-This workflow builds the package artifact only. It does not publish it to the
-tenant app catalog.
-
-## 6. `publish-teams-catalog.yml`
-
-### Trigger
-
-- `workflow_dispatch` only
-
-### Purpose
-
-Allow the M365 admin team to publish or update the Teams/M365 app package after
-backend runtime validation is already complete.
-
-### Protection
-
-- protected `teams-catalog-admin` environment
-- required M365 admin reviewers
-
-### Recommended Behavior
-
-1. download the approved app package artifact
-2. show release metadata and target wrapper endpoint
-3. perform the publish/update path
-4. optionally perform install-for-user or install-for-test-tenant steps
-5. record the Graph response artifact
-
-### Operational Choice
-
-There are two acceptable operating modes:
-
-- manual-assisted
-  - workflow prepares everything, but admin runs the final Graph publish step
-- admin-automated
-  - workflow runs on an admin-controlled runner or admin-controlled delegated
-    auth setup
-
-For this repo, manual-assisted is the safer first version.
-
-## Recommended Release Paths
-
-## Class A: App-Only Change
+### App-only change
 
 Examples:
 
 - prompt changes
 - planner behavior changes
-- wrapper logic changes
+- wrapper behavior changes
+- bug fixes
 - tests
-- local dev improvements
+- local dev changes
 
-### Sequence
+Required action:
 
-1. Dev implements the change on `feature/*`
+- rebuild affected container image
+- redeploy affected service
+
+Not required:
+
+- full bootstrap
+- foundation reprovisioning
+- Teams publish unless package content changed
+
+### App plus runtime/deploy-contract change
+
+Examples:
+
+- new environment variable
+- changed runtime secret name
+- new deploy script expectation
+- new validation requirement
+- new container app setting
+
+Required action:
+
+- integration deploy validation
+- likely production redeploy
+- infra review recommended
+
+### Infra/foundation change
+
+Examples:
+
+- new Azure resources
+- RBAC model changes
+- private networking changes
+- new managed identity
+- foundational auth changes
+
+Required action:
+
+- Infra involvement from design time
+- likely bootstrap/foundation workflow
+- integration validation before production
+
+### M365 publish change
+
+Examples:
+
+- manifest update
+- bot endpoint or catalog metadata change
+- changed app branding or permissions
+
+Required action:
+
+- build package artifact
+- publish through admin workflow
+- do this after runtime is healthy
+
+## Team Collaboration Model
+
+This repo works best with three teams:
+
+- Dev
+- Infra
+- M365 Admin
+
+### Dev Team Owns
+
+- application code
+- prompts
+- planner logic
+- wrapper logic
+- tests
+- most normal feature delivery
+
+### Infra Team Owns
+
+- Azure OIDC identities
+- RBAC
+- Key Vault
+- environment configuration
+- production approval gates
+- privileged bootstrap/foundation changes
+
+### M365 Admin Team Owns
+
+- Teams app catalog publish
+- tenant-level app visibility
+- install/update policy where needed
+
+## Recommended Collaboration Sequences
+
+### Sequence A: App-only change
+
+1. Dev implements on `feature/*`
 2. PR into `dev`
 3. CI passes
 4. merge to `dev`
-5. PR or merge from `dev` to `integration`
+5. promote to `integration`
 6. integration deploy runs automatically
-7. if good, PR from `integration` to `main`
-8. Infra approves production deploy gate
+7. if successful, promote to `main`
+8. Infra approves production environment gate
 9. production deploy runs
-10. if the Teams package did not change, M365 admin is not involved
+10. M365 Admin is involved only if package publish is required
+
+### Sequence B: App plus infra-affecting change
+
+1. Dev and Infra align during design
+2. Dev implements code and required deployment/script changes
+3. Infra reviews before `integration`
+4. CI passes
+5. promote to `integration`
+6. integration deploy proves the full runtime
+7. if foundation change is needed, run `bootstrap-foundation.yml` deliberately
+8. promote to `main`
+9. Infra approves production deployment
+
+### Sequence C: App plus infra plus M365 publish change
+
+1. Dev and Infra align first
+2. runtime deploy path is validated before package publish
+3. integration runtime deploy completes
+4. production runtime deploy completes
+5. M365 Admin runs `publish-teams-catalog.yml`
+6. admin validates catalog visibility/install behavior
+
+### Important Rule
 
-## Class B: App + Infra Change
+When runtime behavior and Teams package both change, runtime goes first.
 
-Examples:
+Do not use Teams publish as the first validation step for a backend release.
 
-- new Container App setting
-- new managed identity use
-- new Key Vault secret
-- new Databricks resource dependency
-- new infra module or Azure resource
+## End-to-End Setup Checklist
+
+Use this checklist to stand up CI/CD from scratch.
+
+### GitHub
+
+1. Create protected branches:
+   - `dev`
+   - `integration`
+   - `main`
+2. Create GitHub Environments:
+   - `integration`
+   - `production`
+   - `teams-catalog-admin`
+   - `bootstrap-foundation`
+3. Add environment variables for each target environment.
+4. Add secrets directly in GitHub only if Key Vault lookup is not available.
+5. Enable required reviewers on `production` and `teams-catalog-admin`.
+
+### Azure
+
+1. Create the integration OIDC identity.
+2. Create the production OIDC identity.
+3. Add federated credentials for this repo.
+4. Grant integration RBAC only to integration scope.
+5. Grant production RBAC only to production scope.
+6. Create or assign Key Vault access where needed.
+7. Ensure ACR permissions exist for build and deploy.
+8. Ensure Container Apps permissions exist for deploy/update.
+
+### Runtime Environments
+
+1. Stand up secure-mock integration environment.
+2. Confirm a valid `VALIDATE_USER_UPN` exists there.
+3. Confirm Databricks sources and warehouse are reachable.
+4. Stand up production target environment.
+5. Confirm production variables match real runtime values.
+
+### Teams Admin Path
+
+1. Confirm package build workflow works.
+2. Confirm `publish-teams-catalog.yml` can download package artifacts.
+3. Confirm M365 Admin team owns the final publish/install path.
+
+## Recommended First Simulation Drill
+
+After setup, run one controlled drill.
+
+### Drill Steps
+
+1. Create a small safe change on `feature/*`.
+2. Open PR into `dev`.
+3. Confirm `ci.yml` passes.
+4. Merge into `dev`.
+5. Promote into `integration`.
+6. Confirm:
+   - release metadata artifact exists
+   - integration OIDC login succeeds
+   - env rendering succeeds
+   - planner deploy succeeds
+   - wrapper deploy succeeds
+   - integration validations pass
+7. Promote into `main`.
+8. Confirm:
+   - production workflow downloads the same release metadata
+   - production does not rebuild images
+   - production deploy succeeds after approval
+9. Optionally run `publish-teams-catalog.yml` to prepare admin handoff.
+
+That drill proves the whole chain before you depend on it for real releases.
+
+## Runbook For Ongoing Releases
 
-### Sequence
+### Normal application release
 
-1. Dev and Infra align during design before code is finalized
-2. Dev implements app code and IaC changes
-3. Infra reviews the PR for deployment impact
-4. CI passes on `dev`
-5. merge to `integration`
-6. bootstrap or deploy workflow runs depending on change type
-7. integration validation proves both infra and app behavior
-8. PR from `integration` to `main`
-9. Infra approves production environment deployment
-10. production deploy runs
-11. M365 admin participates only if app publish is also required
+1. merge feature work into `dev`
+2. let CI validate
+3. promote `dev` to `integration`
+4. let integration deploy validate runtime
+5. promote `integration` to `main`
+6. approve production deployment
+7. optionally publish Teams package if needed
 
-## Class C: App + Infra + M365 Publish Change
+### Emergency production redeploy
 
-Examples:
+Use [`deploy-production.yml`](/mnt/c/testing/veeam/revenue_intelligence/.github/workflows/deploy-production.yml)
+with `workflow_dispatch` and `release_sha`.
 
-- auth surface changes that affect Teams app package
-- manifest changes
-- bot app or SSO metadata changes
-- endpoint or domain changes exposed through the app package
+This should redeploy an already-built release, not create a new one.
 
-### Sequence
+### Foundation change
 
-1. Dev and Infra align on runtime and infrastructure impact
-2. Dev implements code and package changes
-3. Infra reviews infra/auth implications
-4. CI passes on `dev`
-5. merge to `integration`
-6. integration deploy validates runtime first
-7. PR from `integration` to `main`
-8. production runtime deploy completes
-9. M365 admin runs `publish-teams-catalog.yml`
-10. admin validates installation and catalog visibility
+Use [`bootstrap-foundation.yml`](/mnt/c/testing/veeam/revenue_intelligence/.github/workflows/bootstrap-foundation.yml)
+deliberately and document why the privileged path was needed.
 
-### Key Rule
+## Practical Notes For This Repo
 
-Never make Teams catalog publish the first deployment step for a release that
-also changes runtime behavior. Publish only after backend runtime is healthy.
+- CI currently builds release artifacts only on push to `integration`
+- integration deploy currently consumes `release-metadata-${sha}`
+- production deploy resolves the promoted release SHA and downloads the same
+  metadata artifact
+- CI and deploy workflows should ignore docs-only and env-template-only changes
+- env rendering supports canonical `DATABRICKS_*`, `TOP_OPPORTUNITIES_*`,
+  `CONTACTS_*`, `SCOPE_ACCOUNTS_*`, and `SALES_TEAM_MAPPING_*` names, while
+  still tolerating legacy aliases during migration
+- Teams publish remains intentionally manual-admin
 
-## Team Responsibilities
+## Suggested Follow-Up Improvements
 
-## Dev Team
+These are good next steps, but they are not required to make the current CI/CD
+system operational:
 
-Owns:
+- add path-based job filtering to reduce CI cost
+- add a change classifier that distinguishes app-only versus infra-affecting PRs
+- add automated rollback guidance in production summary artifacts
+- add a formal self-hosted runner strategy if private-only Key Vault access is
+  required
 
-- planner code
-- wrapper code
-- tests
-- package content
-- non-privileged deployment script changes
-- release notes for functional behavior
+## Bottom Line
 
-Dev is required on:
+The right operating model for this repo is:
 
-- all feature PRs
-- app-level bug fixes
-- package changes
-
-## Infra Team
-
-Owns:
-
-- Azure IaC
-- GitHub OIDC setup
-- Azure RBAC model
-- Key Vault integration
-- Container Apps environment settings
-- private networking
-- Databricks platform integration model
-- production deployment approvals
-
-Infra is required on:
-
-- infra-affecting PRs
-- production environment approval
-- bootstrap/foundation changes
-
-## M365 Admin Team
-
-Owns:
-
-- Teams catalog publish
-- install policy and app availability
-- Entra/M365 app publishing governance
-- any delegated-admin publish path
-
-M365 admin is required on:
-
-- app publish/update
-- package approval for tenant exposure
-- changes that affect app registration/publish policy
-
-## Collaboration Model
-
-### Work In Parallel
-
-Dev and Infra should work in parallel at design time when a change clearly needs
-new infrastructure.
-
-That is better than Dev finishing a feature first and only then discovering:
-
-- missing identity permissions
-- missing secrets
-- missing network path
-- missing resource provisioning
-
-### Work In Sequence At Control Points
-
-The teams should converge only at these control points:
-
-1. PR review
-2. integration deployment
-3. production deployment
-4. Teams catalog publish
-
-That keeps collaboration intentional instead of making every change a three-team
-serial handoff.
-
-## Required PR Metadata For Infra-Affecting Changes
-
-Every PR that changes deployment behavior should include a short deployment
-impact note.
-
-Recommended template:
-
-- change class: `app-only`, `app+infra`, or `app+infra+m365`
-- new Azure resources: yes/no
-- new secrets: yes/no
-- new RBAC: yes/no
-- new environment variables: list
-- bootstrap required: yes/no
-- Teams republish required: yes/no
-- rollback method: short description
-
-## Best Practices For This Repo
-
-## 1. Separate Normal CD From Bootstrap
-
-Normal application delivery should not invoke full bootstrap on every merge.
-
-Use:
-
-- deploy workflows for routine planner/wrapper promotion
-- bootstrap workflows only for foundational infra changes
-
-## 2. Prefer Immutable Image Promotion
-
-Promote the same planner and wrapper artifacts from integration to production.
-
-## 3. Keep Role Assignment Out Of Routine CD Where Possible
-
-Pre-provision stable RBAC instead of relying on normal deploy workflows to
-create role assignments dynamically.
-
-## 4. Keep Teams Publish Independent
-
-Do not block normal Azure deployment on Teams publish unless the release
-actually changes the published app surface.
-
-## 5. Make Integration Real
-
-The integration environment should be stable enough to prove:
-
-- planner deploy works
-- wrapper deploy works
-- Databricks query path works
-- auth path works for at least one known integration identity
-
-## 6. Preserve Human Approval At The Right Boundaries
-
-Use automation for repetition.
-
-Use human approval for:
-
-- production environment promotion
-- foundation/bootstrap changes
-- tenant app catalog publish
-
-## Suggested Initial Implementation Order
-
-### Phase 1
-
-- add `ci.yml`
-- add `build-m365-package.yml`
-- add branch protections
-
-### Phase 2
-
-- add Azure OIDC identities for integration and production
-- add `deploy-integration.yml`
-- add `deploy-production.yml`
-- store secrets in Key Vault and fetch them during workflow execution
-
-### Phase 3
-
-- add `bootstrap-foundation.yml`
-- add `publish-teams-catalog.yml`
-- add deployment metadata artifacts and release summaries
-
-### Phase 4
-
-- refine path-based workflow routing
-- add rollback workflow or rollback runbook
-- add release dashboards or change summaries
-
-## Decision Summary
-
-The recommended operating model for this repo is:
-
-- CI on `dev`
-- automatic Azure CD on `integration`
-- approved Azure CD on `main`
-- separate manual admin workflow for Teams catalog publish
-- OIDC for Azure
-- Key Vault for secrets
-- immutable artifact promotion across environments
-- Dev, Infra, and M365 Admin collaboration only at clear control points
-
-This gives you speed for normal development, proper control for infrastructure
-changes, and a clean separation of duties for M365 publish operations.
+- CI validates every branch promotion
+- `integration` is the first real deployed proof point
+- `main` promotes the already-tested release
+- Azure deployment uses OIDC
+- Teams publish is separate
+- foundation/bootstrap stays privileged and uncommon
+- Dev, Infra, and M365 Admin collaborate in sequence rather than sharing one
+  oversized credential path
