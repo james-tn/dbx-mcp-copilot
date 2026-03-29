@@ -13,7 +13,10 @@ Canonical current docs:
 - Operator runbook: [mvp/mvp-setup-and-deployment-runbook.md](mvp/mvp-setup-and-deployment-runbook.md)
 - Runtime architecture: [mvp/daily-account-planner-architecture.md](mvp/daily-account-planner-architecture.md)
 - Infra/script index: [mvp/infra/README.md](mvp/infra/README.md)
-- GitHub Actions CI/CD setup: [mvp/infra/github-actions-cicd-design.md](mvp/infra/github-actions-cicd-design.md)
+- GitHub Actions CI/CD overview: [mvp/infra/cicd-overview.md](mvp/infra/cicd-overview.md)
+- GitHub Actions CI/CD setup guide: [mvp/infra/cicd-setup-guide.md](mvp/infra/cicd-setup-guide.md)
+- GitHub Actions CI/CD validation and operations: [mvp/infra/cicd-validation-and-operations.md](mvp/infra/cicd-validation-and-operations.md)
+- CI/CD doc index: [mvp/infra/github-actions-cicd-design.md](mvp/infra/github-actions-cicd-design.md)
 
 Reference or historical docs:
 
