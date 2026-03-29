@@ -15,6 +15,7 @@ on:
 permissions:
   contents: read
   actions: read
+  pull-requests: read
   id-token: write
 
 concurrency:
@@ -22,8 +23,49 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Classify Integration Changes
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_relevant: ${{ steps.classify.outputs.deploy_relevant }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            planner_runtime:
+              - 'mvp/agents/**'
+              - 'mvp/agents/Dockerfile'
+            wrapper_runtime:
+              - 'mvp/m365_wrapper/**'
+              - 'mvp/m365_wrapper/Dockerfile'
+            infra_runtime:
+              - 'mvp/infra/bicep/**'
+              - 'mvp/infra/databricks/**'
+              - 'mvp/infra/scripts/bootstrap-*.sh'
+              - 'mvp/infra/scripts/build-and-deploy-*.sh'
+              - 'mvp/infra/scripts/ci-*.sh'
+              - 'mvp/infra/scripts/deploy-*.sh'
+              - 'mvp/infra/scripts/validate-*.sh'
+              - 'mvp/infra/tests/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/deploy-*.yml'
+              - '.github/workflows/bootstrap-foundation.yml'
+      - id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.filter.outputs.planner_runtime }}" == "true" || "${{ steps.filter.outputs.wrapper_runtime }}" == "true" || "${{ steps.filter.outputs.infra_runtime }}" == "true" ]]; then
+            echo "deploy_relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy_relevant=false" >> "$GITHUB_OUTPUT"
+          fi
+
   deploy:
     name: Deploy Secure Mock Integration
+    needs: changes
+    if: needs.changes.outputs.deploy_relevant == 'true'
     runs-on: ubuntu-latest
     environment: integration
     env:
