@@ -659,6 +659,11 @@ ENV_FILE=mvp/.env.secure VALIDATE_USER_UPN=<seller-upn> \
   bash mvp/infra/scripts/validate-customer-vpower-query.sh
 ```
 
+- use a real seller UPN/email that should resolve in the target Databricks
+  workspace
+- this is a direct validation helper, not a required step for normal runtime
+  deployment
+
 Routine planner-only code updates should leave the deployed wrapper intact:
 
 ```bash

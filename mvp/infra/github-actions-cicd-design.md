@@ -651,8 +651,9 @@ Typical secrets:
 
 - `PLANNER_API_CLIENT_SECRET`
 - `BOT_APP_PASSWORD`
-- `PLANNER_API_BEARER_TOKEN`
-- optional registry password or API-key fallback values
+- optional `PLANNER_API_BEARER_TOKEN`
+- optional API-key fallback values when the customer intentionally uses an
+  open-mode or other non-hosted path
 
 ## Teams/M365 Publish Auth
 
@@ -1070,23 +1071,29 @@ the minimum meaningful production setup surface is:
 
 ### Optional Production Secrets
 
-- `CONTAINER_REGISTRY_PASSWORD`
-  - only when the registry model requires it
 - `PLANNER_API_BEARER_TOKEN`
-  - optional, only for richer automated smoke validation
+  - optional, advanced validation only
+  - not a normal long-lived secret
+  - only use this if the customer has a separate pre-run process that mints a
+    fresh delegated Entra token for `PLANNER_API_SCOPE`
+  - most customers should leave this unset and allow the workflow to perform
+    health-only validation instead of authenticated chat smoke tests
 
 ### Optional Production Variables
 
 - `VALIDATE_USER_UPN`
+  - seller email/UPN used by the direct `sf_vpower_bronze` validation query
   - only needed when the customer wants automated direct validation of the
     vPower query path in CI/CD
+  - this should be a known seller who is expected to resolve to territory and
+    scoped accounts in the target Databricks workspace
 - `ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION`
   - optional validation flag
+  - set this to `true` only on runners that can reach the target Databricks
+    workspace directly
 - `WRAPPER_ENABLE_DEBUG_CHAT`
 - `WRAPPER_DEBUG_ALLOWED_UPNS`
 - `WRAPPER_DEBUG_EXPECTED_AUDIENCE`
-- `CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH`
-  - legacy/optional
 
 ## 5B. What Customers Do Not Need To Provide Manually
 
@@ -1339,17 +1346,6 @@ For customer teams copying this repo, the usual production path is:
   - `CUSTOMER_SCOPE_ACCOUNTS_CATALOG`
   - `CUSTOMER_SALES_TEAM_MAPPING_CATALOG`
 
-## E. Rep Lookup Input
-
-The repo still exposes:
-
-- `CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH`
-
-Treat it as optional and legacy-oriented unless your customer explicitly still
-wants the static rep-name lookup behavior.
-
-It is not part of the primary signed-in-user scope path.
-
 ## F. Values That CI/CD Should Not Carry Forward From Old `.env.secure`
 
 Do not treat these as GitHub-managed production inputs:
@@ -1432,13 +1428,14 @@ Treat the last two as validation-only knobs, not core runtime deployment inputs.
 
 - planner client secret
 - bot password
-- planner bearer token if the integration validation requires it
+- optional planner bearer token only when the customer intentionally adds
+  authenticated chat smoke validation with a freshly minted delegated token
 
 Typical integration secret keys in this repo:
 
 - `PLANNER_API_CLIENT_SECRET`
 - `BOT_APP_PASSWORD`
-- `PLANNER_API_BEARER_TOKEN`
+- optional `PLANNER_API_BEARER_TOKEN`
 
 ### Production Variables
 
@@ -1480,23 +1477,35 @@ Typical production variable keys in this repo:
 - `CUSTOMER_SCOPE_ACCOUNTS_CATALOG`
 - `CUSTOMER_SALES_TEAM_MAPPING_CATALOG`
 - `VALIDATE_USER_UPN`
+- `ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION`
 
-Treat `VALIDATE_USER_UPN` as optional validation-only configuration. It is not
-required for normal production deployment.
+Treat `VALIDATE_USER_UPN` and
+`ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION` as validation-only configuration. They
+are not required for normal production deployment. Use them only when:
+
+- the GitHub runner can reach the target Databricks workspace directly
+- the customer wants CI/CD to prove the email-to-territory/email-to-scope query
+  path during deployment
+- `VALIDATE_USER_UPN` is set to a real seller UPN/email that should return
+  mapped territory data in that workspace
 
 ### Production Secrets
 
 - planner client secret
 - bot password
-- optional registry password if the runtime needs it
-- planner bearer token if required for smoke validation
+- optional planner bearer token only when the customer intentionally adds
+  authenticated chat smoke validation with a freshly minted delegated token
 
 Typical production secret keys in this repo:
 
 - `PLANNER_API_CLIENT_SECRET`
 - `BOT_APP_PASSWORD`
-- `PLANNER_API_BEARER_TOKEN`
-- `CONTAINER_REGISTRY_PASSWORD` when required by the customer's registry model
+- optional `PLANNER_API_BEARER_TOKEN`
+
+This repo's standard deployment path assumes Azure Container Registry and
+derives registry credentials from Azure at deploy time, so
+`CONTAINER_REGISTRY_PASSWORD` is not part of the normal customer setup
+contract.
 
 ## Basic Setup Walkthrough For A Customer Team
 
