@@ -1,5 +1,9 @@
 # Veeam Revenue Intelligence: M365 Copilot Agent Design
 
+> Status: strategic design and history document.
+> Useful for platform tradeoffs and original design intent, but not the primary
+> operator or runtime reference for the current repo state.
+
 ## Building Account Pulse & Next Move for Microsoft 365 Copilot
 
 > **Version:** 1.0 | **Date:** 2026-03-17
@@ -82,7 +86,7 @@ custom engine** direction described later in the document.
 | Dimension | Current Design |
 |-----------|---------------|
 | **Purpose** | Propensity ranking + personalized JOLT outreach — finds best accounts, explains why, drafts emails |
-| **Data Source** | Live Databricks (via MCP tools: `lookup_rep`, `get_top_opportunities`, `get_account_contacts`) |
+| **Data Source** | Live Databricks (via MCP tools: `get_top_opportunities`, `get_account_contacts`) |
 | **Propensity Model** | AIQ scores table (`account_iq_scores`) — Xf score, sub-scores, 30+ boolean play flags, "why" fields |
 | **Contacts** | AIQ contacts table (`aiq_contact`) — engagement level, contact stage, do-not-call filtering |
 | **Output** | 5 formats: Quick List, Full Briefing, Single Account, Draft Email, Follow-Up Email |
@@ -1402,7 +1406,6 @@ Microsoft Entra ID
 
 | Feature | Claude Code PoC | Copilot Studio Design | Status |
 |---------|----------------|----------------------|--------|
-| Rep → territory lookup | MCP tool (`lookup_rep`) | REST API Tool → Azure Function | Ready to build |
 | Top opportunities by Xf score | MCP tool (`get_top_opportunities`) | REST API Tool → Azure Function | Ready to build |
 | Account contacts with engagement | MCP tool (`get_account_contacts`) | REST API Tool → Azure Function | Ready to build |
 | Contact deduplication | MCP tool logic | Azure Function logic | Ready to build |

@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.MD"
+      - "mvp/.env.example"
+      - "mvp/.env.secure.example"
+      - "mvp/.env.inputs.example"
+      - "mvp/.env.secure.inputs.example"
   workflow_dispatch:
     inputs:
       release_sha:
@@ -22,8 +29,49 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  changes:
+    name: Classify Production Changes
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_relevant: ${{ steps.classify.outputs.deploy_relevant }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            planner_runtime:
+              - 'mvp/agents/**'
+              - 'mvp/agents/Dockerfile'
+            wrapper_runtime:
+              - 'mvp/m365_wrapper/**'
+              - 'mvp/m365_wrapper/Dockerfile'
+            infra_runtime:
+              - 'mvp/infra/bicep/**'
+              - 'mvp/infra/databricks/**'
+              - 'mvp/infra/scripts/bootstrap-*.sh'
+              - 'mvp/infra/scripts/build-and-deploy-*.sh'
+              - 'mvp/infra/scripts/ci-*.sh'
+              - 'mvp/infra/scripts/deploy-*.sh'
+              - 'mvp/infra/scripts/validate-*.sh'
+              - 'mvp/infra/tests/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/deploy-*.yml'
+              - '.github/workflows/bootstrap-foundation.yml'
+      - id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.filter.outputs.planner_runtime }}" == "true" || "${{ steps.filter.outputs.wrapper_runtime }}" == "true" || "${{ steps.filter.outputs.infra_runtime }}" == "true" ]]; then
+            echo "deploy_relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy_relevant=false" >> "$GITHUB_OUTPUT"
+          fi
+
   deploy:
     name: Deploy Secure Customer Production
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.deploy_relevant == 'true'
     runs-on: ubuntu-latest
     environment: production
     env:
@@ -47,15 +95,14 @@ jobs:
       BOT_APP_ID: ${{ vars.BOT_APP_ID }}
       BOT_SSO_APP_ID: ${{ vars.BOT_SSO_APP_ID }}
       BOT_SSO_RESOURCE: ${{ vars.BOT_SSO_RESOURCE }}
-      CUSTOMER_DATABRICKS_HOST: ${{ vars.CUSTOMER_DATABRICKS_HOST }}
-      CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID: ${{ vars.CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID }}
-      CUSTOMER_DATABRICKS_OBO_SCOPE: ${{ vars.CUSTOMER_DATABRICKS_OBO_SCOPE }}
-      CUSTOMER_DATABRICKS_WAREHOUSE_ID: ${{ vars.CUSTOMER_DATABRICKS_WAREHOUSE_ID }}
-      CUSTOMER_TOP_OPPORTUNITIES_SOURCE: ${{ vars.CUSTOMER_TOP_OPPORTUNITIES_SOURCE }}
-      CUSTOMER_CONTACTS_SOURCE: ${{ vars.CUSTOMER_CONTACTS_SOURCE }}
-      CUSTOMER_SCOPE_ACCOUNTS_CATALOG: ${{ vars.CUSTOMER_SCOPE_ACCOUNTS_CATALOG }}
-      CUSTOMER_SALES_TEAM_MAPPING_CATALOG: ${{ vars.CUSTOMER_SALES_TEAM_MAPPING_CATALOG }}
-      CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH: ${{ vars.CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH }}
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST || vars.CUSTOMER_DATABRICKS_HOST }}
+      DATABRICKS_AZURE_RESOURCE_ID: ${{ vars.DATABRICKS_AZURE_RESOURCE_ID || vars.CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID }}
+      DATABRICKS_OBO_SCOPE: ${{ vars.DATABRICKS_OBO_SCOPE || vars.CUSTOMER_DATABRICKS_OBO_SCOPE }}
+      DATABRICKS_WAREHOUSE_ID: ${{ vars.DATABRICKS_WAREHOUSE_ID || vars.CUSTOMER_DATABRICKS_WAREHOUSE_ID }}
+      TOP_OPPORTUNITIES_SOURCE: ${{ vars.TOP_OPPORTUNITIES_SOURCE || vars.CUSTOMER_TOP_OPPORTUNITIES_SOURCE }}
+      CONTACTS_SOURCE: ${{ vars.CONTACTS_SOURCE || vars.CUSTOMER_CONTACTS_SOURCE }}
+      SCOPE_ACCOUNTS_CATALOG: ${{ vars.SCOPE_ACCOUNTS_CATALOG || vars.CUSTOMER_SCOPE_ACCOUNTS_CATALOG }}
+      SALES_TEAM_MAPPING_CATALOG: ${{ vars.SALES_TEAM_MAPPING_CATALOG || vars.CUSTOMER_SALES_TEAM_MAPPING_CATALOG }}
       WRAPPER_ENABLE_DEBUG_CHAT: ${{ vars.WRAPPER_ENABLE_DEBUG_CHAT }}
       WRAPPER_DEBUG_ALLOWED_UPNS: ${{ vars.WRAPPER_DEBUG_ALLOWED_UPNS }}
       WRAPPER_DEBUG_EXPECTED_AUDIENCE: ${{ vars.WRAPPER_DEBUG_EXPECTED_AUDIENCE }}

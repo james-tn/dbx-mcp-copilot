@@ -347,14 +347,6 @@ def test_get_top_opportunities_blocks_override_in_authenticated_session(monkeypa
         )
 
 
-def test_lookup_rep_returns_authenticated_session_error(monkeypatch) -> None:
-    monkeypatch.setattr(databricks_tools, "get_request_user_assertion", lambda: "user-token")
-
-    payload = json.loads(asyncio.run(databricks_tools.lookup_rep.func(rep_name="Scott")))
-
-    assert "disabled in authenticated planner sessions" in payload["error"]
-
-
 def test_get_top_opportunities_blocks_override_in_secure_deployment(monkeypatch) -> None:
     class _FakeRouter:
         def __init__(self) -> None:

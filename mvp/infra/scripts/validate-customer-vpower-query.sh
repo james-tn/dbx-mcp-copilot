@@ -33,7 +33,7 @@ from databricks_sql import DatabricksSqlClient, DatabricksSqlSettings
 async def main(user_upn: str, top_opps_limit: int) -> None:
     settings = customer_backend.load_customer_databricks_query_settings()
     if not settings.host:
-        raise SystemExit("CUSTOMER_DATABRICKS_HOST or DATABRICKS_HOST is required.")
+        raise SystemExit("DATABRICKS_HOST is required.")
 
     client = DatabricksSqlClient(
         settings=DatabricksSqlSettings(

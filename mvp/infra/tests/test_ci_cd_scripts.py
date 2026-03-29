@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+import yaml
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -112,7 +113,6 @@ def test_ci_render_runtime_env_uses_release_metadata_without_mutating_examples(t
             "CONTAINER_REGISTRY_SERVER": "intacr.azurecr.io",
             "CONTAINER_REGISTRY_USERNAME": "intacr",
             "CONTAINER_REGISTRY_PASSWORD": "registry-secret",
-            "CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH": "fixtures/customer_rep_lookup_static_map.json",
             "WRAPPER_BASE_URL": "https://wrapper.example.com",
         }
     )
@@ -124,7 +124,9 @@ def test_ci_render_runtime_env_uses_release_metadata_without_mutating_examples(t
     assert "WRAPPER_IMAGE=example.azurecr.io/daily-account-planner/wrapper:secure-abc123" in rendered
     assert "AZURE_OPENAI_AUTO_ROLE_ASSIGN=false" in rendered
     assert "ACA_ENVIRONMENT_NAME=aca-secure-int" in rendered
-    assert "CUSTOMER_DATABRICKS_WAREHOUSE_ID=warehouse-123" in rendered
+    assert "DATABRICKS_WAREHOUSE_ID=warehouse-123" in rendered
+    assert "TOP_OPPORTUNITIES_SOURCE=catalog.schema.account_iq_scores" in rendered
+    assert "CONTACTS_SOURCE=catalog.schema.aiq_contact" in rendered
     assert "CONTAINER_REGISTRY_SERVER=intacr.azurecr.io" in rendered
     assert "CONTAINER_REGISTRY_USERNAME=intacr" in rendered
     assert "CONTAINER_REGISTRY_PASSWORD=registry-secret" in rendered
@@ -376,3 +378,15 @@ printf '{"status":"ok"}'
     assert "https://planner.example.com/healthz" in curl_calls
     assert '{"status":"ok"}' in completed.stdout
     assert "authenticated chat validation skipped" in completed.stdout
+
+
+def test_ci_build_release_artifacts_allows_skipped_m365_package() -> None:
+    workflow_path = ROOT_DIR.parent / ".github" / "workflows" / "ci.yml"
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+
+    build_release = workflow["jobs"]["build-release-artifacts"]
+    condition = build_release["if"]
+
+    assert "always()" in condition
+    assert "needs.package-m365.result == 'skipped'" in condition
+    assert "needs.package-m365.result == 'success'" in condition

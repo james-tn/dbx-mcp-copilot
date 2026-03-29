@@ -192,8 +192,10 @@ def _load_source_objects() -> tuple[str, ...]:
                 f"{scope_catalog}.sf_vpower_bronze.user",
             ]
         candidates = [
-            os.environ.get("CUSTOMER_TOP_OPPORTUNITIES_SOURCE", "").strip(),
-            os.environ.get("CUSTOMER_CONTACTS_SOURCE", "").strip(),
+            os.environ.get("TOP_OPPORTUNITIES_SOURCE", "").strip()
+            or os.environ.get("CUSTOMER_TOP_OPPORTUNITIES_SOURCE", "").strip(),
+            os.environ.get("CONTACTS_SOURCE", "").strip()
+            or os.environ.get("CUSTOMER_CONTACTS_SOURCE", "").strip(),
             *vpower_sources,
         ]
 
