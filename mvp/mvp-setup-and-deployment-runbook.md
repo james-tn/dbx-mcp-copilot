@@ -60,9 +60,9 @@ Split-responsibility path:
 Status files:
 
 - the scripts write their current state to
-  [`mvp/infra/outputs/bootstrap-status-secure.json`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/outputs/bootstrap-status-secure.json)
+  [`mvp/infra/outputs/bootstrap-status-secure.json`](infra/outputs/bootstrap-status-secure.json)
   or
-  [`mvp/infra/outputs/bootstrap-status-open.json`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/outputs/bootstrap-status-open.json)
+  [`mvp/infra/outputs/bootstrap-status-open.json`](infra/outputs/bootstrap-status-open.json)
 - to inspect the current status, run:
 
 ```bash
@@ -147,8 +147,8 @@ bash mvp/infra/scripts/bootstrap-azure-demo.sh open
 
 The script renders and maintains:
 
-- [`mvp/.env.secure`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure)
-- [`mvp/.env`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env)
+- [`mvp/.env.secure`](.env.secure)
+- [`mvp/.env`](.env)
 
 Do not treat those files as operator-owned. They are generated runtime state.
 
@@ -208,7 +208,7 @@ code flow for the Graph publish/install step.
 ## Required Input Parameters To Fill
 
 Secure defaults are already prefilled in
-[`mvp/.env.secure.inputs.example`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure.inputs.example):
+[`mvp/.env.secure.inputs.example`](.env.secure.inputs.example):
 
 - `AZURE_RESOURCE_GROUP=rg-daily-account-planner-secure`
 - `AZURE_LOCATION=eastus2`
@@ -217,7 +217,7 @@ Secure defaults are already prefilled in
 - `INFRA_NAME_PREFIX=dailyacctplannersec`
 
 Open defaults are already prefilled in
-[`mvp/.env.inputs.example`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.inputs.example):
+[`mvp/.env.inputs.example`](.env.inputs.example):
 
 - `AZURE_RESOURCE_GROUP=rg-daily-account-planner`
 - `AZURE_LOCATION=eastus`
@@ -322,7 +322,7 @@ Default existing-Databricks note:
 Optional mock Databricks note:
 
 - when `ENABLE_MOCK_DATABRICKS_ENVIRONMENT=true`, the bootstrap also runs
-  [`seed-databricks-aiq-dev.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/seed-databricks-aiq-dev.sh)
+  [`seed-databricks-aiq-dev.sh`](infra/scripts/seed-databricks-aiq-dev.sh)
   to create AIQ-shaped mock tables plus `sf_vpower_bronze` territory/account
   tables derived from the customer workbook sample for parity testing
 - the mock seed path targets only the foundation `DATABRICKS_*` workspace
@@ -345,13 +345,13 @@ Optional mock Databricks note:
 
 Use these only when the main bootstrap pauses at a privilege boundary:
 
-- [`mvp/infra/scripts/complete-entra-admin-consent.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/complete-entra-admin-consent.sh)
+- [`mvp/infra/scripts/complete-entra-admin-consent.sh`](infra/scripts/complete-entra-admin-consent.sh)
   completes Entra app registration and admin consent without rotating already
   persisted app secrets
-- [`mvp/infra/scripts/complete-m365-catalog-publish.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/complete-m365-catalog-publish.sh)
+- [`mvp/infra/scripts/complete-m365-catalog-publish.sh`](infra/scripts/complete-m365-catalog-publish.sh)
   builds and publishes the Teams app package to the catalog, then hands control
   back to the deployment operator for self-install
-- [`mvp/infra/scripts/show-bootstrap-status.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/show-bootstrap-status.sh)
+- [`mvp/infra/scripts/show-bootstrap-status.sh`](infra/scripts/show-bootstrap-status.sh)
   prints the current mode status, the last successful step, and the next role /
   script required to continue
 
@@ -430,8 +430,8 @@ still be used to exercise different seller views during testing.
 Missing input values:
 
 - If a bootstrap says the input env is missing variables, fill the named values
-  in [`mvp/.env.inputs`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.inputs)
-  or [`mvp/.env.secure.inputs`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure.inputs),
+  in [`mvp/.env.inputs`](.env.inputs)
+  or [`mvp/.env.secure.inputs`](.env.secure.inputs),
   then rerun the same bootstrap.
 
 Not signed in to Azure:
@@ -472,8 +472,8 @@ Admin consent still pending:
 Azure OpenAI deployment creation fails with quota or model-capacity errors:
 
 - Set the optional `AZURE_OPENAI_*` override values in
-  [`mvp/.env.inputs`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.inputs)
-  or [`mvp/.env.secure.inputs`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure.inputs)
+  [`mvp/.env.inputs`](.env.inputs)
+  or [`mvp/.env.secure.inputs`](.env.secure.inputs)
   so the bootstrap requests a deployment footprint your tenant can host.
 
 Graph token missing Teams publish/install scopes:
@@ -522,7 +522,7 @@ Secure ACA apps do not require shell access for first-line debugging:
 Recommended startup steps:
 
 ```bash
-cd /mnt/c/testing/veeam/revenue_intelligence/mvp
+cd mvp
 set -a
 source .env.secure
 set +a
@@ -605,7 +605,7 @@ Optional mock Databricks note:
 
 - the default secure customer path does not run Databricks seed jobs
 - if you intentionally enabled `ENABLE_MOCK_DATABRICKS_ENVIRONMENT=true`, use
-  [`mvp/infra/scripts/seed-databricks-aiq-dev.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/seed-databricks-aiq-dev.sh)
+  [`mvp/infra/scripts/seed-databricks-aiq-dev.sh`](infra/scripts/seed-databricks-aiq-dev.sh)
   to refresh the AIQ-shaped mock tables
 - if the mock seed fails, first verify the foundation `DATABRICKS_HOST`,
   `DATABRICKS_WAREHOUSE_ID`, and `AIQ_DEV_CATALOG` values in the runtime env
@@ -617,29 +617,29 @@ Optional mock Databricks note:
 The new bootstraps are the recommended operator path. The lower-level scripts
 remain available for recovery and debugging:
 
-- [`mvp/infra/scripts/show-bootstrap-status.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/show-bootstrap-status.sh)
-- [`mvp/infra/scripts/complete-entra-admin-consent.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/complete-entra-admin-consent.sh)
-- [`mvp/infra/scripts/complete-m365-catalog-publish.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/complete-m365-catalog-publish.sh)
-- [`mvp/infra/scripts/deploy-foundation.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/deploy-foundation.sh)
-- [`mvp/infra/scripts/setup-custom-engine-app-registrations.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/setup-custom-engine-app-registrations.sh)
-- [`mvp/infra/scripts/build-and-deploy-planner-only.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/build-and-deploy-planner-only.sh)
-- [`mvp/infra/scripts/build-and-deploy-wrapper-only.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/build-and-deploy-wrapper-only.sh)
-- [`mvp/infra/scripts/bootstrap-databricks-access.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/bootstrap-databricks-access.sh)
-- [`mvp/infra/scripts/deploy-planner-api.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/deploy-planner-api.sh)
-- [`mvp/infra/scripts/seed-databricks-aiq-dev.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/seed-databricks-aiq-dev.sh)
-- [`mvp/infra/scripts/deploy-m365-wrapper.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/deploy-m365-wrapper.sh)
-- [`mvp/infra/scripts/create-azure-bot-resource.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/create-azure-bot-resource.sh)
-- [`mvp/infra/scripts/setup-bot-oauth-connection.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/setup-bot-oauth-connection.sh)
-- [`mvp/scripts/build-m365-app-package.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/scripts/build-m365-app-package.sh)
-- [`mvp/scripts/publish-m365-app-package-graph.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/scripts/publish-m365-app-package-graph.sh)
-- [`mvp/scripts/install-m365-app-for-self-graph.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/scripts/install-m365-app-for-self-graph.sh)
+- [`mvp/infra/scripts/show-bootstrap-status.sh`](infra/scripts/show-bootstrap-status.sh)
+- [`mvp/infra/scripts/complete-entra-admin-consent.sh`](infra/scripts/complete-entra-admin-consent.sh)
+- [`mvp/infra/scripts/complete-m365-catalog-publish.sh`](infra/scripts/complete-m365-catalog-publish.sh)
+- [`mvp/infra/scripts/deploy-foundation.sh`](infra/scripts/deploy-foundation.sh)
+- [`mvp/infra/scripts/setup-custom-engine-app-registrations.sh`](infra/scripts/setup-custom-engine-app-registrations.sh)
+- [`mvp/infra/scripts/build-and-deploy-planner-only.sh`](infra/scripts/build-and-deploy-planner-only.sh)
+- [`mvp/infra/scripts/build-and-deploy-wrapper-only.sh`](infra/scripts/build-and-deploy-wrapper-only.sh)
+- [`mvp/infra/scripts/bootstrap-databricks-access.sh`](infra/scripts/bootstrap-databricks-access.sh)
+- [`mvp/infra/scripts/deploy-planner-api.sh`](infra/scripts/deploy-planner-api.sh)
+- [`mvp/infra/scripts/seed-databricks-aiq-dev.sh`](infra/scripts/seed-databricks-aiq-dev.sh)
+- [`mvp/infra/scripts/deploy-m365-wrapper.sh`](infra/scripts/deploy-m365-wrapper.sh)
+- [`mvp/infra/scripts/create-azure-bot-resource.sh`](infra/scripts/create-azure-bot-resource.sh)
+- [`mvp/infra/scripts/setup-bot-oauth-connection.sh`](infra/scripts/setup-bot-oauth-connection.sh)
+- [`mvp/scripts/build-m365-app-package.sh`](scripts/build-m365-app-package.sh)
+- [`mvp/scripts/publish-m365-app-package-graph.sh`](scripts/publish-m365-app-package-graph.sh)
+- [`mvp/scripts/install-m365-app-for-self-graph.sh`](scripts/install-m365-app-for-self-graph.sh)
 
 ## Secure Customer Planner Updates
 
 For the hosted secure customer path:
 
-- use [`.env.secure.example`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure.example) as the only hosted env template
-- set the existing Databricks values in [`mvp/.env.secure.inputs`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure.inputs) before bootstrap, or in [`.env.secure`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure) before planner-only redeploys
+- use [`.env.secure.example`](.env.secure.example) as the only hosted env template
+- set the existing Databricks values in [`mvp/.env.secure.inputs`](.env.secure.inputs) before bootstrap, or in [`.env.secure`](.env.secure) before planner-only redeploys
 - set `DATABRICKS_HOST` at deployment time
 - set `DATABRICKS_WAREHOUSE_ID` only if you want to pin a specific SQL warehouse; blank is allowed
 - keep `DATABRICKS_AZURE_RESOURCE_ID` when the target Azure Databricks workspace requires the workspace resource header, but do not treat it as mandatory
@@ -658,6 +658,11 @@ Validate the new customer query path directly by user email:
 ENV_FILE=mvp/.env.secure VALIDATE_USER_UPN=<seller-upn> \
   bash mvp/infra/scripts/validate-customer-vpower-query.sh
 ```
+
+- use a real seller UPN/email that should resolve in the target Databricks
+  workspace
+- this is a direct validation helper, not a required step for normal runtime
+  deployment
 
 Routine planner-only code updates should leave the deployed wrapper intact:
 

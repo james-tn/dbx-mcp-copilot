@@ -25,7 +25,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: deploy-production
+  group: deploy-production-${{ github.event_name == 'workflow_dispatch' && 'manual' || github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -36,7 +36,7 @@ jobs:
       deploy_relevant: ${{ steps.classify.outputs.deploy_relevant }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4.0.1
         id: filter
         with:
           filters: |
@@ -55,9 +55,6 @@ jobs:
               - 'mvp/infra/scripts/deploy-*.sh'
               - 'mvp/infra/scripts/validate-*.sh'
               - 'mvp/infra/tests/**'
-              - '.github/workflows/ci.yml'
-              - '.github/workflows/deploy-*.yml'
-              - '.github/workflows/bootstrap-foundation.yml'
       - id: classify
         shell: bash
         run: |
@@ -108,7 +105,6 @@ jobs:
       WRAPPER_DEBUG_EXPECTED_AUDIENCE: ${{ vars.WRAPPER_DEBUG_EXPECTED_AUDIENCE }}
       CONTAINER_REGISTRY_SERVER: ${{ vars.CONTAINER_REGISTRY_SERVER }}
       CONTAINER_REGISTRY_USERNAME: ${{ vars.CONTAINER_REGISTRY_USERNAME }}
-      CONTAINER_REGISTRY_PASSWORD: ${{ secrets.CONTAINER_REGISTRY_PASSWORD }}
       ACA_MIN_REPLICAS: ${{ vars.ACA_MIN_REPLICAS }}
       ACA_MAX_REPLICAS: ${{ vars.ACA_MAX_REPLICAS }}
       KEYVAULT_NAME: ${{ vars.KEYVAULT_NAME }}
