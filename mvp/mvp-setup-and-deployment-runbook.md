@@ -11,8 +11,12 @@ Document boundaries:
 
 - root [`README.md`](../README.md) is the repo entrypoint and doc map
 - [`mvp/infra/README.md`](infra/README.md) is the infra/script index
-- [`mvp/infra/github-actions-cicd-design.md`](infra/github-actions-cicd-design.md)
-  is the GitHub Actions and Azure OIDC setup guide
+- [`mvp/infra/cicd-overview.md`](infra/cicd-overview.md)
+  explains the GitHub Actions delivery model and team responsibilities
+- [`mvp/infra/cicd-setup-guide.md`](infra/cicd-setup-guide.md)
+  is the step-by-step GitHub Actions and Azure OIDC setup guide
+- [`mvp/infra/cicd-validation-and-operations.md`](infra/cicd-validation-and-operations.md)
+  covers rollout drills and CI/CD validation
 - this file owns the human operator bootstrap, deploy, validation, and recovery
   flow
 
