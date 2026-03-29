@@ -19,7 +19,7 @@ Note:
 - this document describes the seeded demo architecture on `main`
 - for the customer-target mixed backend against an existing Databricks
   environment and DAP API, see
-  [`mvp/customer-existing-databricks-architecture.md`](/mnt/c/testing/veeam/revenue_intelligence/mvp/customer-existing-databricks-architecture.md)
+  [`mvp/customer-existing-databricks-architecture.md`](customer-existing-databricks-architecture.md)
 
 The current operator deployment supports both:
 
@@ -343,11 +343,15 @@ the behavior is realistic enough to validate:
 - stale-contact cases
 - ENT / COM / VEL differences
 
-The access-control demo is intentionally a **two-user** model. The seeded
-entitlements and grants are rendered for the operator-supplied:
+The access-control demo is intentionally a **two-user** model. For seeded mock
+or demo Databricks validation, the mock entitlements and grants are rendered
+for the operator-supplied:
 
 - `SELLER_A_UPN`
 - `SELLER_B_UPN`
+
+Those demo identities are not required for the normal customer-hosted runtime
+path against an existing Databricks workspace.
 
 ## 8. M365 Wrapper
 

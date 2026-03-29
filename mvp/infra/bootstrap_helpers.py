@@ -20,8 +20,6 @@ REQUIRED_INPUTS = {
         "AZURE_RESOURCE_GROUP",
         "AZURE_LOCATION",
         "INFRA_NAME_PREFIX",
-        "SELLER_A_UPN",
-        "SELLER_B_UPN",
     ),
     "secure": (
         "AZURE_TENANT_ID",
@@ -29,8 +27,6 @@ REQUIRED_INPUTS = {
         "AZURE_RESOURCE_GROUP",
         "AZURE_LOCATION",
         "INFRA_NAME_PREFIX",
-        "SELLER_A_UPN",
-        "SELLER_B_UPN",
     ),
 }
 
@@ -66,8 +62,6 @@ SIGNATURE_KEYS = (
     "AZURE_RESOURCE_GROUP",
     "AZURE_LOCATION",
     "INFRA_NAME_PREFIX",
-    "SELLER_A_UPN",
-    "SELLER_B_UPN",
 )
 
 RUNTIME_META_KEYS = {

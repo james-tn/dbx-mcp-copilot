@@ -3,6 +3,10 @@
 `mvp/infra` is the canonical home for infrastructure, deploy, optional mock
 seed, and environment validation assets.
 
+For the GitHub Actions automation design, customer adoption model, and
+step-by-step CI/CD migration guidance from older manual `.env.secure` setups,
+start with [the CI/CD guide](github-actions-cicd-design.md).
+
 ## Layout
 
 - `bicep/`: shared foundation templates used by both open and secure stacks
@@ -90,7 +94,7 @@ ENABLE_MOCK_DATABRICKS_ENVIRONMENT=true bash mvp/infra/scripts/bootstrap-azure-d
 ENABLE_MOCK_DATABRICKS_ENVIRONMENT=true bash mvp/infra/scripts/bootstrap-azure-demo.sh secure
 ```
 
-- that path uses [`seed-databricks-aiq-dev.sh`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/scripts/seed-databricks-aiq-dev.sh)
+- that path uses [`seed-databricks-aiq-dev.sh`](scripts/seed-databricks-aiq-dev.sh)
   to create the AIQ-shaped mock tables plus `sf_vpower_bronze` mock tables used
   by the built-in customer scope queries
 - the mock seed path targets only the bootstrap/foundation `DATABRICKS_*`
@@ -132,6 +136,8 @@ ENV_FILE=mvp/.env.secure VALIDATE_USER_UPN=<seller-upn> \
 
 - this validates email -> territories, scoped-account rows, and top-opps source
   eligibility directly against the configured customer Databricks workspace
+- `VALIDATE_USER_UPN` is only needed for this direct validation path; it is not
+  a required deployment input
 
 Optional operator overrides:
 
@@ -163,7 +169,7 @@ bash mvp/infra/scripts/deploy-stack.sh secure
 
 The canonical secure path is now:
 
-1. fill [`mvp/.env.secure.inputs`](/mnt/c/testing/veeam/revenue_intelligence/mvp/.env.secure.inputs)
+1. fill [`mvp/.env.secure.inputs`](../.env.secure.inputs)
 2. run `bootstrap-azure-demo.sh secure`
 3. run `bootstrap-m365-demo.sh secure`
 

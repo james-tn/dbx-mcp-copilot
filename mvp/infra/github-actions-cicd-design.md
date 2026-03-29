@@ -1,523 +1,1326 @@
-# GitHub Actions CI/CD Design
+# GitHub Actions CI/CD Setup And Operations Guide
 
 ## Purpose
 
-This document describes the recommended GitHub Actions CI/CD design for this
-repository.
+This document is the canonical CI/CD design and setup guide for this repository.
 
-It covers:
+It is written for two audiences:
 
-- branch strategy
-- workflow layout
-- Azure OIDC authentication
-- artifact promotion
-- environment protection
-- multi-team collaboration
-- release sequencing when infrastructure changes are involved
+- the internal team operating this repo today
+- customer teams that will copy this repo and automate deployments against an
+  already-existing manually configured Azure and Databricks environment
 
-This design is intentionally aligned to the current repository shape:
+This guide explains:
 
-- planner service and M365 wrapper are deployed independently
-- Azure runtime deployment is script-driven
-- Microsoft 365 app package publish is a separate admin-controlled concern
-- local and CI Python execution now use `uv`
+- the delivery model implemented in this repo
+- what each workflow is responsible for
+- how GitHub OIDC, Azure RBAC, Key Vault, and GitHub Environments fit together
+- how Dev, Infra, and M365 Admin teams should collaborate
+- how to migrate from an older manually maintained `mvp/.env.secure` setup into
+  GitHub Actions automation
 
-## Goals
+This guide complements, but does not replace, the operational notes in
+[`mvp/infra/README.md`](README.md).
 
-- make `dev` the main developer integration branch
-- make `integration` the first real deployment branch
-- make `main` the production branch
-- use GitHub OIDC for Azure deployment authentication
-- avoid long-lived Azure secrets in GitHub
-- build once and promote forward instead of rebuilding different artifacts per environment
-- keep Teams app catalog publish separate from normal Azure deploys
-- preserve separation of duties between Dev, Infra, and M365 Admin teams
+## Start Here: Choose Your Path
 
-## Non-Goals
+There are two very different customer setup paths in this repo.
 
-- full automation of Teams catalog publish by the same Azure OIDC identity
-- forcing every code change through infra or M365 approval
-- using committed `.env` files as the CI/CD system of record
+### Path A: Customer Already Has Infrastructure
 
-## Repo Deployment Context
+Choose this path when the customer already has:
 
-The repository already has clear operational boundaries:
+- Azure resource group
+- Container Apps environment
+- planner and wrapper deployment targets
+- app registrations
+- existing Databricks workspace
+- existing AIQ / vPower-backed data sources
 
-- planner image build + deploy
-- wrapper image build + deploy
-- customer-target deploy
-- foundation/bootstrap deploy
-- M365 app package build and publish
-- validation scripts for planner, Databricks, and customer query behavior
+This is the easier and more common enterprise customer path.
 
-The CI/CD design should preserve those boundaries instead of collapsing
-everything into one monolithic workflow.
+Recommended operating model:
 
-## Target Branch Model
+- do not use bootstrap for routine delivery
+- populate GitHub Environments directly
+- use `deploy-integration.yml` and `deploy-production.yml`
+- treat old `.env.secure` only as a migration inventory
+
+### Path B: Customer Starts From Scratch
+
+Choose this path when the customer wants this repo to stand up the environment
+for the first time.
+
+Recommended operating model:
+
+- run `bootstrap-foundation.yml` intentionally and sparingly
+- let bootstrap derive names and write generated runtime state
+- after bootstrap completes, transition to normal deploy workflows for routine
+  delivery
+
+Important truth about the current implementation:
+
+- routine deploy workflows are already GitHub-native and use ephemeral runner
+  env files
+- bootstrap is still more stateful, but the GitHub bootstrap workflow now uses
+  temporary input/runtime files inside the runner instead of treating
+  repo-local `.env*` files as the automation source of truth
+
+## Executive Summary
+
+The current recommended operating model for this repo is:
+
+- developers work on `feature/*` branches
+- `dev` is the shared engineering branch
+- `integration` is the automatic Azure deployment branch
+- `main` is the approved production branch
+- GitHub Actions uses Azure OIDC instead of long-lived Azure credentials
+- CI builds planner and wrapper artifacts once on `integration`
+- `integration` deploys those artifacts into a secure mock environment
+- `main` promotes the already-tested release into the production customer
+  environment
+- Teams/M365 app publish remains a separate manual admin path
+
+For customer adoption, the most important point is this:
+
+- **production CI/CD in this repo is designed to deploy planner and wrapper into
+  an existing customer environment**
+- it does **not** expect to create the customer's Databricks workspace during
+  normal delivery
+- it does **not** expect to seed or mutate an existing customer workspace during
+  normal delivery
+- it does **not** use committed `.env.secure` files as the CI/CD source of
+  truth
+
+Instead, customer teams should treat their old `.env.secure` as a migration
+inventory and move the relevant values into GitHub Environment variables,
+GitHub Environment secrets, and optionally Azure Key Vault.
+
+## Repository Deployment Model
+
+This repo has four distinct deployment concerns and they should stay separate:
+
+1. Planner runtime deployment
+2. Wrapper runtime deployment
+3. Foundation/bootstrap changes
+4. Teams/M365 app package publish
+
+That separation is intentional.
+
+Normal application delivery should only update planner and wrapper.
+
+Bootstrap should be reserved for rare cases such as:
+
+- new Azure resource creation
+- new networking or private endpoint work
+- new app registration or OIDC prerequisites
+- large infra refactors
+
+Teams/M365 catalog publish should remain a separate trust boundary because it
+requires different tenant-level permissions than Azure deployment.
+
+## Branch And Environment Model
 
 ### Branches
 
 - `feature/*`
-  - developer feature branches
-  - opened as PRs into `dev`
+  - developer working branches
+  - merged into `dev`
 - `dev`
-  - shared engineering branch
-  - receives normal feature merges after CI passes
+  - engineering integration branch
+  - validates buildability and tests
 - `integration`
-  - deployment branch for non-production Azure validation
-  - receives merges from `dev`
+  - secure mock deployment branch
+  - validates real Azure deployment and runtime behavior
 - `main`
   - production branch
-  - receives controlled merges from `integration`
+  - deploys the already-tested release into the customer environment after
+    approval
 
-### Branch Intent
-
-- `dev` answers: "does the code build and pass tests?"
-- `integration` answers: "does the code deploy and work in a real Azure environment?"
-- `main` answers: "is this version approved for production?"
-
-## Target GitHub Environment Model
-
-### Environments
-
-- `ci`
-  - optional logical environment for CI-only jobs
-- `integration`
-  - non-production Azure deployment target
-- `production`
-  - production Azure deployment target
-- `teams-catalog-admin`
-  - separate manual environment for Teams app publish/install steps
-- `bootstrap-foundation`
-  - optional protected environment for rare privileged bootstrap runs
-
-### Environment Protections
+### GitHub Environments
 
 - `integration`
-  - branch restriction: only `integration`
-  - optional reviewer requirement for infra-affecting changes
+  - secure mock Azure deployment target
 - `production`
-  - branch restriction: only `main`
-  - required reviewers from Infra team
+  - secure customer-target production deployment
+- `teams-catalog-admin`
+  - manual publish/install path for Teams/M365 package operations
+- `bootstrap-foundation`
+  - manual, privileged environment for bootstrap/foundation changes
+
+### Protection Rules
+
+- `integration`
+  - normally limited to the `integration` branch
+  - optional reviewer gate if your Infra team wants one
+- `production`
+  - limited to the `main` branch
+  - required reviewers from the Infra team
+  - self-review should be disabled
 - `teams-catalog-admin`
   - manual workflow only
-  - required reviewers from M365 admin team
+  - required reviewers from the M365 admin team
 - `bootstrap-foundation`
   - manual workflow only
-  - required reviewers from Infra team
+  - required reviewers from the Infra team
 
-## Authentication And Secret Model
+## Deployment Profiles
 
-## Azure
+The repo currently supports two important secure deployment profiles.
 
-Use GitHub OIDC for Azure login.
+### Secure Mock Integration
 
-Recommended setup:
+Used by `deploy-integration.yml`.
 
-- one Entra application or user-assigned identity for `integration`
-- one separate Entra application or user-assigned identity for `production`
-- each one has its own federated credential bound to:
-  - this repository
-  - the intended branch or environment
-  - the intended workflow scope
+Purpose:
 
-Recommended examples:
+- prove planner and wrapper deployment in a secure Azure shape
+- validate the Databricks-backed customer query path continuously
+- avoid touching production customer data
 
-- `gh-dbx-mcp-copilot-integration`
-- `gh-dbx-mcp-copilot-production`
+Expected characteristics:
 
-### Azure Scope
+- private or secure-style Azure topology
+- mock or seeded Databricks-backed data
+- at least one known validation UPN
+- stable integration resource group, ACR, Container Apps names, and runtime
+  values
 
-Grant the integration identity only what it needs in the integration resource
-group or subscription slice.
+Customer copy/deployment note:
 
-Grant the production identity only what it needs in the production resource
-group or subscription slice.
+- the repo currently names the default `integration` profile "secure mock"
+- that is the recommended default for this upstream repo because it gives a
+  safe place to validate release behavior without touching production data
+- however, a customer copying this repo does **not** have to use a mock
+  Databricks workspace for integration if they already have a separate
+  non-production Databricks workspace
+- in that case, they can point the `integration` GitHub Environment at that
+  existing non-production Databricks workspace by supplying the appropriate
+  customer runtime values and by **not** enabling seed/bootstrap behavior
+- what should be avoided is pointing automated integration validation at the
+  live production customer workspace unless that is an explicit, accepted
+  operating decision
 
-Do not use one broad Azure identity for all environments.
+### Secure Customer Production
 
-### Key Vault
+Used by `deploy-production.yml`.
 
-Keep sensitive runtime values in Azure Key Vault instead of GitHub repository
-secrets whenever possible.
+Purpose:
 
-Typical values to source from Key Vault at workflow runtime:
+- deploy the tested planner and wrapper release into the existing customer
+  environment
 
-- planner confidential client secret
-- bot app password
-- any explicit API key fallback values
-- optional Databricks PAT values for special environments
+Expected characteristics:
 
-GitHub environment variables can still hold non-secret settings such as:
-
-- Azure tenant ID
-- subscription ID
-- resource group
-- deployment mode
-- container app names
-- ACR name
-- expected base URLs
-
-### Hosted Runner Note
-
-GitHub-hosted runners cannot read a private-only Key Vault unless the vault is
-reachable from the public runner network.
-
-For this repo, that means:
-
-- if the target Key Vault allows public access or the workflow runs on a
-  self-hosted runner inside the private network, runtime secrets can be read
-  directly from Key Vault
-- if the target Key Vault is private-endpoint-only and the workflow runs on a
-  GitHub-hosted runner, the practical path is GitHub Environment secrets with
-  Azure OIDC still used for Azure deployment auth
-
-The workflows in this repo therefore support GitHub Environment secrets as the
-first path and Key Vault lookup as an optional fallback.
-
-## Microsoft 365 Graph And Teams Publish
-
-Treat Teams app catalog publish as a separate trust path from Azure resource
-deployment.
-
-Reason:
-
-- Azure OIDC is the right model for Azure deploy
-- Teams app catalog publish is a Graph delegated-admin concern
-- the same Azure OIDC identity should not be expected to also satisfy Teams
-  catalog publish requirements
-
-That means:
-
-- build the Teams package in standard CI
-- publish the Teams package in a separate manual admin workflow
-- require M365 admin approval before that workflow can access its environment
-
-## Artifact Strategy
-
-## Principle
-
-Build once, promote many.
-
-Do not rebuild planner and wrapper images separately in integration and
-production if the intent is to promote the same tested release.
-
-## Recommended Artifacts
-
-Each successful CI build should produce:
-
-- planner image reference or immutable digest
-- wrapper image reference or immutable digest
-- M365 app package zip
-- release metadata artifact, for example:
-  - commit SHA
-  - branch
-  - build timestamp
-  - planner image digest
-  - wrapper image digest
-  - package artifact path
-
-## Promotion Rule
-
-- `integration` deploy consumes the build artifact created from the merged code
-- `production` deploy reuses the same exact image references or digests after
-  approval
-
-This is better than rebuilding on `main`, because rebuilds can drift from what
-was validated in `integration`.
-
-## Env File Strategy In CI/CD
-
-The current operator scripts update runtime `.env` files with generated image
-tags and discovered values. That behavior is useful for human-operated
-deployment, but CI should not rely on committing `.env` mutations back into the
-repo.
-
-Recommended CI behavior:
-
-- render an ephemeral runtime env file inside the GitHub runner workspace
-- populate it from:
-  - GitHub environment variables
-  - Azure Key Vault secrets
-  - artifact metadata
-- pass that ephemeral env file into deploy and validation scripts
-- never commit CI-generated runtime env files
+- existing customer Azure resources already provisioned and approved
+- existing customer Databricks workspace already provisioned and accessible
+- no mock seeding
+- no bootstrap/foundation mutation during normal delivery
+- no schema mutation or seed mutation against the customer's live workspace
 
 ## Workflow Catalog
 
-## 1. `ci.yml`
+## `ci.yml`
 
-### Trigger
+Purpose:
+
+- run unit and repo validation checks
+- smoke-build planner and wrapper images locally
+- build the M365 package artifact
+- create release metadata for promotion
+
+Current trigger model:
 
 - pull requests to `dev`, `integration`, and `main`
-- pushes to `dev`
+- pushes to `dev`, `integration`, and `main`
 
-### Purpose
-
-Validate code quality and buildability without deploying to Azure.
-
-### Jobs
+Current jobs:
 
 - `python-tests`
   - `uv sync --project mvp --group dev`
-  - run tests under:
+  - run:
     - `mvp/infra/tests`
     - `mvp/m365_wrapper/tests`
     - `mvp/dev_ui/tests`
     - `mvp/agents/tests`
 - `shell-validation`
-  - run `bash -n` on `mvp/infra/scripts/*.sh` and selected `mvp/scripts/*.sh`
+  - `bash -n` over infra and selected repo scripts
 - `docker-build-smoke`
-  - build planner Dockerfile
-  - build wrapper Dockerfile
+  - local planner and wrapper Docker builds
 - `package-m365`
-  - build the Teams package zip artifact
+  - build the Teams/M365 package artifact with CI-safe placeholders
+- `build-release-artifacts`
+  - runs on push to `integration`
+  - builds planner and wrapper images in ACR
+  - writes `release-metadata-<sha>`
 
-### Path Filtering
+Important design point:
 
-Use path filters so expensive jobs run only when needed.
+- CI is where the release metadata artifact is created for deployable releases
+- the artifact includes planner and wrapper image references and digests
+- production later reuses that metadata rather than rebuilding
 
-Example:
+## `deploy-integration.yml`
 
-- planner jobs on changes under `mvp/agents/**`, `mvp/shared/**`, `mvp/infra/**`
-- wrapper jobs on changes under `mvp/m365_wrapper/**`, `mvp/shared/**`
-- package jobs on changes under `mvp/appPackage/**`, `mvp/scripts/build-m365-app-package.sh`
+Purpose:
 
-## 2. `deploy-integration.yml`
+- automatically deploy the validated `integration` release into the secure mock
+  environment
 
-### Trigger
+Current flow:
 
-- push to `integration`
+1. log into Azure with the integration OIDC identity
+2. download `release-metadata-<sha>` produced by `ci.yml`
+3. read secrets from GitHub Environment secrets and optionally Key Vault
+4. render an ephemeral runtime env file
+5. deploy planner and wrapper
+6. run deployed validations
+7. upload a redacted deployment summary artifact
 
-### Purpose
+Important design point:
 
-Deploy the validated build to a non-production Azure environment automatically.
+- this workflow proves the exact release that production will later promote
 
-### Authentication
+## `deploy-production.yml`
 
-- GitHub OIDC to Azure
-- protected `integration` environment
+Purpose:
 
-### Inputs
+- promote the already-tested release into the secure customer production
+  environment
 
-- artifact metadata from CI
-- GitHub environment variables
-- Key Vault secrets
+Current flow:
 
-### Recommended Steps
+1. resolve the promoted release SHA
+2. log into Azure with the production OIDC identity
+3. download the matching integration release metadata artifact
+4. read secrets from GitHub Environment secrets and optionally Key Vault
+5. render an ephemeral production env file
+6. deploy planner and wrapper
+7. run production smoke validation
+8. upload a redacted deployment summary artifact
 
-1. download the build artifact metadata
-2. log into Azure with OIDC
-3. fetch required secrets from Key Vault
-4. render an ephemeral env file for integration
-5. deploy planner
-6. deploy wrapper
-7. run integration validations
-8. publish deployment summary as workflow artifact
+Important design points:
 
-### Integration Validations
+- production should not rebuild planner or wrapper images
+- production should not run bootstrap
+- production should not seed Databricks
+- production should pause on the GitHub `production` environment approval gate
 
-Run a small but meaningful deployed validation set, for example:
+## `build-m365-package.yml`
 
-- planner health
-- planner session/message E2E
-- customer vPower query validation for a known test user
-- optional wrapper health validation
+Purpose:
 
-The integration environment should be the place where seeded or mockable
-Databricks-backed behavior is proven continuously.
+- build the Teams/M365 package artifact on demand
 
-## 3. `deploy-production.yml`
+This workflow should remain package-only. It should not deploy Azure resources.
 
-### Trigger
+## `publish-teams-catalog.yml`
 
-- push to `main`
-- optional `workflow_dispatch`
+Purpose:
 
-### Purpose
+- support the admin-controlled publish/install path for the Teams/M365 package
 
-Promote the already-tested build to production.
+This workflow should stay manual and separate from Azure runtime deployment.
 
-### Authentication
+## `bootstrap-foundation.yml`
 
-- GitHub OIDC to Azure
-- protected `production` environment
-- required Infra approval
+Purpose:
 
-### Recommended Steps
+- handle rare foundation/bootstrap changes with a larger blast radius
 
-1. resolve the exact artifact/image refs previously validated in integration
-2. log into Azure with production OIDC identity
-3. fetch production secrets from Key Vault
-4. render an ephemeral production env file
-5. deploy planner
-6. deploy wrapper
-7. run post-deploy smoke validation
-8. record release metadata
+This workflow should not be part of the normal planner/wrapper release path.
 
-### Production Guardrails
+## Why CI/CD Uses Ephemeral Env Files
 
-- no rebuilds in this workflow
-- no automatic infra bootstrap
-- no automatic Teams publish
+Human operators often use `mvp/.env` or `mvp/.env.secure` directly. That is
+fine for local or manual operations.
 
-## 4. `bootstrap-foundation.yml`
+CI/CD should behave differently:
 
-### Trigger
+- it should not rewrite tracked env templates
+- it should not commit runtime mutations back to the repo
+- it should render a temporary env file inside the runner workspace
+- it should populate that env file from:
+  - release metadata
+  - GitHub Environment variables
+  - GitHub Environment secrets
+  - optionally Azure Key Vault
 
-- `workflow_dispatch` only
+That is what [`mvp/infra/scripts/ci-render-runtime-env.sh`](scripts/ci-render-runtime-env.sh)
+does today.
 
-### Purpose
+## Authentication And Secret Model
 
-Handle rare privileged infrastructure changes:
+## Azure OIDC
 
-- new Azure resources
-- new foundation networking
-- new OIDC prerequisites
-- new bootstrap-time app registration setup
+Use two separate Azure trust paths from day one:
 
-### Why Separate
+- one OIDC identity for `integration`
+- one separate OIDC identity for `production`
 
-Bootstrap has a different blast radius from normal app delivery. It may involve:
+Recommended naming:
 
-- foundation resources
-- role assignments
-- managed identities
-- networking
-- initial environment creation
+- `gh-dbx-mcp-copilot-integration`
+- `gh-dbx-mcp-copilot-production`
 
-That should not run on every merge.
+Recommended security posture:
 
-## 5. `build-m365-package.yml`
+- bind each federated credential to this repo
+- scope each identity only to the Azure resources it actually needs
+- do not use a single broad Azure identity for every environment
 
-### Trigger
+## Azure RBAC
 
-- changes to manifest/package inputs
-- release tags
-- optional `workflow_dispatch`
+Pre-provision stable access for the OIDC identities.
 
-### Purpose
+Do not rely on normal deploy workflows to repair missing RBAC dynamically.
 
-Build the M365 package zip and store it as a reusable artifact.
+Deploy workflows should fail fast if RBAC is missing.
 
-### Important Rule
+## GitHub Secrets Vs Key Vault
 
-This workflow builds the package artifact only. It does not publish it to the
-tenant app catalog.
+This repo supports both:
 
-## 6. `publish-teams-catalog.yml`
+- GitHub Environment secrets
+- Azure Key Vault lookup at workflow runtime
 
-### Trigger
+Practical guidance:
 
-- `workflow_dispatch` only
+- keep non-secret settings in GitHub Environment variables
+- keep sensitive values in GitHub Environment secrets or Key Vault
+- if your Key Vault is private-endpoint-only and your workflow runs on a
+  GitHub-hosted runner, direct Key Vault access may not work
+- in that case, GitHub Environment secrets are the practical path even though
+  Azure OIDC is still used for deployment authentication
 
-### Purpose
+Typical secrets:
 
-Allow the M365 admin team to publish or update the Teams/M365 app package after
-backend runtime validation is already complete.
+- `PLANNER_API_CLIENT_SECRET`
+- `BOT_APP_PASSWORD`
+- `PLANNER_API_BEARER_TOKEN`
+- optional registry password or API-key fallback values
 
-### Protection
+## Teams/M365 Publish Auth
 
-- protected `teams-catalog-admin` environment
-- required M365 admin reviewers
+Treat Teams/M365 publish as a separate admin-controlled trust path.
 
-### Recommended Behavior
+Do not try to make the normal Azure OIDC deployment identity also satisfy the
+Teams catalog publish/install path.
 
-1. download the approved app package artifact
-2. show release metadata and target wrapper endpoint
-3. perform the publish/update path
-4. optionally perform install-for-user or install-for-test-tenant steps
-5. record the Graph response artifact
+That is why this design keeps `publish-teams-catalog.yml` separate.
 
-### Operational Choice
+## Customer Adoption Guide
 
-There are two acceptable operating modes:
+This section is the most important one for a customer team copying this repo.
 
-- manual-assisted
-  - workflow prepares everything, but admin runs the final Graph publish step
-- admin-automated
-  - workflow runs on an admin-controlled runner or admin-controlled delegated
-    auth setup
+## Supported Customer Scenario
 
-For this repo, manual-assisted is the safer first version.
+This guide assumes the customer already has:
 
-## Recommended Release Paths
+- an Azure subscription and resource group
+- an existing customer Databricks workspace
+- existing customer data sources
+- working manual deployment knowledge from a previous version of the repo
+- a previous `mvp/.env.secure` or equivalent manual deployment configuration
 
-## Class A: App-Only Change
+The goal is to automate planner and wrapper delivery without re-bootstraping
+the customer's live platform on every release.
+
+## Most Common Customer Case: Existing Databricks, No Mock In Production
+
+For most customer tenants, the correct production model is:
+
+- planner and wrapper deploy into existing Azure resources
+- planner points to the customer's already-existing Databricks workspace
+- planner reads customer-owned AIQ and vPower-backed sources
+- no mock Databricks in production
+- no seeding in production
+- no schema mutation in production
+
+For `integration`, the customer has two reasonable options:
+
+1. recommended: use a separate secure mock or non-production Databricks
+   environment
+2. acceptable if available: use an existing non-production customer Databricks
+   workspace with the same query surface
+
+The least desirable option is using the live production Databricks workspace as
+the integration validation target. Only do that if the customer explicitly
+accepts the risk and there is no lower-risk non-production environment.
+
+## Path A Setup: Existing Infra Customer
+
+This is the recommended path for a customer who already has their Azure and
+Databricks environment.
+
+### What They Should Do
+
+1. copy the repo
+2. create GitHub branches and protections
+3. create GitHub Environments
+4. create Azure OIDC identities
+5. populate GitHub Environment variables and secrets
+6. point `integration` at either:
+   - a secure mock environment, or
+   - an existing non-production customer Databricks workspace
+7. point `production` at the existing production environment
+8. use `deploy-integration.yml` and `deploy-production.yml` for normal delivery
+
+### What They Should Not Do
+
+- do not use mock Databricks in production
+- do not run seeding in production
+- do not rerun bootstrap as the normal release mechanism
+- do not treat repo-local `.env.secure` as the source of truth for CI/CD
+
+## Path B Setup: Customer Starting From Scratch
+
+This path is for greenfield setup where the customer wants the repo to help
+stand up the first environment.
+
+### What They Should Do
+
+1. copy the repo
+2. create GitHub branches and protections
+3. create GitHub Environments
+4. create Azure OIDC identities
+5. populate the bootstrap GitHub Environment with the small seed inputs
+6. run `bootstrap-foundation.yml`
+7. review the generated outputs and deployed resources
+8. finish the M365 bootstrap path
+9. after bootstrap is complete, switch to normal deploy workflows for routine
+   delivery
+
+### Important Current Limitation
+
+For this repo today:
+
+- bootstrap still uses generated working env files during the bootstrap flow
+- normal deploy workflows do not rely on persisted tracked env files
+
+In GitHub Actions, those bootstrap files can now live in runner temp storage.
+In local/manual operator flows, they still default to `mvp/.env.inputs`,
+`mvp/.env.secure.inputs`, `mvp/.env`, and `mvp/.env.secure`.
+
+So the cleanest mental model is:
+
+- bootstrap is a one-time or rare setup path
+- deploy workflows are the steady-state path
+
+## What The Customer Should Preserve
+
+From the previous manual deployment, preserve the inventory of:
+
+- Azure resource names
+- app registration IDs and expected audiences
+- bot app identifiers
+- Databricks workspace connection values
+- AIQ table/view names
+- vPower catalog qualifiers if needed
+- secret names and where those secrets live
+
+Treat the old `.env.secure` as an input inventory, not as the CI/CD runtime
+contract.
+
+## Step-By-Step Customer Setup
+
+## 1. Copy The Repo And Choose The Branch Model
+
+Recommended branch model:
+
+- `feature/*` -> `dev` -> `integration` -> `main`
+
+Recommended branch protection:
+
+- `dev`
+  - require PR review
+  - require `ci.yml`
+- `integration`
+  - require PR review
+  - require `ci.yml`
+- `main`
+  - require PR from `integration`
+  - require `ci.yml`
+  - production deployment approval handled by the GitHub `production`
+    environment
+
+## 2. Inventory The Existing Manual `.env.secure`
+
+Before configuring GitHub, freeze a copy of the existing manual secure env.
+
+For example:
+
+- current planner app IDs and audience
+- current bot app IDs
+- current Azure resource names
+- current customer Databricks settings
+- current table/view names
+- current secrets and who owns them
+
+Do not start by renaming everything. First map the old values into the new CI/CD
+surfaces.
+
+## Customer Setup Surface: Required Vs Generated Vs Optional
+
+For a customer using an **existing manually provisioned Azure + Databricks
+environment**, the setup is easiest to understand if variables are grouped into
+three classes:
+
+1. customer-provided setup inputs
+2. values generated by bootstrap or CI/CD
+3. optional validation-only values
+
+### 1. Customer-Provided Setup Inputs
+
+These are the values the customer normally must provide because they describe
+their existing environment or existing app registrations.
+
+For an existing customer environment, CI/CD does **not** invent these values
+for them.
+
+Typical examples:
+
+- Azure tenant, subscription, resource group, and region
+- existing ACR name
+- existing Container Apps environment name
+- existing planner and wrapper app names
+- existing planner app registration IDs and audience/scope
+- existing bot app IDs
+- existing customer Databricks workspace values
+- existing AIQ source names
+- existing vPower catalog qualifiers when needed
+
+### 2. Generated By Bootstrap Or CI/CD
+
+These are not customer setup inputs and should not be managed manually in
+GitHub as operator-owned values.
+
+Typical examples:
+
+- `PLANNER_API_IMAGE`
+- `WRAPPER_IMAGE`
+- release metadata artifact contents
+- redacted deployment summary artifacts
+- ephemeral env files created inside the runner
+- discovered or refreshed service base URLs written during deployment
+
+If the customer uses a bootstrap-managed new environment instead of an existing
+one, bootstrap can also derive names such as `ACR_NAME`,
+`ACA_ENVIRONMENT_NAME`, `PLANNER_ACA_APP_NAME`, and `WRAPPER_ACA_APP_NAME`
+from `INFRA_NAME_PREFIX`. That is a bootstrap convenience, not a normal
+production CI/CD requirement.
+
+### 3. Optional Validation-Only Values
+
+These are helpful for automated validation, but they are not core environment
+setup inputs.
 
 Examples:
 
-- prompt changes
-- planner behavior changes
-- wrapper logic changes
-- tests
-- local dev improvements
+- `PLANNER_API_BEARER_TOKEN`
+- `VALIDATE_USER_UPN`
+- `ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION`
+- `ENABLE_WRAPPER_HEALTHCHECK`
+- `REQUIRE_AUTHENTICATED_E2E`
 
-### Sequence
+The important operator message is:
 
-1. Dev implements the change on `feature/*`
-2. PR into `dev`
-3. CI passes
-4. merge to `dev`
-5. PR or merge from `dev` to `integration`
-6. integration deploy runs automatically
-7. if good, PR from `integration` to `main`
-8. Infra approves production deploy gate
-9. production deploy runs
-10. if the Teams package did not change, M365 admin is not involved
+- if a value exists only to make a validation step richer, it should be treated
+  as optional validation configuration, not as a mandatory customer runtime
+  setup field
 
-## Class B: App + Infra Change
+## 3. Create GitHub Environments
 
-Examples:
+Create these GitHub Environments in the customer repo:
 
-- new Container App setting
-- new managed identity use
-- new Key Vault secret
-- new Databricks resource dependency
-- new infra module or Azure resource
+- `integration`
+- `production`
+- `teams-catalog-admin`
+- `bootstrap-foundation`
 
-### Sequence
+Required production protection settings:
 
-1. Dev and Infra align during design before code is finalized
-2. Dev implements app code and IaC changes
-3. Infra reviews the PR for deployment impact
-4. CI passes on `dev`
-5. merge to `integration`
-6. bootstrap or deploy workflow runs depending on change type
-7. integration validation proves both infra and app behavior
-8. PR from `integration` to `main`
-9. Infra approves production environment deployment
-10. production deploy runs
-11. M365 admin participates only if app publish is also required
+- required reviewers from the Infra team
+- `prevent self-review`
+- branch policy limited to `main`
 
-## Class C: App + Infra + M365 Publish Change
+Recommended integration protection settings:
 
-Examples:
+- branch policy limited to `integration`
+- optional reviewer gate if the customer wants tighter infra control
 
-- auth surface changes that affect Teams app package
-- manifest changes
-- bot app or SSO metadata changes
-- endpoint or domain changes exposed through the app package
+Practical GitHub UI steps:
 
-### Sequence
+1. open the copied repo in GitHub
+2. go to `Settings` -> `Environments`
+3. create `integration`
+4. create `production`
+5. create `teams-catalog-admin`
+6. create `bootstrap-foundation`
+7. open `production`
+8. add required reviewers from the Infra team
+9. enable `Prevent self-review`
+10. add a deployment branch policy that allows only `main`
+11. open `integration`
+12. optionally add reviewers
+13. add a deployment branch policy that allows only `integration`
 
-1. Dev and Infra align on runtime and infrastructure impact
-2. Dev implements code and package changes
-3. Infra reviews infra/auth implications
-4. CI passes on `dev`
-5. merge to `integration`
-6. integration deploy validates runtime first
-7. PR from `integration` to `main`
-8. production runtime deploy completes
-9. M365 admin runs `publish-teams-catalog.yml`
-10. admin validates installation and catalog visibility
+## 4. Create Azure OIDC Identities
 
-### Key Rule
+Create:
 
-Never make Teams catalog publish the first deployment step for a release that
-also changes runtime behavior. Publish only after backend runtime is healthy.
+- one Azure OIDC identity for `integration`
+- one Azure OIDC identity for `production`
 
-## Team Responsibilities
+For each identity:
+
+- create the Entra app registration or user-assigned identity
+- add the GitHub federated credential
+- scope Azure RBAC only to the required subscription/resource-group surface
+
+Recommended split:
+
+- integration identity can manage the secure mock environment only
+- production identity can manage the customer production Azure resources only
+
+Practical Azure setup sequence:
+
+1. decide whether to use Entra app registrations or user-assigned managed
+   identities as the GitHub OIDC principals
+2. create one principal for `integration`
+3. create one principal for `production`
+4. record the client ID for each principal
+5. record the tenant ID
+6. record the subscription ID
+7. add a GitHub federated credential for the `integration` principal
+8. add a GitHub federated credential for the `production` principal
+
+Recommended federated credential binding:
+
+- bind the `integration` Azure principal to the GitHub `integration`
+  environment
+- bind the `production` Azure principal to the GitHub `production`
+  environment
+
+That keeps the trust relationship aligned with the actual protected deployment
+target.
+
+Recommended subject examples:
+
+- `repo:<owner>/<repo>:environment:integration`
+- `repo:<owner>/<repo>:environment:production`
+
+Recommended RBAC model:
+
+- `integration` principal
+  - access only to the integration resource group or integration subscription
+    slice
+- `production` principal
+  - access only to the production resource group or production subscription
+    slice
+
+Minimum practical Azure permissions for the deploy workflows:
+
+- permission to deploy/update the target Container Apps resources
+- permission to read or configure the target Container Apps environment
+- permission to queue ACR builds or otherwise push the release images used by
+  the repo's CI flow
+- permission to read Key Vault secrets if Key Vault lookup is used
+
+In practice, many teams start with:
+
+- `Contributor` on the target resource group
+- a scoped role on ACR sufficient for `az acr build`
+- `Key Vault Secrets User` on the target Key Vault
+
+Then they tighten permissions later once the workflow shape is stable.
+
+## 5. Populate GitHub Environment Variables And Secrets
+
+Move the old `.env.secure` values into GitHub Environments.
+
+General rule:
+
+- identifiers, names, and URLs -> GitHub Environment variables
+- passwords, client secrets, bearer tokens -> GitHub Environment secrets or
+  Key Vault
+
+Practical GitHub UI steps:
+
+1. open repo `Settings` -> `Environments`
+2. open `integration`
+3. add the required environment variables
+4. add the required environment secrets
+5. open `production`
+6. add the required environment variables
+7. add the required environment secrets
+8. if using Key Vault, also add the non-secret Key Vault locator values such as
+   vault name and secret names
+
+Important operating rule:
+
+- the workflow environment values are now the CI/CD source of truth
+- the old manual `.env.secure` file becomes a migration reference only
+
+## 5A. Absolute Minimum Inputs For A Customer Using An Existing Environment
+
+If the customer is **not** asking this repo to create a fresh environment and is
+instead automating an already-existing manually provisioned secure environment,
+the minimum meaningful production setup surface is:
+
+### Required Production Variables
+
+- `AZURE_CLIENT_ID`
+- `AZURE_TENANT_ID`
+- `AZURE_SUBSCRIPTION_ID`
+- `AZURE_RESOURCE_GROUP`
+- `AZURE_LOCATION`
+- `ACR_NAME`
+- `ACA_ENVIRONMENT_NAME`
+- `PLANNER_ACA_APP_NAME`
+- `WRAPPER_ACA_APP_NAME`
+- `AZURE_OPENAI_ACCOUNT_NAME`
+- `AZURE_OPENAI_ENDPOINT`
+- `AZURE_OPENAI_DEPLOYMENT`
+- `PLANNER_API_CLIENT_ID`
+- `PLANNER_API_EXPECTED_AUDIENCE`
+- `PLANNER_API_SCOPE`
+- `BOT_APP_ID`
+- `BOT_SSO_APP_ID`
+- `BOT_SSO_RESOURCE`
+- `CUSTOMER_DATABRICKS_HOST`
+- `CUSTOMER_DATABRICKS_WAREHOUSE_ID`
+- `CUSTOMER_TOP_OPPORTUNITIES_SOURCE`
+- `CUSTOMER_CONTACTS_SOURCE`
+
+### Usually Required Depending On The Customer Environment
+
+- `CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID`
+  - required when the Databricks workspace/resource header must be supplied for
+    Azure auth/OBO
+- `CUSTOMER_DATABRICKS_OBO_SCOPE`
+  - usually the default Databricks Azure scope, but keep it explicit if the
+    customer wants clarity
+- `CUSTOMER_SCOPE_ACCOUNTS_CATALOG`
+  - needed when the vPower bronze tables are not on the workspace default
+    catalog
+- `CUSTOMER_SALES_TEAM_MAPPING_CATALOG`
+  - same reason as above
+- `ACA_MIN_REPLICAS`
+- `ACA_MAX_REPLICAS`
+
+### Required Production Secrets
+
+- `PLANNER_API_CLIENT_SECRET`
+- `BOT_APP_PASSWORD`
+
+### Optional Production Secrets
+
+- `CONTAINER_REGISTRY_PASSWORD`
+  - only when the registry model requires it
+- `PLANNER_API_BEARER_TOKEN`
+  - optional, only for richer automated smoke validation
+
+### Optional Production Variables
+
+- `VALIDATE_USER_UPN`
+  - only needed when the customer wants automated direct validation of the
+    vPower query path in CI/CD
+- `ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION`
+  - optional validation flag
+- `WRAPPER_ENABLE_DEBUG_CHAT`
+- `WRAPPER_DEBUG_ALLOWED_UPNS`
+- `WRAPPER_DEBUG_EXPECTED_AUDIENCE`
+- `CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH`
+  - legacy/optional
+
+## 5B. What Customers Do Not Need To Provide Manually
+
+Customers should **not** manage these as manual GitHub setup values for normal
+delivery:
+
+- `PLANNER_API_IMAGE`
+- `WRAPPER_IMAGE`
+- release metadata JSON fields
+- temporary env files on runners
+- deployment summary artifact contents
+
+These are created by CI/CD itself.
+
+## 5C. From-Scratch Bootstrap: How Values Get Populated
+
+For customers starting from zero infra, values are populated in three layers.
+
+### Layer 1: Small Operator-Owned Bootstrap Inputs
+
+The bootstrap helper requires only a small seed input set:
+
+- `AZURE_TENANT_ID`
+- `AZURE_SUBSCRIPTION_ID`
+- `AZURE_RESOURCE_GROUP`
+- `AZURE_LOCATION`
+- `INFRA_NAME_PREFIX`
+
+These are the true bootstrap-owned inputs.
+
+For the optional seeded demo path, you may also provide:
+
+- `SELLER_A_UPN`
+- `SELLER_B_UPN`
+
+Those are mock/demo helpers only. They are not required for the normal
+customer-hosted runtime path and should not be treated as core production
+GitHub Environment inputs.
+
+### Layer 2: Names Derived Automatically By Bootstrap
+
+Bootstrap then derives defaults such as:
+
+- `APP_NAME_PREFIX`
+- `AZURE_OPENAI_ACCOUNT_NAME`
+- `ACA_ENVIRONMENT_NAME`
+- `PLANNER_ACA_APP_NAME`
+- `WRAPPER_ACA_APP_NAME`
+- `DATABRICKS_WORKSPACE_NAME`
+- `KEYVAULT_NAME`
+- `ACR_NAME`
+- `BOT_RESOURCE_NAME`
+- `M365_APP_PACKAGE_ID`
+
+The customer can override these if they want, but they do not have to invent
+them from scratch.
+
+### Layer 3: Values Generated Or Discovered During Provisioning
+
+After resources are created, bootstrap writes back discovered/generated values
+such as:
+
+- `DATABRICKS_HOST`
+- `DATABRICKS_MANAGED_RESOURCE_GROUP`
+- `AZURE_OPENAI_ENDPOINT`
+- `PLANNER_API_CLIENT_ID`
+- `PLANNER_API_CLIENT_SECRET`
+- `PLANNER_API_EXPECTED_AUDIENCE`
+- `PLANNER_API_SCOPE`
+- `BOT_APP_ID`
+- `BOT_APP_PASSWORD`
+- `BOT_SSO_APP_ID`
+- `BOT_SSO_RESOURCE`
+- `PLANNER_API_IMAGE`
+- `WRAPPER_IMAGE`
+
+That is why the from-scratch bootstrap path is still more stateful than the
+steady-state deploy workflows.
+
+In GitHub Actions, the bootstrap workflow writes those bootstrap inputs and
+generated runtime values into runner temp files. Manual/local operator flows can
+still use `mvp/.env.inputs`, `mvp/.env.secure.inputs`, `mvp/.env`, and
+`mvp/.env.secure`.
+
+## 6. Decide How Secrets Will Be Resolved
+
+Two supported patterns:
+
+- GitHub Environment secrets only
+- GitHub Environment secrets plus Key Vault fallback
+
+If the customer's runner cannot reach Key Vault, keep the deploy-critical
+secrets directly in GitHub Environment secrets.
+
+## 7. Configure The Existing Customer Runtime Inputs
+
+Production automation should point at the existing manually provisioned
+environment.
+
+That means:
+
+- existing resource group
+- existing Container Apps environment
+- existing planner and wrapper app names
+- existing customer Databricks host and warehouse
+- existing AIQ table/view names
+- existing customer vPower bronze catalog qualifiers if needed
+
+Do not enable mock seed values in production.
+
+For customers using an existing Databricks workspace, the production workflow
+should be configured with the customer runtime values and **should not** run
+bootstrap, mock seed, or any foundation path against that workspace.
+
+## 8. Configure The Integration Secure Mock Environment
+
+Integration should be safe to deploy repeatedly.
+
+Recommended characteristics:
+
+- separate non-production resource group
+- separate non-production ACR
+- separate Container Apps environment
+- separate integration Databricks workspace or seeded mock path
+- a known validation UPN
+
+If the customer does not want to use a mock Databricks environment for
+integration, replace the mock path with an existing non-production Databricks
+workspace and populate the integration GitHub Environment with the same class
+of customer runtime inputs used in production, but pointed at the non-production
+workspace instead.
+
+This environment is where the repo proves:
+
+- planner deploy works
+- wrapper deploy works
+- vPower sales-team resolution works
+- scoped-account query works
+- top-opps query path works
+
+## 9. Run An End-To-End Drill
+
+Recommended first drill:
+
+1. create a small test change on `feature/*`
+2. merge into `dev`
+3. confirm `ci.yml` passes
+4. promote to `integration`
+5. confirm `deploy-integration.yml` passes
+6. promote to `main`
+7. confirm the `production` environment pauses for approval
+8. approve it
+9. confirm `deploy-production.yml` completes without rebuilding artifacts
+
+## Migration Guide For Older `.env.secure` Users
+
+This repo evolved over time, and older manual secure deployments may not map
+one-to-one with the current templates.
+
+The safest migration approach is to group values by responsibility.
+
+## A. Azure Platform And Runtime Names
+
+These usually move directly into GitHub Environment variables with the same
+name:
+
+- `AZURE_TENANT_ID`
+- `AZURE_SUBSCRIPTION_ID`
+- `AZURE_RESOURCE_GROUP`
+- `AZURE_LOCATION`
+- `INFRA_NAME_PREFIX`
+- `ACR_NAME`
+- `ACA_ENVIRONMENT_NAME`
+- `PLANNER_ACA_APP_NAME`
+- `WRAPPER_ACA_APP_NAME`
+- `ACA_MIN_REPLICAS`
+- `ACA_MAX_REPLICAS`
+
+## B. Planner And Wrapper Auth Settings
+
+These normally remain GitHub Environment variables:
+
+- `PLANNER_API_CLIENT_ID`
+- `PLANNER_API_EXPECTED_AUDIENCE`
+- `PLANNER_API_SCOPE`
+- `BOT_APP_ID`
+- `BOT_SSO_APP_ID`
+- `BOT_SSO_RESOURCE`
+- `WRAPPER_ENABLE_DEBUG_CHAT`
+- `WRAPPER_DEBUG_ALLOWED_UPNS`
+- `WRAPPER_DEBUG_EXPECTED_AUDIENCE`
+
+These normally become secrets:
+
+- `PLANNER_API_CLIENT_SECRET`
+- `BOT_APP_PASSWORD`
+- `PLANNER_API_BEARER_TOKEN`
+
+## C. Existing Customer Databricks Runtime Inputs
+
+For **customer-target production CI/CD**, the repo still expects the
+`CUSTOMER_*` namespace for the customer runtime path.
+
+That means these remain the important production inputs:
+
+- `CUSTOMER_DATABRICKS_HOST`
+- `CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID`
+- `CUSTOMER_DATABRICKS_OBO_SCOPE`
+- `CUSTOMER_DATABRICKS_WAREHOUSE_ID`
+- `CUSTOMER_TOP_OPPORTUNITIES_SOURCE`
+- `CUSTOMER_CONTACTS_SOURCE`
+- `CUSTOMER_SCOPE_ACCOUNTS_CATALOG`
+- `CUSTOMER_SALES_TEAM_MAPPING_CATALOG`
+
+This is important because the repo now also has unprefixed `DATABRICKS_*`
+values used by foundation/bootstrap/mock paths.
+
+Use this rule:
+
+- `CUSTOMER_DATABRICKS_*` = customer production runtime inputs
+- `DATABRICKS_*` = foundation/mock/internal workspace inputs
+
+For customers migrating an older manual secure environment, do **not** blindly
+rename `CUSTOMER_DATABRICKS_*` to `DATABRICKS_*` for production automation.
+
+This is especially important for customers who are **not** using mock
+Databricks in production. In that case, the production workflow should continue
+to be populated with the customer-facing `CUSTOMER_*` Databricks settings.
+
+## D. Scope And Territory Mapping Inputs
+
+Normal hosted customer mode now defaults to built-in Databricks vPower queries.
+
+That means these older static inputs are no longer normal required hosted
+inputs:
+
+- `CUSTOMER_SCOPE_ACCOUNTS_STATIC_JSON_PATH`
+- `CUSTOMER_SALES_TEAM_STATIC_MAP_JSON_PATH`
+- `CUSTOMER_SALES_TEAM_STATIC_MAP_JSON`
+
+They may still exist in the codebase as overrides or legacy fallbacks, but they
+should not be part of the default customer CI/CD contract.
+
+For customer teams copying this repo, the usual production path is:
+
+- provide the Databricks workspace values
+- provide the top-opps source
+- provide the contacts source
+- optionally qualify the vPower bronze catalog via:
+  - `CUSTOMER_SCOPE_ACCOUNTS_CATALOG`
+  - `CUSTOMER_SALES_TEAM_MAPPING_CATALOG`
+
+## E. Rep Lookup Input
+
+The repo still exposes:
+
+- `CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH`
+
+Treat it as optional and legacy-oriented unless your customer explicitly still
+wants the static rep-name lookup behavior.
+
+It is not part of the primary signed-in-user scope path.
+
+## F. Values That CI/CD Should Not Carry Forward From Old `.env.secure`
+
+Do not treat these as GitHub-managed production inputs:
+
+- `PLANNER_API_IMAGE`
+- `WRAPPER_IMAGE`
+
+Those are release outputs, not operator-supplied inputs.
+
+CI writes and consumes them through release metadata artifacts instead.
+
+## Recommended Customer Migration Checklist
+
+For a customer coming from a previous manual secure deployment:
+
+1. copy the old `.env.secure` into a temporary migration worksheet
+2. classify each key as:
+   - GitHub variable
+   - GitHub secret
+   - Key Vault secret
+   - no longer required
+3. keep `CUSTOMER_DATABRICKS_*` for the customer production runtime path
+4. remove static scope/sales-team JSON from the normal hosted setup unless the
+   customer explicitly needs a legacy fallback
+5. preserve only `CUSTOMER_SCOPE_ACCOUNTS_CATALOG` and
+   `CUSTOMER_SALES_TEAM_MAPPING_CATALOG` if their vPower bronze tables need a
+   non-default catalog qualifier
+6. validate `VALIDATE_USER_UPN` against the customer Databricks workspace before
+   the first production rollout
+7. test `integration` first, then `main`
+
+## Why `PLANNER_API_BEARER_TOKEN` And `VALIDATE_USER_UPN` Are Optional
+
+These two values tend to look more important than they really are.
+
+### `PLANNER_API_BEARER_TOKEN`
+
+Purpose:
+
+- lets CI run an authenticated chat turn against the planner API during
+  validation
+
+What it is **not**:
+
+- it is not a core planner deployment input
+- it is not required for the planner container to start
+- it is not required for wrapper deployment
+
+Current behavior:
+
+- integration validation only requires it when `REQUIRE_AUTHENTICATED_E2E=true`
+- the planner validation script will still do health checks without it
+- production smoke validation can also skip authenticated chat when it is not
+  present
+
+Recommended treatment:
+
+- document it as optional validation-only
+- add it only if the customer wants richer automated chat validation in CI/CD
+
+### `VALIDATE_USER_UPN`
+
+Purpose:
+
+- gives CI a known seller identity to test direct Databricks-backed territory
+  and scoped-account resolution
+
+What it is **not**:
+
+- it is not a required production runtime setting
+- it is not needed for planner deployment itself
+- it is not needed for wrapper deployment itself
+
+Recommended treatment:
+
+- use it only when the customer wants automated query-path validation in CI/CD
+- if present, choose a stable non-admin seller identity that is expected to
+  have a predictable territory/account scope
+
+## Suggested GitHub Environment Inventory
+
+Use the following practical split.
+
+### Integration Variables
+
+- Azure subscription, tenant, location, resource group
+- ACR name
+- Container Apps names
+- planner/wrapper public IDs and audiences
+- either secure mock Databricks values or customer non-production Databricks
+  values
+- validation flags and validation UPN
+
+Typical integration variable keys in this repo:
+
+- `AZURE_CLIENT_ID`
+- `AZURE_TENANT_ID`
+- `AZURE_SUBSCRIPTION_ID`
+- `AZURE_RESOURCE_GROUP`
+- `AZURE_LOCATION`
+- `ACR_NAME`
+- `ACA_ENVIRONMENT_NAME`
+- `PLANNER_ACA_APP_NAME`
+- `WRAPPER_ACA_APP_NAME`
+- `AZURE_OPENAI_ACCOUNT_NAME`
+- `AZURE_OPENAI_ENDPOINT`
+- `AZURE_OPENAI_DEPLOYMENT`
+- `PLANNER_API_CLIENT_ID`
+- `PLANNER_API_EXPECTED_AUDIENCE`
+- `PLANNER_API_SCOPE`
+- `BOT_APP_ID`
+- `BOT_SSO_APP_ID`
+- `BOT_SSO_RESOURCE`
+- `CUSTOMER_DATABRICKS_HOST`
+- `CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID`
+- `CUSTOMER_DATABRICKS_OBO_SCOPE`
+- `CUSTOMER_DATABRICKS_WAREHOUSE_ID`
+- `CUSTOMER_TOP_OPPORTUNITIES_SOURCE`
+- `CUSTOMER_CONTACTS_SOURCE`
+- `CUSTOMER_SCOPE_ACCOUNTS_CATALOG`
+- `CUSTOMER_SALES_TEAM_MAPPING_CATALOG`
+- `VALIDATE_USER_UPN`
+- `ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION`
+
+Treat the last two as validation-only knobs, not core runtime deployment inputs.
+
+### Integration Secrets
+
+- planner client secret
+- bot password
+- planner bearer token if the integration validation requires it
+
+Typical integration secret keys in this repo:
+
+- `PLANNER_API_CLIENT_SECRET`
+- `BOT_APP_PASSWORD`
+- `PLANNER_API_BEARER_TOKEN`
+
+### Production Variables
+
+- Azure subscription, tenant, location, resource group
+- ACR name
+- Container Apps names
+- planner/wrapper public IDs and audiences
+- `CUSTOMER_DATABRICKS_*`
+- `CUSTOMER_TOP_OPPORTUNITIES_SOURCE`
+- `CUSTOMER_CONTACTS_SOURCE`
+- optional vPower catalog qualifiers
+
+Typical production variable keys in this repo:
+
+- `AZURE_CLIENT_ID`
+- `AZURE_TENANT_ID`
+- `AZURE_SUBSCRIPTION_ID`
+- `AZURE_RESOURCE_GROUP`
+- `AZURE_LOCATION`
+- `ACR_NAME`
+- `ACA_ENVIRONMENT_NAME`
+- `PLANNER_ACA_APP_NAME`
+- `WRAPPER_ACA_APP_NAME`
+- `AZURE_OPENAI_ACCOUNT_NAME`
+- `AZURE_OPENAI_ENDPOINT`
+- `AZURE_OPENAI_DEPLOYMENT`
+- `PLANNER_API_CLIENT_ID`
+- `PLANNER_API_EXPECTED_AUDIENCE`
+- `PLANNER_API_SCOPE`
+- `BOT_APP_ID`
+- `BOT_SSO_APP_ID`
+- `BOT_SSO_RESOURCE`
+- `CUSTOMER_DATABRICKS_HOST`
+- `CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID`
+- `CUSTOMER_DATABRICKS_OBO_SCOPE`
+- `CUSTOMER_DATABRICKS_WAREHOUSE_ID`
+- `CUSTOMER_TOP_OPPORTUNITIES_SOURCE`
+- `CUSTOMER_CONTACTS_SOURCE`
+- `CUSTOMER_SCOPE_ACCOUNTS_CATALOG`
+- `CUSTOMER_SALES_TEAM_MAPPING_CATALOG`
+- `VALIDATE_USER_UPN`
+
+Treat `VALIDATE_USER_UPN` as optional validation-only configuration. It is not
+required for normal production deployment.
+
+### Production Secrets
+
+- planner client secret
+- bot password
+- optional registry password if the runtime needs it
+- planner bearer token if required for smoke validation
+
+Typical production secret keys in this repo:
+
+- `PLANNER_API_CLIENT_SECRET`
+- `BOT_APP_PASSWORD`
+- `PLANNER_API_BEARER_TOKEN`
+- `CONTAINER_REGISTRY_PASSWORD` when required by the customer's registry model
+
+## Basic Setup Walkthrough For A Customer Team
+
+This is the shortest end-to-end setup path for a customer who already has the
+Azure and Databricks runtime environment.
+
+1. fork or copy the repo
+2. create the `dev`, `integration`, and `main` branch protections
+3. create the GitHub Environments: `integration`, `production`,
+   `teams-catalog-admin`, and `bootstrap-foundation`
+4. create the Azure OIDC principal for `integration`
+5. create the Azure OIDC principal for `production`
+6. assign Azure RBAC for those principals
+7. populate `integration` GitHub variables and secrets
+8. populate `production` GitHub variables and secrets
+9. if using Key Vault, add `KEYVAULT_NAME` plus the secret-name variables and
+   confirm the runner can reach Key Vault
+10. copy the values from the customer's old `.env.secure` into the matching
+    GitHub variables and secrets
+11. for production, keep the customer Databricks connection values in the
+    `CUSTOMER_*` namespace
+12. run a small PR through `dev`
+13. promote to `integration`
+14. validate that `deploy-integration.yml` works against either the secure mock
+    environment or the customer's non-production Databricks environment
+15. promote to `main`
+16. confirm the production environment pauses for approval
+17. approve and complete the first production release
+
+## Team Collaboration Model
 
 ## Dev Team
 
@@ -527,14 +1330,8 @@ Owns:
 - wrapper code
 - tests
 - package content
-- non-privileged deployment script changes
+- non-privileged deploy helper changes
 - release notes for functional behavior
-
-Dev is required on:
-
-- all feature PRs
-- app-level bug fixes
-- package changes
 
 ## Infra Team
 
@@ -542,159 +1339,99 @@ Owns:
 
 - Azure IaC
 - GitHub OIDC setup
-- Azure RBAC model
+- Azure RBAC
 - Key Vault integration
 - Container Apps environment settings
-- private networking
+- networking
 - Databricks platform integration model
-- production deployment approvals
-
-Infra is required on:
-
-- infra-affecting PRs
-- production environment approval
-- bootstrap/foundation changes
+- production deployment approval
 
 ## M365 Admin Team
 
 Owns:
 
 - Teams catalog publish
-- install policy and app availability
-- Entra/M365 app publishing governance
-- any delegated-admin publish path
+- tenant install policy
+- app exposure governance
+- delegated admin publish/install operations
 
-M365 admin is required on:
+## Collaboration Sequence
 
-- app publish/update
-- package approval for tenant exposure
-- changes that affect app registration/publish policy
+### App-Only Change
 
-## Collaboration Model
+1. Dev implements on `feature/*`
+2. merge to `dev`
+3. CI passes
+4. promote to `integration`
+5. integration deploy validates runtime
+6. promote to `main`
+7. Infra approves production deployment
+8. production deploy runs
+9. M365 admin is only involved if the package changed and must be republished
 
-### Work In Parallel
+### App Plus Infra Change
 
-Dev and Infra should work in parallel at design time when a change clearly needs
-new infrastructure.
+1. Dev and Infra align during design
+2. Dev implements code and deployment changes
+3. Infra reviews deployment impact
+4. merge to `dev`
+5. promote to `integration`
+6. run integration deployment and, if necessary, manual bootstrap/foundation work
+7. confirm runtime behavior
+8. promote to `main`
+9. Infra approves production deployment
 
-That is better than Dev finishing a feature first and only then discovering:
+### App Plus Infra Plus M365 Publish Change
 
-- missing identity permissions
-- missing secrets
-- missing network path
-- missing resource provisioning
+1. Dev and Infra align on runtime and auth implications
+2. code and manifest/package changes land on `dev`
+3. integration validates runtime first
+4. production runtime deployment happens after approval
+5. M365 admin runs `publish-teams-catalog.yml` after runtime is healthy
 
-### Work In Sequence At Control Points
+Key rule:
 
-The teams should converge only at these control points:
+- do not make Teams publish the first release step for a change that also
+  affects backend runtime behavior
 
-1. PR review
-2. integration deployment
-3. production deployment
-4. Teams catalog publish
+## Best Practices
 
-That keeps collaboration intentional instead of making every change a three-team
-serial handoff.
+1. Keep normal application CD separate from bootstrap/foundation changes.
+2. Promote immutable image references from integration to production.
+3. Keep RBAC repair out of normal deploy workflows.
+4. Keep Teams publish independent from Azure deploy.
+5. Make integration realistic enough to prove the customer query path.
+6. Use human approvals only at the high-value control points.
 
-## Required PR Metadata For Infra-Affecting Changes
+## First-Time Customer Cutover Checklist
 
-Every PR that changes deployment behavior should include a short deployment
-impact note.
+- GitHub Environments created
+- production approval gate configured
+- OIDC identities created
+- Azure RBAC assigned
+- GitHub variables populated
+- GitHub secrets or Key Vault secrets populated
+- existing customer Azure resource names confirmed
+- existing customer Databricks runtime inputs confirmed
+- validation UPN confirmed
+- integration drill completed
+- production approval drill completed
+- Teams publish path documented separately
 
-Recommended template:
+## Final Guidance
 
-- change class: `app-only`, `app+infra`, or `app+infra+m365`
-- new Azure resources: yes/no
-- new secrets: yes/no
-- new RBAC: yes/no
-- new environment variables: list
-- bootstrap required: yes/no
-- Teams republish required: yes/no
-- rollback method: short description
+If a customer is coming from an older version of this repo and a manually
+maintained `mvp/.env.secure`, the most important migration rule is:
 
-## Best Practices For This Repo
+- **do not start by rewriting env names**
+- first identify which values are still runtime inputs, which ones are now CI
+  outputs, and which old static JSON inputs are no longer part of the normal
+  hosted customer path
 
-## 1. Separate Normal CD From Bootstrap
+For this repo today, the safe production mental model is:
 
-Normal application delivery should not invoke full bootstrap on every merge.
-
-Use:
-
-- deploy workflows for routine planner/wrapper promotion
-- bootstrap workflows only for foundational infra changes
-
-## 2. Prefer Immutable Image Promotion
-
-Promote the same planner and wrapper artifacts from integration to production.
-
-## 3. Keep Role Assignment Out Of Routine CD Where Possible
-
-Pre-provision stable RBAC instead of relying on normal deploy workflows to
-create role assignments dynamically.
-
-## 4. Keep Teams Publish Independent
-
-Do not block normal Azure deployment on Teams publish unless the release
-actually changes the published app surface.
-
-## 5. Make Integration Real
-
-The integration environment should be stable enough to prove:
-
-- planner deploy works
-- wrapper deploy works
-- Databricks query path works
-- auth path works for at least one known integration identity
-
-## 6. Preserve Human Approval At The Right Boundaries
-
-Use automation for repetition.
-
-Use human approval for:
-
-- production environment promotion
-- foundation/bootstrap changes
-- tenant app catalog publish
-
-## Suggested Initial Implementation Order
-
-### Phase 1
-
-- add `ci.yml`
-- add `build-m365-package.yml`
-- add branch protections
-
-### Phase 2
-
-- add Azure OIDC identities for integration and production
-- add `deploy-integration.yml`
-- add `deploy-production.yml`
-- store secrets in Key Vault and fetch them during workflow execution
-
-### Phase 3
-
-- add `bootstrap-foundation.yml`
-- add `publish-teams-catalog.yml`
-- add deployment metadata artifacts and release summaries
-
-### Phase 4
-
-- refine path-based workflow routing
-- add rollback workflow or rollback runbook
-- add release dashboards or change summaries
-
-## Decision Summary
-
-The recommended operating model for this repo is:
-
-- CI on `dev`
-- automatic Azure CD on `integration`
-- approved Azure CD on `main`
-- separate manual admin workflow for Teams catalog publish
-- OIDC for Azure
-- Key Vault for secrets
-- immutable artifact promotion across environments
-- Dev, Infra, and M365 Admin collaboration only at clear control points
-
-This gives you speed for normal development, proper control for infrastructure
-changes, and a clean separation of duties for M365 publish operations.
+- planner and wrapper are deployed by GitHub Actions
+- production runtime values come from GitHub Environments and optional Key Vault
+- customer Databricks production inputs still live under `CUSTOMER_*`
+- integration proves the release
+- production promotes the same release after approval

@@ -34,8 +34,6 @@ jobs:
       AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
       AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
       INFRA_NAME_PREFIX: ${{ vars.INFRA_NAME_PREFIX }}
-      SELLER_A_UPN: ${{ vars.SELLER_A_UPN }}
-      SELLER_B_UPN: ${{ vars.SELLER_B_UPN }}
       CUSTOMER_DATABRICKS_HOST: ${{ vars.CUSTOMER_DATABRICKS_HOST }}
       CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID: ${{ vars.CUSTOMER_DATABRICKS_AZURE_RESOURCE_ID }}
       CUSTOMER_DATABRICKS_OBO_SCOPE: ${{ vars.CUSTOMER_DATABRICKS_OBO_SCOPE }}
@@ -58,9 +56,11 @@ jobs:
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
       - name: Render bootstrap input file
         env:
-          OUTPUT_INPUT_FILE: ${{ github.event.inputs.mode == 'secure' && 'mvp/.env.secure.inputs' || 'mvp/.env.inputs' }}
+          OUTPUT_INPUT_FILE: ${{ runner.temp }}/${{ github.event.inputs.mode == 'secure' && 'bootstrap.secure.inputs' || 'bootstrap.open.inputs' }}
         run: bash mvp/infra/scripts/ci-render-bootstrap-inputs.sh
       - name: Run Azure bootstrap
         env:
           ENABLE_MOCK_DATABRICKS_ENVIRONMENT: ${{ github.event.inputs.enable_mock_databricks_environment }}
+          INPUT_FILE: ${{ runner.temp }}/${{ github.event.inputs.mode == 'secure' && 'bootstrap.secure.inputs' || 'bootstrap.open.inputs' }}
+          RUNTIME_FILE: ${{ runner.temp }}/${{ github.event.inputs.mode == 'secure' && 'bootstrap.secure.env' || 'bootstrap.open.env' }}
         run: bash mvp/infra/scripts/bootstrap-azure-demo.sh "${{ github.event.inputs.mode }}"

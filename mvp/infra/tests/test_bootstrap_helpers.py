@@ -42,8 +42,6 @@ def test_build_runtime_env_secure_derives_names_and_demo_users(tmp_path: Path) -
         AZURE_RESOURCE_GROUP=rg-daily-account-planner-secure
         AZURE_LOCATION=eastus2
         INFRA_NAME_PREFIX=dailyacctplannersec
-        SELLER_A_UPN=seller-a@example.com
-        SELLER_B_UPN=seller-b@example.com
         """,
     )
 
@@ -55,8 +53,8 @@ def test_build_runtime_env_secure_derives_names_and_demo_users(tmp_path: Path) -
     assert runtime["KEYVAULT_NAME"] == "dailyacctplannerseckv"
     assert runtime["BOT_RESOURCE_NAME"] == "dailyacctplannersecbot"
     assert runtime["DATABRICKS_SKIP_CATALOG_CREATE"] == "true"
-    assert runtime["DATABRICKS_WORKSPACE_USER_UPNS"] == "seller-a@example.com,seller-b@example.com"
-    assert runtime["WRAPPER_DEBUG_ALLOWED_UPNS"] == "seller-a@example.com,seller-b@example.com"
+    assert runtime["DATABRICKS_WORKSPACE_USER_UPNS"] == ""
+    assert runtime["WRAPPER_DEBUG_ALLOWED_UPNS"] == ""
     assert runtime["M365_APP_PACKAGE_ID"]
 
 
@@ -74,8 +72,6 @@ def test_build_runtime_env_open_derives_environment_specific_app_prefix(tmp_path
         AZURE_RESOURCE_GROUP=rg-daily-account-planner
         AZURE_LOCATION=eastus
         INFRA_NAME_PREFIX=veempoc
-        SELLER_A_UPN=seller-a@example.com
-        SELLER_B_UPN=seller-b@example.com
         """,
     )
 
@@ -97,8 +93,6 @@ def test_build_runtime_env_preserves_existing_generated_values_for_same_inputs(t
             "AZURE_RESOURCE_GROUP": "rg-daily-account-planner",
             "AZURE_LOCATION": "eastus",
             "INFRA_NAME_PREFIX": "dailyacctplanneropen",
-            "SELLER_A_UPN": "seller-a@example.com",
-            "SELLER_B_UPN": "seller-b@example.com",
         },
         "open",
     )
@@ -120,8 +114,6 @@ def test_build_runtime_env_preserves_existing_generated_values_for_same_inputs(t
         AZURE_RESOURCE_GROUP=rg-daily-account-planner
         AZURE_LOCATION=eastus
         INFRA_NAME_PREFIX=dailyacctplanneropen
-        SELLER_A_UPN=seller-a@example.com
-        SELLER_B_UPN=seller-b@example.com
         """,
     )
 
@@ -145,8 +137,6 @@ def test_build_runtime_env_drops_stale_generated_values_when_inputs_change(tmp_p
             "AZURE_RESOURCE_GROUP": "rg-old",
             "AZURE_LOCATION": "eastus",
             "INFRA_NAME_PREFIX": "oldprefix",
-            "SELLER_A_UPN": "seller-a@example.com",
-            "SELLER_B_UPN": "seller-b@example.com",
         },
         "open",
     )
@@ -169,8 +159,6 @@ def test_build_runtime_env_drops_stale_generated_values_when_inputs_change(tmp_p
         AZURE_RESOURCE_GROUP=rg-daily-account-planner
         AZURE_LOCATION=eastus
         INFRA_NAME_PREFIX=dailyacctplanneropen
-        SELLER_A_UPN=seller-a@example.com
-        SELLER_B_UPN=seller-b@example.com
         """,
     )
 
@@ -189,12 +177,10 @@ def test_missing_required_inputs_detects_blank_values() -> None:
             "AZURE_RESOURCE_GROUP": "rg",
             "AZURE_LOCATION": "eastus2",
             "INFRA_NAME_PREFIX": "prefix",
-            "SELLER_A_UPN": "seller-a@example.com",
-            "SELLER_B_UPN": "",
         }
     )
 
-    assert missing_required_inputs(values, "secure") == ["AZURE_TENANT_ID", "SELLER_B_UPN"]
+    assert missing_required_inputs(values, "secure") == ["AZURE_TENANT_ID"]
 
 
 def test_derive_demo_users_falls_back_to_workspace_user_list() -> None:

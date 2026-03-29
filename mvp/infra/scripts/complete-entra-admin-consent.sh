@@ -17,15 +17,15 @@ else
 fi
 
 if [[ "$MODE" == "secure" ]]; then
-  INPUT_FILE="$ROOT_DIR/.env.secure.inputs"
-  INPUT_EXAMPLE="$ROOT_DIR/.env.secure.inputs.example"
-  RUNTIME_FILE="$ROOT_DIR/.env.secure"
-  RUNTIME_EXAMPLE="$ROOT_DIR/.env.secure.example"
+  INPUT_FILE="${INPUT_FILE:-$ROOT_DIR/.env.secure.inputs}"
+  INPUT_EXAMPLE="${INPUT_EXAMPLE:-$ROOT_DIR/.env.secure.inputs.example}"
+  RUNTIME_FILE="${RUNTIME_FILE:-$ROOT_DIR/.env.secure}"
+  RUNTIME_EXAMPLE="${RUNTIME_EXAMPLE:-$ROOT_DIR/.env.secure.example}"
 else
-  INPUT_FILE="$ROOT_DIR/.env.inputs"
-  INPUT_EXAMPLE="$ROOT_DIR/.env.inputs.example"
-  RUNTIME_FILE="$ROOT_DIR/.env"
-  RUNTIME_EXAMPLE="$ROOT_DIR/.env.example"
+  INPUT_FILE="${INPUT_FILE:-$ROOT_DIR/.env.inputs}"
+  INPUT_EXAMPLE="${INPUT_EXAMPLE:-$ROOT_DIR/.env.inputs.example}"
+  RUNTIME_FILE="${RUNTIME_FILE:-$ROOT_DIR/.env}"
+  RUNTIME_EXAMPLE="${RUNTIME_EXAMPLE:-$ROOT_DIR/.env.example}"
 fi
 
 # shellcheck disable=SC1091
