@@ -6,13 +6,6 @@ on:
       - dev
       - integration
       - main
-    paths-ignore:
-      - "**/*.md"
-      - "**/*.MD"
-      - "mvp/.env.example"
-      - "mvp/.env.secure.example"
-      - "mvp/.env.inputs.example"
-      - "mvp/.env.secure.inputs.example"
   push:
     branches:
       - dev
@@ -127,7 +120,7 @@ jobs:
   python-tests:
     name: Python Tests (${{ matrix.name }})
     needs: changes
-    if: needs.changes.outputs.ci_relevant == 'true' || needs.changes.outputs.local_dev_only == 'true'
+    if: github.event_name == 'pull_request' || needs.changes.outputs.ci_relevant == 'true' || needs.changes.outputs.local_dev_only == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -140,22 +133,35 @@ jobs:
           - name: agents
             command: uv run --project mvp python -m pytest -q mvp/agents/tests
     steps:
+      - name: Skip Python Tests
+        if: needs.changes.outputs.ci_relevant != 'true' && needs.changes.outputs.local_dev_only != 'true'
+        run: echo "Docs-only or env-template-only change; Python tests intentionally skipped."
       - uses: actions/checkout@v5
+        if: needs.changes.outputs.ci_relevant == 'true' || needs.changes.outputs.local_dev_only == 'true'
       - uses: actions/setup-python@v6
+        if: needs.changes.outputs.ci_relevant == 'true' || needs.changes.outputs.local_dev_only == 'true'
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v7
+        if: needs.changes.outputs.ci_relevant == 'true' || needs.changes.outputs.local_dev_only == 'true'
       - run: uv sync --project mvp --group dev
+        if: needs.changes.outputs.ci_relevant == 'true' || needs.changes.outputs.local_dev_only == 'true'
       - run: ${{ matrix.command }}
+        if: needs.changes.outputs.ci_relevant == 'true' || needs.changes.outputs.local_dev_only == 'true'
 
   shell-validation:
     name: Shell Validation
     needs: changes
-    if: needs.changes.outputs.ci_relevant == 'true' || needs.changes.outputs.local_dev_only == 'true'
+    if: github.event_name == 'pull_request' || needs.changes.outputs.ci_relevant == 'true' || needs.changes.outputs.local_dev_only == 'true'
     runs-on: ubuntu-latest
     steps:
+      - name: Skip Shell Validation
+        if: needs.changes.outputs.ci_relevant != 'true' && needs.changes.outputs.local_dev_only != 'true'
+        run: echo "Docs-only or env-template-only change; shell validation intentionally skipped."
       - uses: actions/checkout@v5
+        if: needs.changes.outputs.ci_relevant == 'true' || needs.changes.outputs.local_dev_only == 'true'
       - name: Validate infra scripts
+        if: needs.changes.outputs.ci_relevant == 'true' || needs.changes.outputs.local_dev_only == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -163,6 +169,7 @@ jobs:
             bash -n "$script_path"
           done < <(find mvp/infra/scripts -maxdepth 1 -type f -name '*.sh' | sort)
       - name: Validate selected repo scripts
+        if: needs.changes.outputs.ci_relevant == 'true' || needs.changes.outputs.local_dev_only == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -173,26 +180,38 @@ jobs:
   docker-build-smoke:
     name: Docker Build Smoke
     needs: changes
-    if: needs.changes.outputs.deploy_relevant == 'true'
+    if: github.event_name == 'pull_request' || needs.changes.outputs.deploy_relevant == 'true'
     runs-on: ubuntu-latest
     steps:
+      - name: Skip Docker Build Smoke
+        if: needs.changes.outputs.deploy_relevant != 'true'
+        run: echo "No deploy-relevant changes; Docker smoke build intentionally skipped."
       - uses: actions/checkout@v5
+        if: needs.changes.outputs.deploy_relevant == 'true'
       - name: Build planner image locally
+        if: needs.changes.outputs.deploy_relevant == 'true'
         run: docker build -f mvp/agents/Dockerfile -t planner-smoke:ci mvp
       - name: Build wrapper image locally
+        if: needs.changes.outputs.deploy_relevant == 'true'
         run: docker build -f mvp/m365_wrapper/Dockerfile -t wrapper-smoke:ci mvp
 
   package-m365:
     name: Package M365 Artifact
     needs: changes
-    if: needs.changes.outputs.package_relevant == 'true' || needs.changes.outputs.wrapper_runtime == 'true'
+    if: github.event_name == 'pull_request' || needs.changes.outputs.package_relevant == 'true' || needs.changes.outputs.wrapper_runtime == 'true'
     runs-on: ubuntu-latest
     steps:
+      - name: Skip Package Build
+        if: needs.changes.outputs.package_relevant != 'true' && needs.changes.outputs.wrapper_runtime != 'true'
+        run: echo "No package-relevant changes; M365 package build intentionally skipped."
       - uses: actions/checkout@v5
+        if: needs.changes.outputs.package_relevant == 'true' || needs.changes.outputs.wrapper_runtime == 'true'
       - uses: actions/setup-python@v6
+        if: needs.changes.outputs.package_relevant == 'true' || needs.changes.outputs.wrapper_runtime == 'true'
         with:
           python-version: "3.12"
       - name: Build package with CI-safe placeholders
+        if: needs.changes.outputs.package_relevant == 'true' || needs.changes.outputs.wrapper_runtime == 'true'
         env:
           ENV_FILE: ${{ runner.temp }}/empty.env
           BOT_APP_ID: 11111111-1111-1111-1111-111111111111
@@ -205,6 +224,7 @@ jobs:
           touch "$ENV_FILE"
           bash mvp/scripts/build-m365-app-package.sh
       - uses: actions/upload-artifact@v6
+        if: needs.changes.outputs.package_relevant == 'true' || needs.changes.outputs.wrapper_runtime == 'true'
         with:
           name: m365-package-${{ github.sha }}
           path: |
