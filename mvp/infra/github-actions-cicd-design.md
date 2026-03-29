@@ -651,8 +651,9 @@ Typical secrets:
 
 - `PLANNER_API_CLIENT_SECRET`
 - `BOT_APP_PASSWORD`
-- `PLANNER_API_BEARER_TOKEN`
-- optional registry password or API-key fallback values
+- optional `PLANNER_API_BEARER_TOKEN`
+- optional API-key fallback values when the customer intentionally uses an
+  open-mode or other non-hosted path
 
 ## Teams/M365 Publish Auth
 
@@ -1070,23 +1071,29 @@ the minimum meaningful production setup surface is:
 
 ### Optional Production Secrets
 
-- `CONTAINER_REGISTRY_PASSWORD`
-  - only when the registry model requires it
 - `PLANNER_API_BEARER_TOKEN`
-  - optional, only for richer automated smoke validation
+  - optional, advanced validation only
+  - not a normal long-lived secret
+  - only use this if the customer has a separate pre-run process that mints a
+    fresh delegated Entra token for `PLANNER_API_SCOPE`
+  - most customers should leave this unset and allow the workflow to perform
+    health-only validation instead of authenticated chat smoke tests
 
 ### Optional Production Variables
 
 - `VALIDATE_USER_UPN`
+  - seller email/UPN used by the direct `sf_vpower_bronze` validation query
   - only needed when the customer wants automated direct validation of the
     vPower query path in CI/CD
+  - this should be a known seller who is expected to resolve to territory and
+    scoped accounts in the target Databricks workspace
 - `ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION`
   - optional validation flag
+  - set this to `true` only on runners that can reach the target Databricks
+    workspace directly
 - `WRAPPER_ENABLE_DEBUG_CHAT`
 - `WRAPPER_DEBUG_ALLOWED_UPNS`
 - `WRAPPER_DEBUG_EXPECTED_AUDIENCE`
-- `CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH`
-  - legacy/optional
 
 ## 5B. What Customers Do Not Need To Provide Manually
 
@@ -1241,6 +1248,150 @@ Recommended first drill:
 8. approve it
 9. confirm `deploy-production.yml` completes without rebuilding artifacts
 
+### Post-Setup Validation Matrix
+
+After the team finishes the GitHub and Azure setup, do not rely on a single PR
+to prove everything. Run a short sequence of deliberately small changes so the
+customer can see which workflow paths fire and which ones do not.
+
+#### Drill 1: Documentation-Only Change
+
+Purpose:
+
+- prove the repo still accepts low-risk documentation updates
+- prove deploy workflows do not perform a runtime deployment for docs-only
+  changes
+
+Suggested change:
+
+- edit one markdown file such as:
+  - `README.md`
+  - `mvp/infra/github-actions-cicd-design.md`
+
+Expected result:
+
+- PR to `dev` runs `ci.yml`
+- docs-only checks fast-pass where designed
+- no integration runtime deploy should happen from a docs-only promotion
+- no production runtime deploy should happen from a docs-only promotion
+
+#### Drill 2: Planner Runtime Change
+
+Purpose:
+
+- prove planner code changes run CI
+- prove the integration deploy path builds or resolves the release metadata and
+  deploys the planner/wrapper stack correctly
+- prove production promotion reuses the tested artifact
+
+Suggested change:
+
+- add a safe, visible non-functional change such as:
+  - adjust one log line in `mvp/agents/api.py`
+  - add a tiny unit test in `mvp/agents/tests/`
+
+Expected result:
+
+1. PR into `dev`
+   - `ci.yml` runs tests, shell validation, Docker smoke, and package build
+2. promote `dev` to `integration`
+   - `deploy-integration.yml` runs
+   - integration environment receives the new release
+   - deployed validations pass
+3. promote `integration` to `main`
+   - `deploy-production.yml` pauses for approval
+   - after approval, production deploy completes using the same release
+     metadata/image refs rather than rebuilding
+
+#### Drill 3: Infra-Oriented Deploy Helper Change
+
+Purpose:
+
+- prove infra-adjacent script changes still run the correct guarded deployment
+  path
+- prove the team understands when a change is deploy-relevant
+
+Suggested change:
+
+- make a small safe change to one deploy or validation helper, for example:
+  - add or adjust a non-sensitive log line in
+    `mvp/infra/scripts/ci-validate-integration.sh`
+  - add a comment or harmless echo in
+    `mvp/infra/scripts/deploy-planner-api.sh`
+
+Expected result:
+
+- PR into `dev` runs `ci.yml`
+- promotion to `integration` triggers `deploy-integration.yml`
+- promotion to `main` triggers `deploy-production.yml` and approval gating
+
+#### Drill 4: Direct Customer Query Validation
+
+Purpose:
+
+- prove the Databricks-backed customer query path works in automation when the
+  customer wants that extra check
+
+Suggested setup:
+
+- set `ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION=true`
+- set `VALIDATE_USER_UPN=<real seller upn>`
+- only do this on a runner that can actually reach the target Databricks
+  workspace
+
+Expected result:
+
+- integration or production validation runs:
+  - `bash mvp/infra/scripts/validate-customer-vpower-query.sh`
+- the chosen seller UPN resolves territory and scoped accounts successfully
+
+If this drill fails, the likely causes are:
+
+- the runner cannot reach Databricks
+- the selected seller UPN has no expected scope in that workspace
+- Databricks grants or warehouse access are incomplete
+
+#### Drill 5: Optional Authenticated Planner E2E
+
+Purpose:
+
+- prove authenticated planner API chat validation if the customer explicitly
+  wants it
+
+Suggested setup:
+
+- provide a freshly minted delegated token in `PLANNER_API_BEARER_TOKEN`
+- make sure the token audience matches `PLANNER_API_SCOPE`
+
+Expected result:
+
+- `validate-planner-service-e2e.sh` performs:
+  - health check
+  - session creation
+  - authenticated message turn(s)
+
+If this token is not supplied, the workflow should still succeed with health-only
+validation.
+
+### Recommended Order For Customer Validation
+
+1. run Drill 1 first
+2. run Drill 2 next
+3. run Drill 3 if the customer expects to maintain deploy helpers or IaC
+4. enable Drill 4 only after the basic pipeline is already healthy
+5. enable Drill 5 only if the customer specifically wants authenticated API
+   smoke tests in CI/CD
+
+### Suggested Evidence To Capture
+
+For the customer's internal handoff, save:
+
+- the successful `ci.yml` run URL for a docs-only PR
+- the successful `deploy-integration.yml` run URL for a runtime PR
+- the successful `deploy-production.yml` run URL for a promoted release
+- the GitHub Environment screenshot showing production approval gating
+- the integration validation output for `VALIDATE_USER_UPN` if Drill 4 is enabled
+
 ## Migration Guide For Older `.env.secure` Users
 
 This repo evolved over time, and older manual secure deployments may not map
@@ -1339,17 +1490,6 @@ For customer teams copying this repo, the usual production path is:
   - `CUSTOMER_SCOPE_ACCOUNTS_CATALOG`
   - `CUSTOMER_SALES_TEAM_MAPPING_CATALOG`
 
-## E. Rep Lookup Input
-
-The repo still exposes:
-
-- `CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH`
-
-Treat it as optional and legacy-oriented unless your customer explicitly still
-wants the static rep-name lookup behavior.
-
-It is not part of the primary signed-in-user scope path.
-
 ## F. Values That CI/CD Should Not Carry Forward From Old `.env.secure`
 
 Do not treat these as GitHub-managed production inputs:
@@ -1432,13 +1572,14 @@ Treat the last two as validation-only knobs, not core runtime deployment inputs.
 
 - planner client secret
 - bot password
-- planner bearer token if the integration validation requires it
+- optional planner bearer token only when the customer intentionally adds
+  authenticated chat smoke validation with a freshly minted delegated token
 
 Typical integration secret keys in this repo:
 
 - `PLANNER_API_CLIENT_SECRET`
 - `BOT_APP_PASSWORD`
-- `PLANNER_API_BEARER_TOKEN`
+- optional `PLANNER_API_BEARER_TOKEN`
 
 ### Production Variables
 
@@ -1480,23 +1621,35 @@ Typical production variable keys in this repo:
 - `CUSTOMER_SCOPE_ACCOUNTS_CATALOG`
 - `CUSTOMER_SALES_TEAM_MAPPING_CATALOG`
 - `VALIDATE_USER_UPN`
+- `ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION`
 
-Treat `VALIDATE_USER_UPN` as optional validation-only configuration. It is not
-required for normal production deployment.
+Treat `VALIDATE_USER_UPN` and
+`ENABLE_CUSTOMER_VPOWER_QUERY_VALIDATION` as validation-only configuration. They
+are not required for normal production deployment. Use them only when:
+
+- the GitHub runner can reach the target Databricks workspace directly
+- the customer wants CI/CD to prove the email-to-territory/email-to-scope query
+  path during deployment
+- `VALIDATE_USER_UPN` is set to a real seller UPN/email that should return
+  mapped territory data in that workspace
 
 ### Production Secrets
 
 - planner client secret
 - bot password
-- optional registry password if the runtime needs it
-- planner bearer token if required for smoke validation
+- optional planner bearer token only when the customer intentionally adds
+  authenticated chat smoke validation with a freshly minted delegated token
 
 Typical production secret keys in this repo:
 
 - `PLANNER_API_CLIENT_SECRET`
 - `BOT_APP_PASSWORD`
-- `PLANNER_API_BEARER_TOKEN`
-- `CONTAINER_REGISTRY_PASSWORD` when required by the customer's registry model
+- optional `PLANNER_API_BEARER_TOKEN`
+
+This repo's standard deployment path assumes Azure Container Registry and
+derives registry credentials from Azure at deploy time, so
+`CONTAINER_REGISTRY_PASSWORD` is not part of the normal customer setup
+contract.
 
 ## Basic Setup Walkthrough For A Customer Team
 

@@ -19,8 +19,8 @@ Note:
 - this document describes the seeded demo architecture on `main`
 - for the existing customer Databricks hosted mode, use the current operator
   documentation in:
-  - [`mvp/mvp-setup-and-deployment-runbook.md`](/mnt/c/testing/veeam/revenue_intelligence/mvp/mvp-setup-and-deployment-runbook.md)
-  - [`mvp/infra/README.md`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/README.md)
+  - [`mvp/mvp-setup-and-deployment-runbook.md`](mvp-setup-and-deployment-runbook.md)
+  - [`mvp/infra/README.md`](infra/README.md)
 
 The current operator deployment supports both:
 
