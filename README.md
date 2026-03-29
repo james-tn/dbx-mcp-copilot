@@ -6,15 +6,41 @@ Custom Engine exposure, delegated Databricks access, and Microsoft Agent
 Framework orchestration for `DailyAccountPlanner`, `AccountPulse`, and
 `NextMove`.
 
-## Start Here
+## Documentation Map
 
-- Architecture: [mvp/daily-account-planner-architecture.md](mvp/daily-account-planner-architecture.md)
-- MVP setup and deployment runbook: [mvp/mvp-setup-and-deployment-runbook.md](mvp/mvp-setup-and-deployment-runbook.md)
-- Open input env contract: `mvp/.env.inputs`
-- Secure input env contract: `mvp/.env.secure.inputs`
-- Generated runtime envs: `mvp/.env` and `mvp/.env.secure`
-- Infra entrypoints: [mvp/infra/README.md](mvp/infra/README.md)
-- General M365 integration guidance: [docs/m365-agentic-service-developer-guide.md](docs/m365-agentic-service-developer-guide.md)
+Canonical current docs:
+
+- Operator runbook: [mvp/mvp-setup-and-deployment-runbook.md](mvp/mvp-setup-and-deployment-runbook.md)
+- Runtime architecture: [mvp/daily-account-planner-architecture.md](mvp/daily-account-planner-architecture.md)
+- Infra/script index: [mvp/infra/README.md](mvp/infra/README.md)
+- GitHub Actions CI/CD setup: [mvp/infra/github-actions-cicd-design.md](mvp/infra/github-actions-cicd-design.md)
+
+Reference or historical docs:
+
+- Reusable M365 gateway pattern: [docs/m365-agentic-service-developer-guide.md](docs/m365-agentic-service-developer-guide.md)
+- DAP-compatible downstream API reference: [docs/dap_app_spec.md](docs/dap_app_spec.md)
+- Early platform design and tradeoff notes: [mvp/copilot-agent-design.md](mvp/copilot-agent-design.md)
+- DAP simulator experiment notes: [mvp/dap-simulator-auth-experiment-findings.md](mvp/dap-simulator-auth-experiment-findings.md)
+
+Environment file model:
+
+- Tracked templates:
+  - `mvp/.env.inputs.example`
+  - `mvp/.env.secure.inputs.example`
+  - `mvp/.env.example`
+  - `mvp/.env.secure.example`
+- Local operator-owned inputs:
+  - `mvp/.env.inputs`
+  - `mvp/.env.secure.inputs`
+- Generated runtime envs:
+  - `mvp/.env`
+  - `mvp/.env.secure`
+
+New docs and examples should prefer canonical hosted-runtime names such as
+`DATABRICKS_*`, `TOP_OPPORTUNITIES_*`, `CONTACTS_*`,
+`SCOPE_ACCOUNTS_*`, and `SALES_TEAM_MAPPING_*`. Legacy `CUSTOMER_*`
+aliases remain tolerated in some scripts for migration, but they are no longer
+the preferred contract in the documentation.
 
 ## MVP Layout
 
@@ -71,7 +97,8 @@ bash mvp/infra/scripts/bootstrap-m365-demo.sh open
 
 Before running the bootstrap scripts:
 
-- fill `mvp/.env.secure.inputs` or `mvp/.env.inputs`
+- copy and fill `mvp/.env.secure.inputs` or `mvp/.env.inputs` from the tracked
+  `*.example` templates
 - run `az login`
 - treat `mvp/.env` and `mvp/.env.secure` as generated runtime state, not hand-edited operator files
 

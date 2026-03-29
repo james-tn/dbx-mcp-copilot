@@ -112,7 +112,6 @@ def test_ci_render_runtime_env_uses_release_metadata_without_mutating_examples(t
             "CONTAINER_REGISTRY_SERVER": "intacr.azurecr.io",
             "CONTAINER_REGISTRY_USERNAME": "intacr",
             "CONTAINER_REGISTRY_PASSWORD": "registry-secret",
-            "CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH": "fixtures/customer_rep_lookup_static_map.json",
             "WRAPPER_BASE_URL": "https://wrapper.example.com",
         }
     )
@@ -124,7 +123,9 @@ def test_ci_render_runtime_env_uses_release_metadata_without_mutating_examples(t
     assert "WRAPPER_IMAGE=example.azurecr.io/daily-account-planner/wrapper:secure-abc123" in rendered
     assert "AZURE_OPENAI_AUTO_ROLE_ASSIGN=false" in rendered
     assert "ACA_ENVIRONMENT_NAME=aca-secure-int" in rendered
-    assert "CUSTOMER_DATABRICKS_WAREHOUSE_ID=warehouse-123" in rendered
+    assert "DATABRICKS_WAREHOUSE_ID=warehouse-123" in rendered
+    assert "TOP_OPPORTUNITIES_SOURCE=catalog.schema.account_iq_scores" in rendered
+    assert "CONTACTS_SOURCE=catalog.schema.aiq_contact" in rendered
     assert "CONTAINER_REGISTRY_SERVER=intacr.azurecr.io" in rendered
     assert "CONTAINER_REGISTRY_USERNAME=intacr" in rendered
     assert "CONTAINER_REGISTRY_PASSWORD=registry-secret" in rendered

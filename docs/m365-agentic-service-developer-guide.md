@@ -1,5 +1,9 @@
 # Deploying an Agentic Service to Microsoft 365 Copilot with Delegated OBO Access
 
+> Status: reusable pattern guide.
+> Use this when adapting another service to the same M365 gateway pattern.
+> For this repo's concrete operator flow, use the MVP runbook and CI/CD guide instead.
+
 You've built an agentic service. It works. It uses the framework you chose — maybe
 LangChain, maybe Semantic Kernel, maybe the Microsoft Agent Framework, maybe
 something entirely your own. It talks to your LLM, calls your downstream APIs, and

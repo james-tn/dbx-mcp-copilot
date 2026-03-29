@@ -17,9 +17,10 @@ seller experience with:
 Note:
 
 - this document describes the seeded demo architecture on `main`
-- for the customer-target mixed backend against an existing Databricks
-  environment and DAP API, see
-  [`mvp/customer-existing-databricks-architecture.md`](/mnt/c/testing/veeam/revenue_intelligence/mvp/customer-existing-databricks-architecture.md)
+- for the existing customer Databricks hosted mode, use the current operator
+  documentation in:
+  - [`mvp/mvp-setup-and-deployment-runbook.md`](/mnt/c/testing/veeam/revenue_intelligence/mvp/mvp-setup-and-deployment-runbook.md)
+  - [`mvp/infra/README.md`](/mnt/c/testing/veeam/revenue_intelligence/mvp/infra/README.md)
 
 The current operator deployment supports both:
 
@@ -90,7 +91,6 @@ The planner owns the business operations needed by the specialist agents:
 - scoped account retrieval
 - ranked opportunity retrieval
 - contact lookup
-- local developer rep lookup
 
 These operations remain typed, parameterized, and controlled by application
 code rather than by generic query generation.
@@ -271,7 +271,6 @@ Next Move:
 - supports deeper account guidance and email drafting
 - calls `get_top_opportunities(...)`
 - calls `get_account_contacts(account_id)`
-- can use `lookup_rep(...)` only in local development flows
 
 ## 6. Semantic Tool Contract
 
@@ -280,14 +279,13 @@ The planner keeps the seller-friendly tool contract:
 - `get_scoped_accounts()`
 - `get_top_opportunities(limit=5, offset=0, territory_override=None, filter_mode=None)`
 - `get_account_contacts(account_id)`
-- `lookup_rep(rep_name)` for local-only development
 
 These are planner-owned business tools backed by direct Databricks SQL.
 
 Additionally, Account Pulse owns two internal tools that are not part of the
 seller-facing shared planner contract:
 
-- `generate_account_pulse_briefing(request)`
+- `generate_account_pulse_briefing(request, accounts=None)`
 - `scan_parents_parallel(scan_targets)`
 
 Prompts must remain SQL-free.

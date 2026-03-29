@@ -1,5 +1,8 @@
-  
 # Daily Account Planner (DAP) API — Technical Documentation  
+
+> Status: reference-only document.
+> It describes the DAP-compatible downstream API pattern and simulator path,
+> not the current planner service API that powers this repo's main ACA runtime.
   
 **Version:** 1.0.0    
 **Production Status:** Production    

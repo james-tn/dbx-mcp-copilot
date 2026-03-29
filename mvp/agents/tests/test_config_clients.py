@@ -197,17 +197,15 @@ def test_dap_api_explicit_scope_and_audience_override_client_id_defaults(monkeyp
 
 
 def test_customer_top_opportunities_config_helpers(monkeypatch) -> None:
-    monkeypatch.setenv("CUSTOMER_TOP_OPPORTUNITIES_SOURCE", "prod_catalog.data_science_account_iq_gold.account_iq_scores")
-    monkeypatch.setenv("CUSTOMER_TOP_OPPORTUNITIES_CATALOG", "prod_catalog")
-    monkeypatch.setenv("CUSTOMER_TOP_OPPORTUNITIES_SCHEMA", "data_science_account_iq_gold")
-    monkeypatch.setenv("CUSTOMER_TOP_OPPORTUNITIES_TABLE", "account_iq_scores")
-    monkeypatch.setenv("CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON", '{"Scott":"Germany-ENT-Named-5"}')
+    monkeypatch.setenv("TOP_OPPORTUNITIES_SOURCE", "prod_catalog.data_science_account_iq_gold.account_iq_scores")
+    monkeypatch.setenv("TOP_OPPORTUNITIES_CATALOG", "prod_catalog")
+    monkeypatch.setenv("TOP_OPPORTUNITIES_SCHEMA", "data_science_account_iq_gold")
+    monkeypatch.setenv("TOP_OPPORTUNITIES_TABLE", "account_iq_scores")
 
     assert config.get_customer_top_opportunities_source() == "prod_catalog.data_science_account_iq_gold.account_iq_scores"
     assert config.get_customer_top_opportunities_catalog() == "prod_catalog"
     assert config.get_customer_top_opportunities_schema() == "data_science_account_iq_gold"
     assert config.get_customer_top_opportunities_table() == "account_iq_scores"
-    assert config.get_customer_rep_lookup_static_map_json() == '{"Scott":"Germany-ENT-Named-5"}'
 
 
 def test_secure_customer_defaults_enable_customer_backend_and_legacy_sources(monkeypatch) -> None:
@@ -228,28 +226,43 @@ def test_customer_databricks_host_enables_customer_backend_without_mode(monkeypa
     monkeypatch.setenv("SECURE_DEPLOYMENT", "false")
     monkeypatch.delenv("CUSTOMER_BACKEND_MODE", raising=False)
     monkeypatch.delenv("MOCK_DATABRICKS_ENVIRONMENT", raising=False)
-    monkeypatch.setenv("CUSTOMER_DATABRICKS_HOST", "https://adb-example.azuredatabricks.net")
+    monkeypatch.setenv("DATABRICKS_HOST", "https://adb-example.azuredatabricks.net")
+    monkeypatch.setenv("TOP_OPPORTUNITIES_SOURCE", "catalog.schema.account_iq_scores")
 
     assert config.get_customer_backend_mode() == "customer_existing_databricks"
     assert config.get_customer_backend_enabled() is True
 
 
 def test_customer_databricks_host_adds_https_when_missing(monkeypatch) -> None:
-    monkeypatch.setenv("CUSTOMER_DATABRICKS_HOST", "adb-example.azuredatabricks.net")
+    monkeypatch.setenv("DATABRICKS_HOST", "adb-example.azuredatabricks.net")
 
     assert config.get_customer_databricks_host() == "https://adb-example.azuredatabricks.net"
 
 
-def test_customer_static_map_helpers_can_load_from_path(monkeypatch, tmp_path: Path) -> None:
-    sales_team_path = tmp_path / "sales_team.json"
-    rep_lookup_path = tmp_path / "rep_lookup.json"
-    sales_team_path.write_text('{"seller@example.com":"GreatLakes-ENT-Named-1"}', encoding="utf-8")
-    rep_lookup_path.write_text('{"Scott Jackson":"Germany-ENT-Named-5"}', encoding="utf-8")
+def test_mock_databricks_mode_wins_over_host_detection(monkeypatch) -> None:
+    monkeypatch.setenv("SECURE_DEPLOYMENT", "true")
+    monkeypatch.setenv("MOCK_DATABRICKS_ENVIRONMENT", "true")
+    monkeypatch.setenv("DATABRICKS_HOST", "https://adb-example.azuredatabricks.net")
+    monkeypatch.setenv("TOP_OPPORTUNITIES_SOURCE", "catalog.schema.account_iq_scores")
 
-    monkeypatch.delenv("CUSTOMER_SALES_TEAM_STATIC_MAP_JSON", raising=False)
-    monkeypatch.delenv("CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON", raising=False)
-    monkeypatch.setenv("CUSTOMER_SALES_TEAM_STATIC_MAP_JSON_PATH", str(sales_team_path))
-    monkeypatch.setenv("CUSTOMER_REP_LOOKUP_STATIC_MAP_JSON_PATH", str(rep_lookup_path))
+    assert config.get_customer_backend_mode() == "demo_seeded"
+
+
+def test_customer_sales_team_static_map_helper_can_load_from_path(monkeypatch, tmp_path: Path) -> None:
+    sales_team_path = tmp_path / "sales_team.json"
+    sales_team_path.write_text('{"seller@example.com":"GreatLakes-ENT-Named-1"}', encoding="utf-8")
+
+    monkeypatch.delenv("SALES_TEAM_STATIC_MAP_JSON", raising=False)
+    monkeypatch.setenv("SALES_TEAM_STATIC_MAP_JSON_PATH", str(sales_team_path))
 
     assert config.get_customer_sales_team_static_map_json() == '{"seller@example.com":"GreatLakes-ENT-Named-1"}'
-    assert config.get_customer_rep_lookup_static_map_json() == '{"Scott Jackson":"Germany-ENT-Named-5"}'
+
+
+def test_customer_config_helpers_still_accept_legacy_customer_aliases(monkeypatch) -> None:
+    monkeypatch.setenv("CUSTOMER_DATABRICKS_HOST", "adb-legacy.azuredatabricks.net")
+    monkeypatch.setenv("CUSTOMER_TOP_OPPORTUNITIES_SOURCE", "legacy.catalog.top_opps")
+    monkeypatch.setenv("CUSTOMER_CONTACTS_SOURCE", "legacy.catalog.contacts")
+
+    assert config.get_customer_databricks_host() == "https://adb-legacy.azuredatabricks.net"
+    assert config.get_customer_top_opportunities_source() == "legacy.catalog.top_opps"
+    assert config.get_customer_contacts_source() == "legacy.catalog.contacts"

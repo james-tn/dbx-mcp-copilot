@@ -1,5 +1,9 @@
 # DAP Simulator Auth Experiment Findings
 
+> Status: experiment notes.
+> This captures the DAP simulator findings and customer-question framing, not
+> the mainline runtime deployment path.
+
 ## Summary
 
 This repo now includes a simulated DAP-compatible FastAPI app under:
