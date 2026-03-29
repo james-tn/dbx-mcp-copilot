@@ -43,7 +43,7 @@ jobs:
       package_relevant: ${{ steps.classify.outputs.package_relevant }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4.0.1
         id: filter
         with:
           filters: |
