@@ -68,12 +68,12 @@ jobs:
       AZURE_OPENAI_AUTO_ROLE_ASSIGN: "false"
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install validation dependencies
         run: python -m pip install -r mvp/agents/requirements.txt
-      - uses: azure/login@v2
+      - uses: azure/login@v3
         with:
           client-id: ${{ env.AZURE_CLIENT_ID }}
           tenant-id: ${{ env.AZURE_TENANT_ID }}
@@ -145,7 +145,7 @@ jobs:
           profile=secure-mock
           runtime_env=${{ runner.temp }}/integration.env
           EOF
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: integration-deployment-summary-${{ github.sha }}
           path: |
