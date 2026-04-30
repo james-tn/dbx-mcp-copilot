@@ -253,7 +253,69 @@ missing admin consent as a **blocking failure**. Do not continue with service
 deployment and hope sign-in will work later. Failing fast here produces a much
 more repeatable operator experience.
 
-#### 4. Azure Bot OAuth connection
+#### 4. Azure Bot Service resource
+
+Bot Service is **not a runtime** — your gateway code runs in App Service / Container Apps / wherever you choose. Bot Service is a thin Azure resource that does three things:
+
+1. **Registers your AAD app as a bot identity** with Microsoft's channel infrastructure (Teams, M365, Web Chat). Without this registration, channels have no way to deliver activities to your endpoint.
+2. **Brokers between many channels and your single HTTPS endpoint.** Each channel has its own protocol; Bot Service normalizes them into Bot Framework Activity JSON before posting to your gateway.
+3. **Authenticates the channel ↔ gateway link in both directions.** Inbound activities are signed by Microsoft's channel service; outbound replies and proactive messages are sent via the Bot Framework Connector API authenticated with `BOT_APP_ID` + secret.
+
+##### Create the Bot Service resource
+
+```bash
+az bot create \
+  --resource-group $RESOURCE_GROUP \
+  --name $BOT_RESOURCE_NAME \
+  --appid $BOT_APP_ID                       # binds to the AAD app from §2
+  --app-type SingleTenant \
+  --tenant-id $TENANT_ID \
+  --endpoint https://<gateway-fqdn>/api/messages \
+  --sku F0
+```
+
+The `--appid` flag is the link. From this moment on, channels post activities signed for `BOT_APP_ID`, and your gateway must be initialized with the same `BOT_APP_ID` + `BOT_APP_PASSWORD` so the SDK can validate inbound JWTs and authenticate outbound calls.
+
+##### Enable the channel
+
+The channel surface that delivers M365 conversations to your bot needs to be explicitly enabled — it is not implied by creating the bot resource or by publishing the manifest.
+
+```bash
+az bot msteams create \
+  --resource-group $RESOURCE_GROUP \
+  --name $BOT_RESOURCE_NAME
+```
+
+Verify after the fact:
+
+```bash
+az bot show -g $RESOURCE_GROUP -n $BOT_RESOURCE_NAME \
+  --query "properties.configuredChannels"
+```
+
+The M365 channel (the surface that routes Microsoft 365 conversations into the bot) is enabled in the Azure portal under **Bot Service → Channels** today; there is no first-class `az bot` subcommand for it. Forgetting this toggle is a classic "everything looks right but M365 doesn't see my bot" failure mode — verify it is on before debugging anywhere else.
+
+##### Inbound and outbound auth
+
+| Direction | What happens | What you provide |
+|---|---|---|
+| **Inbound** (channel → gateway `/api/messages`) | Channel posts activity signed with a JWT issued by Microsoft's bot service; SDK validates `aud == BOT_APP_ID`. | `BOT_APP_ID` to the SDK at startup. No secret needed for inbound validation. |
+| **Outbound** (gateway → channel) | Gateway posts to `https://smba.trafficmanager.net/.../conversations/.../activities` (the Bot Framework Connector API); SDK obtains a token via `BOT_APP_ID` + `BOT_APP_PASSWORD`. | `BOT_APP_ID` + `BOT_APP_PASSWORD`. Used for replies, proactive messages, and long-running interim updates. |
+
+If `/api/messages` returns 401 in production, the most common cause is the gateway being initialized with the wrong `BOT_APP_ID` for the bot resource that's actually delivering activities. Check this first.
+
+##### Channel and gateway endpoint can be updated
+
+Both the messaging endpoint and channel configuration can be updated after creation without re-creating the resource:
+
+```bash
+az bot update -g $RESOURCE_GROUP -n $BOT_RESOURCE_NAME \
+  --endpoint https://<new-gateway-fqdn>/api/messages
+```
+
+This makes blue/green gateway swaps and region migrations a single CLI call.
+
+#### 5. Azure Bot OAuth connection
 
 Create an OAuth connection on the Azure Bot resource so the Microsoft Agents SDK
 can perform silent token exchange for the gateway-to-service hop:
@@ -689,7 +751,7 @@ flowchart TD
 |------|------|------------|
 | 1 | Create service app + bot app in Entra ID | Tenant access |
 | 2 | Grant admin consent for both delegated permission chains | Step 1 |
-| 3 | Create Azure Bot resource, configure OAuth connection (`SERVICE_CONNECTION`) | Steps 1-2 |
+| 3 | Create Azure Bot resource (`--appid` binds to bot app), enable channel, configure OAuth connection (`SERVICE_CONNECTION`) | Steps 1-2 |
 | 4 | Provision downstream resources (databases, APIs, warehouses) | Independent |
 | 5 | Build container image, deploy Agentic Service to ACA | Steps 1-4 |
 | 6 | Validate `/healthz`, session creation, first turn, OBO to downstream | Step 5 |
